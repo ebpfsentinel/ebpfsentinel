@@ -1,0 +1,536 @@
+# This is Suricata version 8.0.8 RELEASE, run by make-inspect-verdicts.py; do not edit by hand.
+# 'rule SID payload|hdr OPTIONS', or 'rule SID refused OPTIONS' when
+# Suricata does not load it, then 'SID N match|nomatch HEX' per payload,
+# HEX being the buffer: the payload, or the TCP header of a hdr case.
+rule 1000 payload content:"abc";
+1000 0 match 616263
+1000 1 match 78786162637878
+1000 2 nomatch 414243
+1000 3 nomatch 6162
+rule 1001 payload content:"abc"; nocase;
+1001 0 match 78784142437878
+1001 1 match 614263
+1001 2 nomatch 616264
+rule 1002 payload content:"|00 01|ab|ff|";
+1002 0 match 00016162ff
+1002 1 match 7800016162ff78
+1002 2 nomatch 00016162fe
+rule 1003 payload content:"abc"; offset:2;
+1003 0 match 7878616263
+1003 1 nomatch 78616263
+1003 2 match 78787878616263
+rule 1004 payload content:"abc"; depth:3;
+1004 0 match 616263
+1004 1 nomatch 78616263
+rule 1005 payload content:"abc"; depth:5;
+1005 0 match 7878616263
+1005 1 nomatch 787878616263
+rule 1006 payload content:"abc"; offset:2; depth:3;
+1006 0 match 7878616263
+1006 1 nomatch 787878616263
+1006 2 nomatch 616263
+rule 1007 payload content:"abc"; offset:2; depth:4;
+1007 0 match 787878616263
+1007 1 nomatch 78787878616263
+rule 1008 payload content:"abc"; startswith;
+1008 0 match 61626378
+1008 1 nomatch 78616263
+rule 1009 payload content:"abc"; endswith;
+1009 0 match 78616263
+1009 1 nomatch 61626378
+rule 1010 payload content:"abc"; startswith; endswith;
+1010 0 match 616263
+1010 1 nomatch 616263616263
+rule 1011 payload content:!"abc";
+1011 0 match 78797a
+1011 1 nomatch 7861626378
+rule 1012 payload content:!"abc"; depth:3;
+1012 0 match 78616263
+1012 1 nomatch 61626378
+rule 1013 payload content:!"abc"; offset:2;
+1013 0 match 6162637878
+1013 1 nomatch 7878616263
+rule 1014 payload content:"ab"; content:"cd"; distance:0;
+1014 0 match 61626364
+1014 1 match 616278786364
+1014 2 nomatch 63646162
+rule 1015 payload content:"ab"; content:"cd"; distance:2;
+1015 0 match 616278786364
+1015 1 nomatch 6162786364
+1015 2 nomatch 61626364
+rule 1016 payload content:"ab"; content:"cd"; within:2;
+1016 0 match 61626364
+1016 1 nomatch 6162786364
+rule 1017 payload content:"ab"; content:"cd"; within:3;
+1017 0 match 6162786364
+1017 1 nomatch 616278786364
+rule 1018 payload content:"ab"; content:"cd"; distance:1; within:3;
+1018 0 match 6162786364
+1018 1 nomatch 61626364
+1018 2 match 616278786364
+rule 1019 payload content:"ab"; content:"cd"; distance:1; within:2;
+1019 0 match 6162786364
+1019 1 nomatch 616278786364
+rule 1020 payload content:"abcd"; content:"cd"; distance:-2;
+1020 0 match 61626364
+1020 1 match 6162636478
+rule 1021 payload content:"abcd"; content:"bc"; distance:-3; within:3;
+1021 0 match 61626364
+1021 1 match 7861626364
+rule 1022 payload content:"cd"; content:"ab"; distance:-4;
+1022 0 match 61626364
+1022 1 nomatch 78786364
+rule 1023 payload content:"ab"; content:!"cd"; distance:0;
+1023 0 match 61627878
+1023 1 nomatch 616278786364
+1023 2 match 63646162
+rule 1024 payload content:"ab"; content:!"cd"; within:4;
+1024 0 nomatch 616278786364
+1024 1 match 61627878786364
+1024 2 match 6162
+rule 1025 payload content:"ab"; content:!"cd"; distance:0; within:2;
+1025 0 nomatch 61626364
+1025 1 match 6162786364
+rule 1026 payload content:"ab"; content:"cd"; distance:0; content:"ef"; distance:0;
+1026 0 match 616263646566
+1026 1 nomatch 616265666364
+1026 2 nomatch 61626364
+rule 1027 payload content:"a"; content:"b"; within:1;
+1027 0 match 6178786162
+1027 1 nomatch 61787861
+1027 2 match 6162
+rule 1028 payload content:"ab"; content:"cd"; within:2; content:"ef"; within:2;
+1028 0 match 616263647878616263646566
+1028 1 nomatch 61626364787861626364
+rule 1029 payload content:"x"; content:"y"; distance:0; within:1; content:"z"; distance:0; within:1;
+1029 0 match 78796178797a
+1029 1 nomatch 78797879617a
+rule 1030 payload content:"a"; content:!"b"; within:1;
+1030 0 nomatch 61626162
+1030 1 match 61626163
+1030 2 nomatch 6162
+rule 1031 payload content:"a"; content:"b"; distance:2; within:1;
+1031 0 match 61617862
+1031 1 match 61787862
+rule 1032 payload content:"ab"; isdataat:2,relative;
+1032 0 match 61627878
+1032 1 nomatch 616278
+rule 1033 payload content:"ab"; isdataat:!1,relative;
+1033 0 match 6162
+1033 1 nomatch 616278
+rule 1034 payload isdataat:4;
+1034 0 match 6162636465
+1034 1 nomatch 61626364
+rule 1035 payload content:"ab"; isdataat:!2,relative;
+1035 0 match 616278
+1035 1 nomatch 61627878
+rule 1036 payload content:"ab"; endswith; content:"ab"; distance:-2;
+1036 0 match 78786162
+rule 1037 payload dsize:4;
+1037 0 match 61626364
+1037 1 nomatch 616263
+rule 1038 payload dsize:>3;
+1038 0 match 61626364
+1038 1 nomatch 616263
+rule 1039 payload dsize:<3;
+1039 0 match 6162
+1039 1 nomatch 616263
+rule 1040 payload dsize:2<>5;
+1040 0 match 616263
+1040 1 nomatch 6162
+1040 2 nomatch 6162636465
+rule 1041 payload dsize:!4;
+1041 0 match 616263
+1041 1 nomatch 61626364
+rule 1042 payload byte_test:1,=,65,0;
+1042 0 match 417878
+1042 1 nomatch 427878
+rule 1043 payload byte_test:2,>,256,0;
+1043 0 match 0102
+1043 1 nomatch 0100
+rule 1044 payload byte_test:2,>,256,0,little;
+1044 0 match 0201
+1044 1 nomatch 0001
+rule 1045 payload byte_test:1,&,3,0;
+1045 0 match 02
+1045 1 nomatch 04
+rule 1046 payload byte_test:1,^,3,0;
+1046 0 match 02
+1046 1 nomatch 03
+rule 1047 payload byte_test:1,!=,65,0;
+1047 0 match 42
+1047 1 nomatch 41
+rule 1048 payload byte_test:3,=,123,0,string,dec;
+1048 0 match 313233
+1048 1 nomatch 313234
+rule 1049 payload byte_test:2,=,255,0,string,hex;
+1049 0 match 6666
+1049 1 match 4646
+1049 2 nomatch 6665
+rule 1050 payload byte_test:3,=,8,0,string,oct;
+1050 0 match 303130
+1050 1 nomatch 303131
+rule 1051 payload content:"ab"; byte_test:1,=,1,1,relative;
+1051 0 match 61627801
+1051 1 nomatch 616201
+rule 1052 payload byte_test:4,=,1,0;
+1052 0 match 00000001
+1052 1 nomatch 000001
+rule 1053 payload byte_test:1,<,10,0,bitmask 0xf0;
+1053 0 match 0f
+1053 1 nomatch f0
+rule 1054 payload byte_test:1,>=,10,0;
+1054 0 match 0a
+1054 1 nomatch 09
+rule 1055 payload byte_test:1,<=,10,0;
+1055 0 match 0a
+1055 1 nomatch 0b
+rule 1056 payload content:"ab"; byte_test:1,=,1,-1,relative;
+1056 0 nomatch 61016262
+1056 1 nomatch 616201
+rule 1057 payload byte_jump:1,0; content:"x"; within:1;
+1057 0 match 02616178
+1057 1 nomatch 02617861
+rule 1058 payload byte_jump:1,0,relative; content:"x"; within:1;
+1058 0 match 016178
+rule 1059 payload content:"ab"; byte_jump:1,0,relative; content:"x"; within:1;
+1059 0 match 6162017978
+1059 1 nomatch 6162017879
+rule 1060 payload byte_jump:1,0,multiplier 2; content:"x"; within:1;
+1060 0 match 026161616178
+1060 1 nomatch 02616178
+rule 1061 payload byte_jump:1,0,align; content:"x"; within:1;
+1061 0 nomatch 01616178
+1061 1 nomatch 016178
+rule 1062 payload byte_jump:1,0,from_beginning; content:"x"; within:1;
+1062 0 match 03616178
+1062 1 nomatch 0361616178
+rule 1063 payload byte_jump:1,0,post_offset 2; content:"x"; within:1;
+1063 0 match 0161626278
+1063 1 nomatch 016178
+rule 1064 payload byte_jump:2,0,little; content:"x"; within:1;
+1064 0 match 01006178
+rule 1065 payload byte_jump:2,0,string,dec; content:"x"; within:1;
+1065 0 match 3032616278
+rule 1066 payload byte_jump:1,0; isdataat:!1,relative;
+1066 0 match 026162
+1066 1 nomatch 02616263
+rule 1067 payload byte_jump:1,0,from_end,post_offset -1; content:"x"; within:1;
+1067 0 match 00616278
+rule 1068 payload byte_jump:1,0; byte_jump:1,0,relative; content:"x"; within:1;
+1068 0 match 0161016278
+rule 1069 payload byte_extract:1,0,n; content:"x"; distance:n; within:1;
+1069 0 match 02616178
+1069 1 nomatch 026178
+rule 1070 payload byte_extract:1,0,n; content:"ab"; depth:n;
+1070 0 match 036162
+1070 1 nomatch 02786162
+rule 1071 payload byte_extract:1,0,n; content:"ab"; offset:n;
+1071 0 match 02786162
+1071 1 nomatch 026162
+rule 1072 payload byte_extract:1,0,n; byte_test:1,=,n,1;
+1072 0 match 0707
+1072 1 nomatch 0708
+rule 1073 payload byte_extract:1,0,n,multiplier 2; content:"x"; distance:n; within:1;
+1073 0 match 01616178
+rule 1074 payload byte_extract:2,0,n,string,dec; content:"x"; distance:n; within:1;
+1074 0 match 303361616178
+1074 1 nomatch 3033616178
+rule 1075 payload content:"ab"; byte_extract:1,0,n,relative; content:"x"; distance:n; within:1;
+1075 0 match 6162017978
+rule 1076 payload byte_extract:1,0,n; isdataat:n;
+1076 0 match 026162
+1076 1 nomatch 036162
+rule 1077 payload byte_math:bytes 1,offset 0,oper +,rvalue 1,result r; byte_test:1,=,r,1;
+1077 0 match 0102
+1077 1 nomatch 0101
+rule 1078 payload byte_math:bytes 1,offset 0,oper *,rvalue 2,result r; byte_test:1,=,r,1;
+1078 0 match 0306
+rule 1079 payload byte_math:bytes 1,offset 0,oper -,rvalue 1,result r; byte_test:1,=,r,1;
+1079 0 match 0302
+rule 1080 payload byte_math:bytes 1,offset 0,oper /,rvalue 2,result r; byte_test:1,=,r,1;
+1080 0 match 0703
+rule 1081 payload byte_math:bytes 1,offset 0,oper <<,rvalue 1,result r; byte_test:1,=,r,1;
+1081 0 match 0306
+rule 1082 payload byte_math:bytes 1,offset 0,oper >>,rvalue 1,result r; byte_test:1,=,r,1;
+1082 0 match 0603
+rule 1083 payload byte_extract:1,0,v; byte_math:bytes 1,offset 1,oper +,rvalue v,result r; byte_test:1,=,r,2;
+1083 0 match 020305
+rule 1084 payload content:"ab"; byte_math:bytes 1,offset 0,oper +,rvalue 1,result r,relative; byte_test:1,=,r,3;
+1084 0 match 61620405
+rule 1085 payload byte_math:bytes 1,offset 0,oper /,rvalue 0,result r; byte_test:1,=,0,1;
+1085 0 nomatch 0400
+rule 1086 payload entropy:value >7;
+1086 0 match 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+1086 1 nomatch 6161616161616161
+rule 1087 payload entropy:value <1;
+1087 0 match 6161616161616161
+1087 1 nomatch 6162636465666768
+rule 1088 payload entropy:bytes 4,value <1;
+1088 0 match 6161616162636465666768
+1088 1 nomatch 6162636461616161
+rule 1089 payload entropy:offset 4,value <1;
+1089 0 match 6162636461616161
+1089 1 nomatch 6161616162636465
+rule 1090 refused content:"x"; entropy:value <1,relative;
+rule 1091 payload entropy:value 2;
+1091 0 match 61626364
+1091 1 nomatch 61616262
+rule 1092 payload pcre:"/abc/";
+1092 0 match 78786162637878
+1092 1 nomatch 7878414243
+rule 1093 payload pcre:"/abc/i";
+1093 0 match 7878414243
+rule 1094 payload pcre:"/^abc/";
+1094 0 match 61626378
+1094 1 nomatch 78616263
+rule 1095 payload pcre:"/abc$/";
+1095 0 match 78616263
+1095 1 match 786162630a
+1095 2 nomatch 786162630a0a
+rule 1096 payload pcre:"/abc$/E";
+1096 0 match 78616263
+1096 1 nomatch 786162630a
+rule 1097 payload pcre:"/a.c/";
+1097 0 match 616263
+1097 1 nomatch 610a63
+rule 1098 payload pcre:"/a.c/s";
+1098 0 match 610a63
+rule 1099 payload pcre:"/^b/m";
+1099 0 match 610a62
+1099 1 nomatch 6162
+rule 1100 payload pcre:"/a b c/x";
+1100 0 match 616263
+rule 1101 payload pcre:"/abc/A";
+1101 0 match 61626378
+1101 1 nomatch 78616263
+rule 1102 payload pcre:"/a.+c/";
+1102 0 match 6162636263
+rule 1103 payload pcre:"/a.+?c/G";
+1103 0 match 6162636263
+rule 1104 payload pcre:"/(?<=x)abc/";
+1104 0 match 78616263
+1104 1 nomatch 79616263
+rule 1105 payload pcre:"/abc(?!d)/";
+1105 0 match 61626365
+1105 1 nomatch 61626364
+rule 1106 payload pcre:"/(a)b\1/";
+1106 0 match 616261
+1106 1 nomatch 616262
+rule 1107 payload pcre:"/\x00\xff/";
+1107 0 match 00ff
+1107 1 nomatch 00fe
+rule 1108 payload pcre:!"/abc/";
+1108 0 match 78797a
+1108 1 nomatch 616263
+rule 1109 payload pcre:"/[\x80-\xff]{2}/";
+1109 0 match 80ff
+1109 1 nomatch 807f
+rule 1110 payload pcre:"/\w+\d/";
+1110 0 match 616231
+1110 1 nomatch e931
+rule 1111 payload pcre:"/[a-z]+/i";
+1111 0 match 414243
+rule 1112 payload pcre:"/\x0d\x0a$/";
+1112 0 match 780d0a
+rule 1113 payload content:"ab"; pcre:"/^cd/R";
+1113 0 match 61626364
+1113 1 nomatch 6162786364
+rule 1114 payload content:"ab"; pcre:"/cd/R";
+1114 0 match 6162786364
+1114 1 nomatch 63646162
+rule 1115 payload pcre:"/ab/"; content:"cd"; distance:0;
+1115 0 match 61626364
+1115 1 nomatch 63646162
+rule 1116 payload pcre:"/ab/"; content:"cd"; within:2;
+1116 0 match 61626364
+1116 1 nomatch 6162786364
+rule 1117 payload pcre:"/a./"; content:"x"; within:1;
+1117 0 match 616279616378
+1117 1 nomatch 616279616379
+rule 1118 payload pcre:"/ab/"; pcre:"/^cd/R";
+1118 0 match 61626364
+1118 1 nomatch 6162786364
+rule 1119 payload content:"ab"; pcre:!"/^cd/R";
+1119 0 match 61627864
+1119 1 nomatch 61626364
+rule 1120 payload pcre:"/a(b+)/"; content:"c"; within:1;
+1120 0 match 6162626263
+rule 1121 payload content:"ab"; pcre:"/^x/R"; content:"y"; distance:0;
+1121 0 match 61627861627879
+1121 1 nomatch 616279616278
+rule 1122 payload content:"x"; pcre:"/^\d+/R"; content:"z"; within:1;
+1122 0 match 7831327a
+1122 1 nomatch 783132617a
+rule 1123 payload content:"x"; pcre:"/^.{2}/sR"; content:"z"; within:1;
+1123 0 match 7861627a
+1123 1 nomatch 78617a
+rule 1124 payload content:"ab"; isdataat:2,relative; pcre:"/^cd/R";
+1124 0 match 61626364
+rule 1125 payload pcre:"/abc/"; isdataat:1,relative;
+1125 0 match 61626378
+1125 1 nomatch 616263
+rule 1126 payload content:"ab"; fast_pattern; content:"cd"; distance:0;
+1126 0 match 61626364
+1126 1 nomatch 63646162
+rule 1127 payload content:"ab"; content:"cdef"; fast_pattern:only;
+1127 0 match 616263646566
+1127 1 nomatch 63646566
+rule 1128 payload content:"ab"; content:"cdef"; fast_pattern:1,2;
+1128 0 match 616263646566
+rule 1129 payload content:"ab"; rawbytes;
+1129 0 match 6162
+rule 1130 payload base64_decode; base64_data; content:"hello";
+1130 0 match 614756736247383d
+1130 1 match 614756736247393d
+rule 1131 payload content:"k="; base64_decode:relative; base64_data; content:"hello";
+1131 0 match 786b3d614756736247383d
+rule 1132 payload base64_decode:bytes 4; base64_data; content:"hel";
+1132 0 match 614756736247383d
+rule 1133 payload base64_decode:offset 3; base64_data; content:"hello";
+1133 0 match 787878614756736247383d
+rule 1134 payload base64_decode:bytes 4; base64_data; content:"hello";
+1134 0 nomatch 614756736247383d
+rule 1135 payload base64_decode; base64_data; content:"hello"; startswith;
+1135 0 match 614756736247383d
+rule 1136 payload base64_decode; base64_data; pcre:"/^hel+o$/";
+1136 0 match 614756736247383d
+rule 1137 payload content:"ab"; content:"cd"; content:"ef";
+1137 0 match 656663646162
+1137 1 nomatch 61626364
+rule 1138 payload content:"ab"; offset:1; content:"cd"; offset:4;
+1138 0 match 786162786364
+1138 1 nomatch 616278786364
+rule 1139 payload content:"ab"; content:"ab"; distance:0;
+1139 0 match 61626162
+1139 1 nomatch 6162
+rule 1140 payload content:"aa"; content:"aa"; distance:0;
+1140 0 nomatch 616161
+1140 1 match 61616161
+rule 1141 refused content:"ab"; depth:2; content:"cd"; distance:0; depth:6;
+rule 1142 refused content:"ab"; content:"cd"; offset:3; distance:0;
+rule 1143 payload content:"ab"; distance:1;
+1143 0 match 786162
+1143 1 nomatch 6162
+rule 1144 payload content:"ab"; within:3;
+1144 0 match 786162
+1144 1 nomatch 78786162
+rule 1145 payload byte_jump:1,0,align; content:"x"; within:1;
+1145 0 nomatch 0161616178
+1145 1 nomatch 0261616178
+rule 1146 payload byte_jump:1,0,from_end,post_offset -2; content:"x"; within:1;
+1146 0 match 0161626378
+1146 1 nomatch 0061626378
+rule 1147 payload byte_jump:1,0; isdataat:!1,relative;
+1147 0 nomatch 096162
+rule 1148 payload byte_test:1,=,0x41,0;
+1148 0 match 41
+rule 1149 payload content:"abc"; nocase; content:!"DEF"; nocase; distance:0;
+1149 0 nomatch 414243646566
+1149 1 match 41424378797a
+rule 1150 payload content:"abc"; offset:10;
+1150 0 nomatch 616263
+rule 1151 payload byte_test:2,=,12,0,string,dec;
+1151 0 match 313278
+1151 1 nomatch 3178
+rule 1152 payload byte_extract:1,0,n; content:"x"; distance:n; within:1; content:"y"; distance:n; within:1;
+1152 0 match 0161786179
+1152 1 nomatch 01617879
+rule 1153 payload pcre:"/b/"; content:"a";
+1153 0 match 6261
+1153 1 nomatch 62
+rule 1154 payload content:"ab"; pcre:"/^cd/R"; pcre:"/^ef/R";
+1154 0 match 616263646566
+1154 1 nomatch 61626364786566
+rule 1155 payload pcre:"/a/"; pcre:"/b/R"; pcre:"/c/R";
+1155 0 match 61636263
+1155 1 nomatch 636261
+rule 1156 refused content:"abc"; within:2;
+rule 1157 payload content:"ab"; content:"c"; distance:-1; within:2;
+1157 0 match 616263
+rule 1158 payload content:"a"; content:"b"; distance:0; within:1; isdataat:!1,relative;
+1158 0 match 61626162
+1158 1 nomatch 616278
+rule 1159 payload byte_jump:1,0,align; content:"x"; within:1;
+1159 0 match 016161616178
+1159 1 match 05616161616161616178
+rule 1160 payload content:"ab"; byte_test:1,=,1,0,relative; content:"c"; within:1;
+1160 0 nomatch 61620163
+1160 1 nomatch 61626301
+rule 1161 payload content:"ab"; byte_math:bytes 1,offset 0,oper +,rvalue 1,result r,relative; content:"c"; within:1;
+1161 0 match 61620163
+1161 1 nomatch 61626301
+rule 1162 payload content:"ab"; content:!"x"; within:1; content:"c"; within:1;
+1162 0 match 616263
+1162 1 nomatch 61627963
+rule 1163 payload byte_math:bytes 1,offset 0,oper +,rvalue 1,result r,bitmask 0x0f; byte_test:1,=,r,1;
+1163 0 match f102
+1163 1 nomatch f1f2
+1163 2 nomatch f110
+rule 1164 payload byte_math:bytes 1,offset 0,oper -,rvalue 2,result r; byte_test:1,=,r,1;
+1164 0 nomatch 01ff
+rule 1165 payload byte_extract:1,0,n,align 4; content:"x"; distance:n; within:1;
+1165 0 match 016161616178
+1165 1 nomatch 016178
+rule 1166 payload byte_extract:1,0,n,multiplier 3,align 4; content:"x"; distance:n; within:1;
+1166 0 match 016161616178
+rule 1167 payload byte_test:1,!&,3,0;
+1167 0 match 04
+1167 1 nomatch 01
+rule 1168 payload pcre:"/a/"; content:"b"; within:1;
+1168 0 match 61636162
+rule 1169 payload entropy:offset 10,value <1;
+1169 0 nomatch 616263
+rule 1170 payload entropy:bytes 20,value <1;
+1170 0 nomatch 61616161
+rule 1171 payload base64_decode; base64_data; content:"hi";
+1171 0 match 61476b
+1171 1 match 61476b782161476b3d
+rule 1172 payload base64_decode:relative; base64_data; content:"hi";
+1172 0 match 61476b3d
+rule 1173 hdr tcp.hdr; to_lowercase; content:"hello world";
+1173 0 match 766d4ecd000003e8000000019018ffff5c640000010101fe0d48654c4c6f20576f726c64
+1173 1 nomatch 766e4ecd000003e8000000019018ffff1b8400000101fe0e48654c4c6f2020576f726c64
+rule 1174 hdr tcp.hdr; to_uppercase; content:"HELLO";
+1174 0 match 766f4ece000003e8000000017018ffff5f58000001fe0768656c6c6f
+rule 1175 hdr tcp.hdr; strip_whitespace; content:"abcd";
+1175 0 match 76704ecf000003e8000000018018ffffece30000fe0c61206209630a0d0b0c64
+1175 1 nomatch 76714ecf000003e8000000017018ffffcd71000001fe076100626364
+rule 1176 hdr tcp.hdr; compress_whitespace; content:"a b c";
+1176 0 nomatch 76724ed0000003e8000000018018ffff91a40000010101fe0961202062090a63
+1176 1 nomatch 76734ed0000003e8000000017018ffffb9c600000101fe0661622063
+rule 1177 hdr tcp.hdr; url_decode; content:"a b/c";
+1177 0 match 76744ed1000003e8000000018018ffff5c05000001fe0b612532306225324663
+1177 1 match 76754ed1000003e8000000018018ffff67350000010101fe09612b6225326663
+1177 2 nomatch 76764ed1000003e8000000018018ffff4f340000010101fe096125327a622f63
+rule 1178 hdr tcp.hdr; url_decode; content:"%2z";
+1178 0 match 76774ed2000003e8000000017018ffffffef0000010101fe0525327a
+rule 1179 hdr tcp.hdr; url_decode; content:"x%";
+1179 0 match 76784ed3000003e8000000016018ffffd4650000fe047825
+rule 1180 hdr tcp.hdr; xor:"0102"; content:"|60 60|";
+1180 0 match 76794ed4000003e8000000016018ffffeb260000fe046162
+1180 1 nomatch 767a4ed4000003e8000000016018ffffea260000fe046261
+rule 1181 hdr tcp.hdr; to_md5; content:"|d09fcd09561eb6015f8e1c184dc4a92e|";
+1181 0 match 767b4ed5000003e8000000017018ffffcfc30000010101fe05616263
+rule 1182 hdr tcp.hdr; to_sha1; content:"|2f2af4708a06a0f636032d4f308ad6c9d9e8120e|";
+1182 0 match 767c4ed6000003e8000000017018ffffcfc10000010101fe05616263
+rule 1183 hdr tcp.hdr; to_sha256; content:"|9a75ce21b237b4617753e7c35a24baf8d94cd43dab00ad998c22fa45f3e7a830|";
+1183 0 match 767d4ed7000003e8000000017018ffffcfbf0000010101fe05616263
+rule 1184 hdr tcp.hdr; to_md5; bsize:16;
+1184 0 match 767e4ed8000003e8000000017018ffffcfbd0000010101fe05616263
+rule 1185 hdr tcp.hdr; pcrexform:"x(ab+)y"; content:"abb"; startswith; endswith;
+1185 0 match 767f4ed9000003e8000000017018ffff6d2d000001fe077861626279
+1185 1 nomatch 76804ed9000003e8000000017018ffff609b00000101fe0678616279
+rule 1186 hdr tcp.hdr; pcrexform:"x(ab+)y"; content:"xabby";
+1186 0 nomatch 76814eda000003e8000000017018ffff6d29000001fe07786162627a
+rule 1187 hdr tcp.hdr; pcrexform:"(q+)"; content:"qq"; startswith; endswith;
+1187 0 match 76824edb000003e8000000017018ffff689e00000101fe0661717162
+rule 1188 refused tcp.hdr; to_lowercase; to_md5; content:"|7bef4191573c2eacd3112744c5eea2c6|";
+rule 1189 hdr tcp.hdr; from_base64; content:"hello";
+1189 0 nomatch 76844edd000003e8000000018018ffffd92600000101fe0a614756736247383d
+rule 1190 hdr tcp.hdr; from_base64:offset 0; content:"hello";
+1190 0 nomatch 76854ede000003e8000000018018ffffd92400000101fe0a614756736247383d
+rule 1191 hdr tcp.hdr; compress_whitespace; content:"a b|09|c";
+1191 0 match 76864edf000003e8000000018018ffff91810000010101fe0961202062090a63
+rule 1192 hdr tcp.hdr; compress_whitespace; content:"a|09|b";
+1192 0 match 76874ee0000003e8000000017018ffffb9fc00000101fe0661092062

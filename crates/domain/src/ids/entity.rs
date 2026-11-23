@@ -253,8 +253,8 @@ impl AddressMatch {
 }
 
 /// What a rule compiled from Suricata syntax carries beyond the native
-/// fields: where it came from, the addresses it names, and the content
-/// groups that must all match beside the rule's own `pattern`.
+/// fields: where it came from, the addresses it names, and the matches that
+/// decide it on the payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportedRule {
     /// The signature id the rule carries in its ruleset.
@@ -270,12 +270,25 @@ pub struct ImportedRule {
     pub src: AddressMatch,
     #[serde(default, skip_serializing_if = "AddressMatch::is_any")]
     pub dst: AddressMatch,
-    /// Byte patterns that must each match the payload as well as `pattern`.
-    /// Two contents that are not anchored to each other are independent in
-    /// the source syntax, and a single expression would impose an order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub also_patterns: Vec<String>,
+    /// The rule's matches, run over the payload with Suricata's cursor. The
+    /// rule's `pattern` only names it for a reader; this decides it.
+    #[serde(skip)]
+    pub inspection: Option<Inspection>,
 }
+
+/// A compiled signature's matches, shared by the per-port rules one
+/// signature becomes. Two of them compare equal: they are compiled from the
+/// sid and revision the rule already compares.
+#[derive(Debug, Clone)]
+pub struct Inspection(pub std::sync::Arc<super::sig::inspect::Program>);
+
+impl PartialEq for Inspection {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Inspection {}
 
 impl ImportedRule {
     /// Whether the event's addresses satisfy both sides.

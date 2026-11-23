@@ -21,10 +21,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use ebpf_common::event::MAX_L7_PAYLOAD;
-
-use super::engine::compile_pattern;
-use super::entity::{AddressMatch, IdsRule, ImportedRule, ThresholdConfig, ThresholdType, TrackBy};
+use super::entity::{
+    AddressMatch, IdsRule, ImportedRule, Inspection, ThresholdConfig, ThresholdType, TrackBy,
+};
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
 use crate::firewall::entity::IpNetwork;
 
@@ -35,9 +34,6 @@ pub const MAX_PORTS_PER_RULE: usize = 16;
 
 /// How deep one variable may refer to another before the chain is refused.
 pub(crate) const MAX_VARIABLE_DEPTH: usize = 8;
-
-/// The longest payload the agent captures, which bounds every offset.
-const PAYLOAD_LIMIT: usize = MAX_L7_PAYLOAD;
 
 // ── Keyword table ────────────────────────────────────────────────
 
@@ -122,7 +118,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "content",
         support: Support::Compiled,
-        note: "Literal and `|hex|` bytes. Contents chained by `distance` or `within` compile into one expression; independent contents must each match.",
+        note: "Literal and `|hex|` bytes, negated with `!`. A match moves the cursor to its end, and when a later match fails the engine tries the next occurrence, as Suricata does.",
     },
     KeywordSupport {
         keyword: "nocase",
@@ -132,7 +128,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "offset",
         support: Support::Compiled,
-        note: "From the start of the captured payload, up to its 2048-byte limit.",
+        note: "From the start of the buffer.",
     },
     KeywordSupport {
         keyword: "depth",
@@ -142,22 +138,22 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "distance",
         support: Support::Compiled,
-        note: "Relative to the previous content. A negative distance is refused, and so is a distance relative to a pcre.",
+        note: "From the cursor the previous content or pcre left, negative included.",
     },
     KeywordSupport {
         keyword: "within",
         support: Support::Compiled,
-        note: "Relative to the previous content. A window shorter than the content is refused, and so is a window relative to a pcre.",
+        note: "From the cursor the previous content or pcre left. A window shorter than the content is refused, as Suricata refuses it.",
     },
     KeywordSupport {
         keyword: "startswith",
         support: Support::Compiled,
-        note: "Anchors the content to the start of the payload.",
+        note: "Anchors the content to the start of the buffer.",
     },
     KeywordSupport {
         keyword: "endswith",
         support: Support::Compiled,
-        note: "Anchors the content to the end of the payload, only as the last of its chain.",
+        note: "Anchors the content to the end of the buffer.",
     },
     KeywordSupport {
         keyword: "fast_pattern",
@@ -177,7 +173,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "pcre",
         support: Support::Compiled,
-        note: "Flags `i`, `s`, `m`, `x`, `A` and `E`. A construct the matcher does not implement, such as a backreference or a lookaround, refuses the rule; so does a buffer or relative flag.",
+        note: "PCRE2, on bytes. Flags `i`, `s`, `m`, `x`, `A`, `E`, `G` and `R`, and the buffer flags of the buffers the engine inspects; lookarounds and back-references run as Suricata runs them.",
     },
     KeywordSupport {
         keyword: "threshold",
@@ -191,13 +187,13 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "isdataat",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Absolute or relative to the cursor, negated with `!`.",
     },
     KeywordSupport {
         keyword: "bsize",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "The length of the buffer it follows.",
     },
     KeywordSupport {
         keyword: "dsize",
@@ -206,28 +202,28 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "byte_test",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Every operator, string and binary reads, endianness, `dce` read little-endian, bitmask, relative.",
     },
     KeywordSupport {
         keyword: "byte_jump",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Every option: multiplier, align, from_beginning, from_end, post_offset, relative, bitmask.",
     },
     KeywordSupport {
         keyword: "byte_extract",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Sets a variable that a later offset, depth, distance, within, isdataat or byte keyword reads. A variable read before it is set refuses the rule.",
     },
     KeywordSupport {
         keyword: "byte_math",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Every operator; a division by zero does not match. Sets a variable as byte_extract does.",
     },
     KeywordSupport {
         keyword: "entropy",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Shannon entropy in bits per byte over the bytes named; a window past the buffer does not match.",
     },
     KeywordSupport {
         keyword: "absent",
@@ -236,13 +232,13 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "base64_decode",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Decodes from the start of the buffer or from the cursor, padding optional.",
     },
     KeywordSupport {
         keyword: "base64_data",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+        support: Support::Compiled,
+        note: "Inspects what the last base64_decode produced.",
     },
     KeywordSupport {
         keyword: "asn1",
@@ -571,73 +567,73 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "to_lowercase",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "to_uppercase",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "to_md5",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "to_sha1",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "to_sha256",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "strip_whitespace",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "compress_whitespace",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "url_decode",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "header_lowercase",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "pcrexform",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "from_base64",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "dotprefix",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "strip_pseudo_headers",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "xor",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+        support: Support::Compiled,
+        note: "Runs in the inspection engine on the buffer it follows, as Suricata 8 transforms it; a rule loads once that buffer is inspected.",
     },
     KeywordSupport {
         keyword: "gunzip",
@@ -2551,7 +2547,20 @@ pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
         .parse::<u32>()
         .map_err(|_| Refused::new("sid", format!("'{}' is not a number", sid.1.trim())))?;
 
-    compile_parts(&text[..open], &options, vars).map_err(|mut refused| {
+    let inspection = super::sig::inspect::Program::compile(&signature).map_err(|mut refused| {
+        refused.sid = Some(sid);
+        refused
+    })?;
+    let pattern = label(&signature).ok_or_else(|| {
+        let mut refused = Refused::new(
+            "content",
+            "names no content or pcre; a rule on the port alone is written natively",
+        );
+        refused.sid = Some(sid);
+        refused
+    })?;
+    let inspection = Inspection(std::sync::Arc::new(inspection));
+    compile_parts(&text[..open], &options, vars, &pattern, inspection).map_err(|mut refused| {
         refused.sid = Some(sid);
         refused
     })
@@ -2561,6 +2570,8 @@ fn compile_parts(
     header: &str,
     options: &[(String, String)],
     vars: &SuricataVars,
+    pattern: &str,
+    inspection: Inspection,
 ) -> Compiled<Vec<IdsRule>> {
     let header = parse_header(header, vars)?;
     let body = compile_options(options)?;
@@ -2589,7 +2600,7 @@ fn compile_parts(
         references: body.references.clone(),
         src: header.src,
         dst: header.dst,
-        also_patterns: body.also_patterns,
+        inspection: Some(inspection),
     };
     let several = ports.len() > 1;
     let rules = ports
@@ -2608,7 +2619,7 @@ fn compile_parts(
                 protocol: Protocol::Tcp,
                 dst_port: on_destination.then_some(*port),
                 src_port: (!on_destination).then_some(*port),
-                pattern: body.pattern.clone(),
+                pattern: pattern.to_string(),
                 enabled: true,
                 threshold: body.threshold.clone(),
                 domain_pattern: None,
@@ -2623,6 +2634,45 @@ fn compile_parts(
         })
         .collect();
     Ok(rules)
+}
+
+/// What a reader sees as the rule's pattern: its first content, printable
+/// bytes as they are and the others in Suricata's `|hex|` notation, or its
+/// first pcre. The inspection program decides the rule; this only names it.
+fn label(signature: &super::sig::model::Signature) -> Option<String> {
+    use super::sig::model::Match;
+    let matches = || signature.lists.iter().flat_map(|l| l.matches.iter());
+    if let Some(bytes) = matches().find_map(|m| match m {
+        Match::Content(c) if !c.negated => Some(&c.bytes),
+        _ => None,
+    }) {
+        let mut out = String::with_capacity(bytes.len());
+        let mut hex = false;
+        for b in bytes {
+            let plain =
+                b.is_ascii_graphic() && !matches!(b, b'|' | b'"' | b'\\' | b';') || *b == b' ';
+            if plain == hex {
+                out.push('|');
+                hex = !hex;
+            } else if hex {
+                out.push(' ');
+            }
+            if plain {
+                out.push(char::from(*b));
+            } else {
+                let _ = write!(out, "{b:02X}");
+            }
+        }
+        if hex {
+            out.push('|');
+        }
+        return Some(out);
+    }
+    matches().find_map(|m| match m {
+        Match::Pcre(p) => Some(format!("/{}/{}", p.expression, p.flags)),
+        Match::Content(c) => Some(format!("!{}", String::from_utf8_lossy(&c.bytes))),
+        _ => None,
+    })
 }
 
 // ── Header ───────────────────────────────────────────────────────
@@ -3029,24 +3079,6 @@ pub(crate) fn unescape(value: &str) -> String {
     out
 }
 
-#[derive(Debug, Default)]
-struct Content {
-    bytes: Vec<u8>,
-    nocase: bool,
-    offset: Option<usize>,
-    depth: Option<usize>,
-    distance: Option<usize>,
-    within: Option<usize>,
-    startswith: bool,
-    endswith: bool,
-}
-
-impl Content {
-    fn is_relative(&self) -> bool {
-        self.distance.is_some() || self.within.is_some()
-    }
-}
-
 /// One option list's compiled meaning.
 struct Body {
     sid: u32,
@@ -3056,14 +3088,6 @@ struct Body {
     references: Vec<String>,
     severity: Severity,
     threshold: Option<ThresholdConfig>,
-    pattern: String,
-    also_patterns: Vec<String>,
-}
-
-/// A content or a pcre, in the order the rule writes them.
-enum Matcher {
-    Content(Content),
-    Pcre(String),
 }
 
 #[allow(clippy::too_many_lines)] // one arm per keyword reads better than a dispatch table
@@ -3075,7 +3099,6 @@ fn compile_options(options: &[(String, String)]) -> Compiled<Body> {
     let mut references = Vec::new();
     let mut priority: Option<u8> = None;
     let mut threshold = None;
-    let mut matchers: Vec<Matcher> = Vec::new();
 
     for (key, value) in options {
         let key = key.as_str();
@@ -3109,54 +3132,12 @@ fn compile_options(options: &[(String, String)]) -> Compiled<Body> {
                 );
             }
             "reference" => references.push(value.to_string()),
-            "metadata" | "target" | "fast_pattern" | "rawbytes" | "pkt_data" => {}
             "flow" => check_flow(value)?,
-            "content" => {
-                let (negated, value) = match value.strip_prefix('!') {
-                    Some(rest) => (true, rest.trim_start()),
-                    None => (false, value),
-                };
-                if negated {
-                    return Err(Refused::new(
-                        "content",
-                        "is negated, and a payload is matched for what it holds",
-                    ));
-                }
-                let bytes = decode_content(unquote(key, value)?)?;
-                if bytes.is_empty() {
-                    return Err(Refused::new("content", "is empty"));
-                }
-                matchers.push(Matcher::Content(Content {
-                    bytes,
-                    ..Content::default()
-                }));
-            }
-            "nocase" | "offset" | "depth" | "distance" | "within" | "startswith" | "endswith" => {
-                let Some(Matcher::Content(content)) = matchers.last_mut() else {
-                    return Err(Refused::new(key, "modifies no content before it"));
-                };
-                apply_modifier(content, key, value)?;
-            }
-            "pcre" => matchers.push(Matcher::Pcre(compile_pcre(unquote(key, value)?)?)),
             "threshold" => threshold = Some(parse_threshold(value)?),
-            other => return Err(refuse_keyword(other)),
+            // The matches were compiled from the parsed signature, and the
+            // keyword table has already refused what the engine does not run.
+            _ => {}
         }
-    }
-
-    let groups = build_groups(matchers)?;
-    let mut groups = groups.into_iter();
-    let pattern = groups.next().ok_or_else(|| {
-        Refused::new(
-            "content",
-            "names no content or pcre; a rule on the port alone is written natively",
-        )
-    })?;
-    for group in std::iter::once(&pattern) {
-        compile_pattern(group).map_err(|e| Refused::new("content", e.to_string()))?;
-    }
-    let also_patterns: Vec<String> = groups.collect();
-    for group in &also_patterns {
-        compile_pattern(group).map_err(|e| Refused::new("content", e.to_string()))?;
     }
 
     let severity = match priority.or_else(|| classtype.as_deref().map(classtype_priority)) {
@@ -3173,16 +3154,7 @@ fn compile_options(options: &[(String, String)]) -> Compiled<Body> {
         references,
         severity,
         threshold,
-        pattern,
-        also_patterns,
     })
-}
-
-fn refuse_keyword(keyword: &str) -> Refused {
-    if let Some(row) = table_row(keyword) {
-        return Refused::new(keyword, row.note);
-    }
-    Refused::new(keyword, "is not in the compiled subset")
 }
 
 fn check_flow(value: &str) -> Compiled<()> {
@@ -3203,33 +3175,6 @@ fn check_flow(value: &str) -> Compiled<()> {
                 ));
             }
         }
-    }
-    Ok(())
-}
-
-fn apply_modifier(content: &mut Content, key: &str, value: &str) -> Compiled<()> {
-    let number = || -> Compiled<usize> {
-        let parsed: i64 = value
-            .parse()
-            .map_err(|_| Refused::new(key, format!("'{value}' is not a number")))?;
-        let parsed = usize::try_from(parsed)
-            .map_err(|_| Refused::new(key, "is negative, which the matcher does not implement"))?;
-        if parsed > PAYLOAD_LIMIT {
-            return Err(Refused::new(
-                key,
-                format!("reaches past the {PAYLOAD_LIMIT} bytes of payload captured"),
-            ));
-        }
-        Ok(parsed)
-    };
-    match key {
-        "nocase" => content.nocase = true,
-        "offset" => content.offset = Some(number()?),
-        "depth" => content.depth = Some(number()?),
-        "distance" => content.distance = Some(number()?),
-        "within" => content.within = Some(number()?),
-        "startswith" => content.startswith = true,
-        _ => content.endswith = true,
     }
     Ok(())
 }
@@ -3292,199 +3237,6 @@ pub(crate) fn decode_content(value: &str) -> Compiled<Vec<u8>> {
 fn push_char(bytes: &mut Vec<u8>, ch: char) {
     let mut buf = [0u8; 4];
     bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-}
-
-/// The bytes of a content as a regex literal that means exactly them.
-fn literal(content: &Content) -> String {
-    let mut out = String::with_capacity(content.bytes.len() * 4);
-    for byte in &content.bytes {
-        if byte.is_ascii_alphanumeric() {
-            out.push(char::from(*byte));
-        } else {
-            // Writing to a String cannot fail.
-            let _ = write!(out, "\\x{byte:02X}");
-        }
-    }
-    if content.nocase {
-        format!("(?i:{out})")
-    } else {
-        out
-    }
-}
-
-/// Any `low` to `high` bytes, or `low` or more when there is no ceiling.
-fn gap(low: usize, high: Option<usize>) -> String {
-    match high {
-        Some(high) if high == low => format!("(?s:.){{{low}}}"),
-        Some(high) => format!("(?s:.){{{low},{high}}}"),
-        None if low == 0 => "(?s:.)*".to_string(),
-        None => format!("(?s:.){{{low},}}"),
-    }
-}
-
-/// Turn the rule's contents and pcres into the byte expressions that must all
-/// match. A content chained to the one before it by `distance` or `within`
-/// extends that content's expression; any other content starts its own, and
-/// each pcre is its own.
-fn build_groups(matchers: Vec<Matcher>) -> Compiled<Vec<String>> {
-    let mut groups: Vec<String> = Vec::new();
-    let mut open: Option<(String, bool)> = None;
-    let mut after_pcre = false;
-    for matcher in matchers {
-        match matcher {
-            Matcher::Pcre(expression) => {
-                if let Some((group, _)) = open.take() {
-                    groups.push(group);
-                }
-                groups.push(expression);
-                after_pcre = true;
-            }
-            Matcher::Content(content) => {
-                let len = content.bytes.len();
-                // Suricata counts a relative content from the end of the pcre
-                // match before it; each expression here matches on its own,
-                // so that position is not known.
-                if content.is_relative() && after_pcre {
-                    let keyword = if content.distance.is_some() {
-                        "distance"
-                    } else {
-                        "within"
-                    };
-                    return Err(Refused::new(keyword, "counts from the end of a pcre match"));
-                }
-                after_pcre = false;
-                if content.is_relative() && (content.offset.is_some() || content.depth.is_some()) {
-                    return Err(Refused::new(
-                        "distance",
-                        "is mixed with offset or depth on one content",
-                    ));
-                }
-                let chained = content.is_relative() && open.is_some();
-                if chained {
-                    let Some((group, ended)) = open.as_mut() else {
-                        continue;
-                    };
-                    if *ended {
-                        return Err(Refused::new(
-                            "endswith",
-                            "anchors a content to the end that another content follows",
-                        ));
-                    }
-                    let low = content.distance.unwrap_or(0);
-                    let high = match content.within {
-                        Some(within) if within < len => {
-                            return Err(Refused::new(
-                                "within",
-                                "is shorter than the content it bounds",
-                            ));
-                        }
-                        Some(within) => Some(low + within - len),
-                        None => None,
-                    };
-                    group.push_str(&gap(low, high));
-                    group.push_str(&literal(&content));
-                    if content.endswith {
-                        group.push_str("\\z");
-                        *ended = true;
-                    }
-                    continue;
-                }
-                if let Some((group, _)) = open.take() {
-                    groups.push(group);
-                }
-                // A relative content with nothing before it counts from the
-                // start of the payload, so its distance is an offset.
-                let offset = content.offset.or(content.distance);
-                let depth = content.depth.or(content.within);
-                let mut group = String::from("(?-u)");
-                if content.startswith {
-                    group.push_str("\\A");
-                } else if offset.is_some() || depth.is_some() {
-                    let low = offset.unwrap_or(0);
-                    let high = match depth {
-                        Some(depth) if depth < len => {
-                            return Err(Refused::new(
-                                "depth",
-                                "is shorter than the content it bounds",
-                            ));
-                        }
-                        Some(depth) => Some(low + depth - len),
-                        None => None,
-                    };
-                    group.push_str("\\A");
-                    group.push_str(&gap(low, high));
-                }
-                group.push_str(&literal(&content));
-                if content.endswith {
-                    group.push_str("\\z");
-                }
-                open = Some((group, content.endswith));
-            }
-        }
-    }
-    if let Some((group, _)) = open {
-        groups.push(group);
-    }
-    Ok(groups)
-}
-
-/// Translate a `pcre` value, `/expression/flags`, into a byte expression.
-fn compile_pcre(value: &str) -> Compiled<String> {
-    let value = value.strip_prefix('!').map_or(Ok(value), |_| {
-        Err(Refused::new(
-            "pcre",
-            "is negated, and a payload is matched for what it holds",
-        ))
-    })?;
-    // Only the escapes of the rule syntax itself are removed here; the
-    // expression's own backslashes stay.
-    let value = value.replace("\\;", ";").replace("\\\"", "\"");
-    let body = value
-        .strip_prefix('/')
-        .ok_or_else(|| Refused::new("pcre", "does not start with '/'"))?;
-    let end = body
-        .rfind('/')
-        .ok_or_else(|| Refused::new("pcre", "has no closing '/'"))?;
-    let (expression, flags) = (&body[..end], &body[end + 1..]);
-
-    let mut inline = String::new();
-    let mut anchored = false;
-    for flag in flags.chars() {
-        match flag {
-            'i' | 's' | 'm' | 'x' => inline.push(flag),
-            'A' => anchored = true,
-            'E' => {}
-            'R' => {
-                return Err(Refused::new(
-                    "pcre",
-                    "flag 'R' matches relative to the previous content, which the matcher does not implement",
-                ));
-            }
-            other => {
-                return Err(Refused::new(
-                    "pcre",
-                    format!(
-                        "flag '{other}' selects a buffer or behaviour the matcher does not implement"
-                    ),
-                ));
-            }
-        }
-    }
-    let mut out = String::from("(?-u)");
-    if !inline.is_empty() {
-        let _ = write!(out, "(?{inline})");
-    }
-    if anchored {
-        out.push_str("\\A");
-    }
-    let _ = write!(out, "(?:{expression})");
-    compile_pattern(&out).map_err(|_| {
-        Refused::new(
-            "pcre",
-            "uses a construct the matcher does not implement, such as a backreference or a lookaround",
-        )
-    })?;
-    Ok(out)
 }
 
 fn parse_threshold(value: &str) -> Compiled<ThresholdConfig> {
@@ -3743,10 +3495,14 @@ mod tests {
     }
 
     #[test]
-    fn compiles_hex_contents_and_an_independent_group() {
+    fn compiles_hex_contents_and_an_independent_content() {
         let rules = compile(ET_RDP_COOKIE);
-        let imported = rules[0].imported.as_ref().map(|i| i.also_patterns.len());
-        assert_eq!(imported, Some(1));
+        assert!(
+            rules[0]
+                .imported
+                .as_ref()
+                .is_some_and(|i| i.inspection.is_some())
+        );
         assert_eq!(rules[0].severity, Severity::Low);
         let engine = engine(rules);
         let to_rdp = event(OUTSIDE, 50000, INSIDE, 3389);
@@ -3780,10 +3536,29 @@ mod tests {
     }
 
     #[test]
+    fn runs_a_pcre_from_the_cursor_and_a_back_reference() {
+        let fokirtor = engine(compile(ET_FOKIRTOR));
+        let to_ssh = event(OUTSIDE, 50000, INSIDE, 22);
+        let hit = |engine: &IdsEngine, e: &PacketEvent, payload: &[u8]| {
+            !engine
+                .evaluate_payload_with_context(e, payload, None)
+                .is_empty()
+        };
+        assert!(hit(&fokirtor, &to_ssh, b"xx:!;.aGVsbG8="));
+        // The pcre is anchored at the cursor the content left.
+        assert!(!hit(&fokirtor, &to_ssh, b"xx:!;. aGVsbG8="));
+
+        let oracle = engine(compile(ET_ORACLE_BACKREF));
+        let to_sql = event(OUTSIDE, 50000, INSIDE, 1521);
+        let call = b"DBMS_REPCAT.ADD_COLUMN_GROUP_TO_FLAVOR v := 'aaaaaaaaaaaa'; gname => v";
+        assert!(hit(&oracle, &to_sql, call));
+        let other = b"DBMS_REPCAT.ADD_COLUMN_GROUP_TO_FLAVOR v := 'aaaaaaaaaaaa'; gname => w";
+        assert!(!hit(&oracle, &to_sql, other));
+    }
+
+    #[test]
     fn refuses_what_it_does_not_implement_and_names_the_keyword() {
         let cases = [
-            (ET_FOKIRTOR, "pcre", "flag 'R'"),
-            (ET_ORACLE_BACKREF, "pcre", "backreference"),
             (ET_HTTP, "http.method", "HTTP/1 parser"),
             (ET_FLOWBITS, "flowbits", "flow table"),
         ];
@@ -3820,30 +3595,18 @@ mod tests {
     #[test]
     fn refuses_options_outside_the_subset() {
         let cases = [
-            ("content:!\"abc\";", "content"),
-            ("content:\"abc\"; distance:-2;", "distance"),
             ("content:\"abcdef\"; depth:3;", "depth"),
-            ("content:\"abc\"; offset:4096;", "offset"),
             ("content:\"abc\"; dsize:>10;", "dsize"),
             ("content:\"abc\"; http.uri;", "http.uri"),
             ("content:\"abc\"; http_uri;", "http_uri"),
             ("content:\"abc\"; frobnicate;", "frobnicate"),
             ("flow:established;", "content"),
             (
-                "content:\"abc\"; endswith; content:\"d\"; distance:0;",
-                "endswith",
-            ),
-            (
                 "content:\"abc\"; threshold: type limit, track by_rule, count 1, seconds 5;",
                 "threshold",
             ),
             ("content:\"abc\"; flow:only_stream;", "flow"),
             ("content:\"abc\"; gid:3;", "gid"),
-            ("pcre:\"/a+b/\"; content:\"c\"; distance:0;", "distance"),
-            (
-                "content:\"x\"; pcre:\"/a+b/\"; content:\"c\"; within:4;",
-                "within",
-            ),
         ];
         for (options, keyword) in cases {
             let rule = format!("alert tcp any any -> any 80 (msg:\"x\"; {options} sid:7;)");

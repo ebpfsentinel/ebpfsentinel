@@ -113,6 +113,8 @@ notify = "8"
 # JWT & Crypto
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 sha2 = "0.11.0"
+sha1 = "0.11.0"
+md-5 = "0.11.0"
 hmac = "0.13.0"
 
 # OpenTelemetry
@@ -139,6 +141,11 @@ pcap = "2.5"
 
 # Regex
 regex = "1"
+# Suricata's pcre: lookaround and back-references, which regex does not have.
+# The crate builds the PCRE2 library it carries (BSD-3-Clause) and links it
+# statically, PCRE2_SYS_STATIC being set in .cargo/config.toml.
+pcre2 = "0.2.11"
+memchr = "2"
 
 # LRU cache
 lru = "0.18.3"

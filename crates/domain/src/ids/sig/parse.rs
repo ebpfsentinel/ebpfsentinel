@@ -800,7 +800,7 @@ impl Builder {
                 }
             }
             ("pcrexform", Some(expr)) => {
-                unquote(k, expr)?;
+                super::inspect::check_pcrexform(unquote(k, expr)?)?;
             }
             _ => {}
         }
@@ -844,6 +844,8 @@ impl Builder {
             negated,
             captures,
         };
+        // PCRE2 refuses what Suricata, built on it, refuses.
+        super::inspect::check_pcre(&pcre)?;
         let target = match buffer_flag {
             Some(def) => Buffer::Sticky(def.name),
             None => self.list().buffer.clone(),

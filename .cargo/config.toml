@@ -10,3 +10,7 @@ xtask = "run --package xtask --"
 # explicit export. Keep in sync with the `v1_32` feature on k8s-openapi.
 [env]
 K8S_OPENAPI_ENABLED_VERSION = "1.32"
+
+# pcre2-sys links the system libpcre2 when pkg-config finds one; the agent
+# carries its own copy instead, the same on every build host.
+PCRE2_SYS_STATIC = "1"

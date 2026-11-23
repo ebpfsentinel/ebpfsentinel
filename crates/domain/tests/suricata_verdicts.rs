@@ -21,10 +21,6 @@ const LENIENT: &[(&str, &str)] = &[
         "'=>' needs a response buffer; which buffers belong to the response is known once the application parsers expose them",
     ),
     (
-        "1115",
-        "the parser does not compile PCRE: the regex crate would refuse lookarounds and backreferences Suricata loads",
-    ),
-    (
         "1252",
         "event names are checked against the decoder's own event table, not the parser's",
     ),
