@@ -14994,6 +14994,7 @@
           "network_executables",
           "write_refusal",
           "self_protection",
+          "preload",
           "file_kfuncs",
           "kfunc_features",
           "capabilities"
@@ -15041,6 +15042,10 @@
           "network_executables": {
             "$ref": "#/components/schemas/NetworkExecutablesReport",
             "description": "Whether the kernel decides which executables reach the network, and\nwhether it refuses or only reports. Reported whether or not the list is\nconfigured, with the reason it is not in force."
+          },
+          "preload": {
+            "$ref": "#/components/schemas/PreloadReport",
+            "description": "Whether the agent loaded the programs that read the kernel before it\nread any input and handed those attached by name to the warden, and\nwhich the warden holds. Without a warden nothing is handed over, and\nit says why."
           },
           "probed": {
             "type": "boolean"
@@ -17781,6 +17786,34 @@
           "post_quantum": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "PreloadReport": {
+        "type": "object",
+        "description": "Whether the kernel-reading programs were loaded before input and handed\nover to the warden.",
+        "required": [
+          "handed_over",
+          "held"
+        ],
+        "properties": {
+          "handed_over": {
+            "type": "boolean",
+            "description": "Start-up loaded them before reading input and handed those attached\nby name to the warden; an object it did not load is refused after."
+          },
+          "held": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The programs the warden holds and attaches to their listed target."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing was handed over, in one sentence."
           }
         }
       },

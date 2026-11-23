@@ -206,7 +206,9 @@ impl WardenPolicy {
                 on(self.file_watch, family)
             }
             Command::WriteRefusalGroup => on(self.write_refusal, family),
-            Command::AttachUprobe { .. } | Command::DlpScan => on(self.uprobe, family),
+            Command::AttachUprobe { .. } | Command::AttachHeld { .. } | Command::DlpScan => {
+                on(self.uprobe, family)
+            }
             Command::ResolverSocket { listen, .. } => {
                 if self.resolver.is_empty() {
                     return Err(Refusal::off(family));
@@ -412,9 +414,12 @@ mod tests {
             },
             Command::WriteRefusalGroup,
             Command::AttachUprobe {
+                program: "ssl_write".into(),
                 path: "/usr/lib/libssl.so.3".into(),
                 offset: 0,
-                is_ret: false,
+            },
+            Command::AttachHeld {
+                program: "ktls_sendmsg".into(),
             },
             Command::DlpScan,
             Command::ResolverSocket {
@@ -465,6 +470,12 @@ mod tests {
             Command::ConntrackDump,
             Command::ConntrackFlush,
             Command::PinnedLinks,
+            Command::HoldProgram {
+                name: "process_exec".into(),
+            },
+            Command::AttachHeld {
+                program: "process_exec".into(),
+            },
             Command::ReadExecutable { pid: 1 },
             Command::TcxChain {
                 iface: "eth0".into(),

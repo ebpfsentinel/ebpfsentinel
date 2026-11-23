@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
@@ -26,7 +26,6 @@ use ports::secondary::tcp_health_port::TcpHealthPort;
 use tracing::{info, warn};
 
 use super::kfunc::vmlinux_struct_member_offsets;
-use super::kfunc_attach;
 use super::loader::EbpfLoader;
 use super::map_store::MapStore;
 
@@ -315,10 +314,7 @@ impl TcpHealthAttacher {
     }
 
     fn attach_one(loader: &EbpfLoader, program: &str, tracepoint: &str) -> Result<OwnedFd, String> {
-        let prog_fd: RawFd = loader
-            .program_fd(program)
-            .ok_or_else(|| format!("program `{program}` is not in the loaded object"))?;
-        kfunc_attach::attach_raw_tracepoint(program, prog_fd, tracepoint).map_err(|e| e.to_string())
+        super::preload::attach_raw_tracepoint(loader, program, tracepoint)
     }
 
     /// Whether this attacher holds every link.

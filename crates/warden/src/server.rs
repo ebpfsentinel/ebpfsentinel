@@ -30,9 +30,9 @@ use crate::policy::WardenPolicy;
 use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
-    hidden_ports, hidden_processes, link_pins, namespace_ids, net_ops, netns_tcx_ops,
-    packet_sockets, podman_connect, podman_store, process_maps, recv_fd, resolver_socket,
-    root_runtime, rooted_read, send_msg_fds, served_peer, uprobe_ops,
+    held_programs, hidden_ports, hidden_processes, link_pins, namespace_ids, net_ops,
+    netns_tcx_ops, packet_sockets, podman_connect, podman_store, process_maps, recv_fd,
+    resolver_socket, root_runtime, rooted_read, send_msg_fds, served_peer,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -748,14 +748,48 @@ fn handle_conn_with_timeouts(
                 };
                 reply(&mut writer, &resp).is_ok()
             }
-            // `AttachUprobe` answers out-of-band: it first receives the agent's
-            // program fd over `SCM_RIGHTS`, creates the link, then replies
-            // `FdReady` + the link fd (or a typed `Error`).
+            // `HoldProgram` takes the program fd that follows the frame and
+            // answers `Ok` once it is held.
+            Command::HoldProgram { name } => {
+                let prog_fd = recv_fd(writer.as_raw_fd());
+                let resp = if prog_fd < 0 {
+                    Response::Error {
+                        message: "no program fd received for the hold".into(),
+                    }
+                } else {
+                    let held = held_programs::hold(&held_programs::held_dir(), name, prog_fd);
+                    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one
+                    // request and is owned here; the pin holds the program now.
+                    unsafe { libc::close(prog_fd) };
+                    match held {
+                        Ok(()) => Response::Ok,
+                        Err(message) => {
+                            eprintln!("[warden] hold of {name:?} refused: {message}");
+                            Response::Error { message }
+                        }
+                    }
+                };
+                reply(&mut writer, &resp).is_ok()
+            }
+            // The attaches of a held program answer out-of-band: `FdReady`
+            // and the link, or a typed `Error`.
+            Command::AttachHeld { program } => {
+                let link = held_programs::attach(&held_programs::held_dir(), program);
+                serve_owned_link(&mut writer, program, link)
+            }
             Command::AttachUprobe {
+                program,
                 path,
                 offset,
-                is_ret,
-            } => serve_attach_uprobe(&mut writer, path, *offset, *is_ret),
+            } => {
+                let link = held_programs::attach_uprobe(
+                    &held_programs::held_dir(),
+                    program,
+                    path,
+                    *offset,
+                );
+                serve_owned_link(&mut writer, program, link)
+            }
             // `AttachCgroup` answers the same way, with a cgroup directory in
             // place of an ELF offset.
             Command::AttachCgroup {
@@ -890,35 +924,19 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     send_msg_fds(writer.as_raw_fd(), &[0u8], &fds)
 }
 
-/// Serve an `AttachUprobe`: receive the agent's program fd (sent in an
-/// `SCM_RIGHTS` cmsg right after the command frame), create the `uprobe_multi`
-/// link, then reply `FdReady` + the link fd. The warden closes its own copy of
-/// both the program fd and the link fd - the link fd is dup'd into the agent by
-/// `SCM_RIGHTS` and the link keeps the program alive - so neither leaks.
-fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret: bool) -> bool {
-    let prog_fd = recv_fd(writer.as_raw_fd());
-    if prog_fd < 0 {
-        return reply(
-            writer,
-            &Response::Error {
-                message: "no program fd received for uprobe attach".into(),
-            },
-        )
-        .is_ok();
-    }
-    let result = uprobe_ops::attach_uprobe_link(prog_fd, path, offset, is_ret);
-    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one request and is owned here; nothing
-    // uses it after this close.
-    unsafe { libc::close(prog_fd) };
-    match result {
-        Ok(link) => {
-            let ok = serve_passed_fd(writer, Ok(link));
-            // SAFETY: `link` was created for this request and the agent now holds its own copy,
-            // sent over `SCM_RIGHTS`; this handler uses it no further.
-            unsafe { libc::close(link) };
-            ok
+/// Answer an attach of a held program with the link, closed here once the
+/// agent holds its own copy.
+fn serve_owned_link(
+    writer: &mut UnixStream,
+    program: &str,
+    link: Result<std::os::fd::OwnedFd, String>,
+) -> bool {
+    match link {
+        Ok(link) => serve_passed_fd(writer, Ok(link.as_raw_fd())),
+        Err(message) => {
+            eprintln!("[warden] attach of {program:?} refused: {message}");
+            serve_passed_fd(writer, Err(message))
         }
-        Err(message) => serve_passed_fd(writer, Err(message)),
     }
 }
 
@@ -1490,17 +1508,16 @@ mod tests {
 
     #[test]
     fn a_refused_command_carrying_a_descriptor_leaves_the_connection_in_step() {
-        // The uprobe family is off: the warden refuses, takes the program
-        // descriptor off the socket, and the next command is read as itself.
+        // A hold of a name the warden does not hold is refused: the warden
+        // takes the descriptor off the socket, and the next command is read
+        // as itself.
         let (mut client, server) = UnixStream::pair().unwrap();
         let handle = run_server(server, None);
         hello(&mut client);
         write_frame(
             &mut client,
-            &Command::AttachUprobe {
-                path: "/usr/lib/libssl.so.3".into(),
-                offset: 0,
-                is_ret: false,
+            &Command::HoldProgram {
+                name: "xdp_firewall".into(),
             },
         )
         .unwrap();
@@ -1508,8 +1525,13 @@ mod tests {
         assert!(crate::send_fd(client.as_raw_fd(), program.as_raw_fd()));
         let resp: Response = read_frame(&mut client).unwrap();
         match resp {
-            Response::Refused { family, .. } => assert_eq!(family, Family::Uprobe),
-            other => panic!("expected a refusal, got {other:?}"),
+            Response::Error { message } => {
+                assert!(
+                    message.contains("not a program the warden holds"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected an error, got {other:?}"),
         }
         write_frame(
             &mut client,

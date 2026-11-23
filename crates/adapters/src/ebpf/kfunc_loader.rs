@@ -230,6 +230,15 @@ pub enum KfuncLoaderError {
 
     #[error("wrap map fd into typed map: {0}")]
     MapWrap(String),
+
+    #[error("refused at start-up: {0}")]
+    RefusedAtStartup(String),
+
+    #[error(
+        "the object holds programs that read the kernel, which the agent loads only at \
+         start-up, before it reads input: restart the agent"
+    )]
+    NotPreloaded,
 }
 
 /// A kfunc call site in the raw object: the section it lives in, the byte
@@ -1422,6 +1431,9 @@ pub struct TokenLoadedObject {
     /// loader can issue raw `BPF_MAP_UPDATE_ELEM` (e.g. tail-call `ProgramArray`
     /// wiring) against a map whose typed form lives in `maps`.
     pub hosted: HashMap<String, OwnedFd>,
+    /// Map name → `enum bpf_map_type`, kept so the maps can be wrapped again
+    /// from a duplicate of their descriptor.
+    pub map_types: HashMap<String, u32>,
 }
 
 /// What a prog-id probe answered, an error read as unsupported - the reading
@@ -1765,7 +1777,7 @@ pub fn count_map_entries(fd: BorrowedFd<'_>, key_size: u32, max_entries: u32) ->
 /// type, so the typed map managers (`Array::try_from`, `HashMap::try_from`, …)
 /// accept it. Mirrors aya's own `map_type → Map` table (`bpf.rs`).
 #[allow(clippy::enum_glob_use)]
-fn wrap_map_data(fd: OwnedFd, map_type: u32) -> Result<AyaMap, KfuncLoaderError> {
+pub(crate) fn wrap_map_data(fd: OwnedFd, map_type: u32) -> Result<AyaMap, KfuncLoaderError> {
     use aya_obj::generated::bpf_map_type::*;
     let data = MapData::from_fd(fd).map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
     let m = match map_type {
@@ -1974,6 +1986,17 @@ fn load_object_token_maps(
     dev_bound_ifindex: Option<u32>,
     optional: &[&str],
 ) -> Result<TokenLoadedObject, KfuncLoaderError> {
+    super::preload::load(elf, pin_path, dev_bound_ifindex, optional, || {
+        load_object_token_fresh(elf, pin_path, dev_bound_ifindex, optional)
+    })
+}
+
+fn load_object_token_fresh(
+    elf: &[u8],
+    pin_path: Option<&str>,
+    dev_bound_ifindex: Option<u32>,
+    optional: &[&str],
+) -> Result<TokenLoadedObject, KfuncLoaderError> {
     // Pre-patch every kfunc call to a sentinel (no-op when the object has no
     // kfuncs) so `relocate_calls` does not mistake a kfunc call for a BPF-to-BPF
     // call to an unknown function. `load_kfunc_programs` restores the real
@@ -2015,7 +2038,9 @@ fn load_object_token_maps(
     drop(btf_fd);
 
     let mut maps = HashMap::new();
+    let mut map_types = HashMap::new();
     for (name, (fd, map_type)) in created {
+        map_types.insert(name.clone(), map_type);
         maps.insert(name, wrap_map_data(fd, map_type)?);
     }
 
@@ -2026,6 +2051,7 @@ fn load_object_token_maps(
         programs: loaded_programs.programs,
         refused: loaded_programs.refused,
         hosted,
+        map_types,
     })
 }
 

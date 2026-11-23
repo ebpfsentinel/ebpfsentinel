@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 /// Protocol version negotiated by the [`Command::Hello`] handshake. Bump on any
 /// wire-breaking change so a mismatched agent/warden image pair refuses to talk
 /// rather than misinterpreting each other's frames.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Largest frame payload accepted from a peer. A conntrack dump is the largest
 /// legitimate message and stays far below this; the bound just stops a hostile or
@@ -212,6 +212,115 @@ pub struct HeldBpfObjects {
     pub prog_ids: Vec<u32>,
     /// Links held.
     pub link_ids: Vec<u32>,
+}
+
+/// Where a program the warden holds may be attached, decided by its name and
+/// never by the agent's request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldTarget {
+    /// The one raw tracepoint the program was written for.
+    RawTracepoint(&'static str),
+    /// The one kernel function the program was written for, at entry or at
+    /// return.
+    Kprobe {
+        /// The function, as ftrace names it.
+        symbol: &'static str,
+        /// `true` for a kretprobe.
+        is_ret: bool,
+    },
+    /// A user-space function in a library the warden's own admission accepts,
+    /// at an offset the request names; entry or return is the program's.
+    Uprobe {
+        /// `true` for a uretprobe.
+        is_ret: bool,
+    },
+}
+
+/// `BPF_PROG_TYPE_KPROBE`, the type uprobes share.
+pub const BPF_PROG_TYPE_KPROBE: u32 = 2;
+/// `BPF_PROG_TYPE_RAW_TRACEPOINT`.
+pub const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
+
+impl HeldTarget {
+    /// The program type a program held for this target must have.
+    #[must_use]
+    pub fn prog_type(self) -> u32 {
+        match self {
+            Self::RawTracepoint(_) => BPF_PROG_TYPE_RAW_TRACEPOINT,
+            Self::Kprobe { .. } | Self::Uprobe { .. } => BPF_PROG_TYPE_KPROBE,
+        }
+    }
+}
+
+/// A program the agent loads at start-up and hands to the warden, because
+/// whoever holds its descriptor chooses where it reads: on the floor kernel
+/// creating a raw tracepoint, `kprobe_multi` or `uprobe_multi` link checks no
+/// capability, so the agent keeps none of these once it has handed them over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldProgram {
+    /// The program's name in its object, which is the name the hold, the pin
+    /// and every attach request use.
+    pub name: &'static str,
+    /// Where it may be attached.
+    pub target: HeldTarget,
+    /// The family a policy switches its attach with, `None` where the
+    /// program has one fixed target and every agent is served.
+    pub family: Option<Family>,
+}
+
+const fn raw_tp(name: &'static str, tracepoint: &'static str) -> HeldProgram {
+    HeldProgram {
+        name,
+        target: HeldTarget::RawTracepoint(tracepoint),
+        family: None,
+    }
+}
+
+const fn kprobe(name: &'static str, symbol: &'static str, is_ret: bool) -> HeldProgram {
+    HeldProgram {
+        name,
+        target: HeldTarget::Kprobe { symbol, is_ret },
+        family: Some(Family::Uprobe),
+    }
+}
+
+const fn uprobe(name: &'static str, is_ret: bool) -> HeldProgram {
+    HeldProgram {
+        name,
+        target: HeldTarget::Uprobe { is_ret },
+        family: Some(Family::Uprobe),
+    }
+}
+
+/// Every program the warden holds, the one list the warden's checks and the
+/// agent's hand-over read.
+pub const HELD_PROGRAMS: &[HeldProgram] = &[
+    raw_tp("process_exec", "sched_process_exec"),
+    raw_tp("process_fork", "sched_process_fork"),
+    raw_tp("process_exit", "sched_process_exit"),
+    raw_tp("signal_on_syscall_entry", "sys_enter"),
+    raw_tp("drop_reason_kfree_skb", "kfree_skb"),
+    raw_tp("tcp_health_retransmit", "tcp_retransmit_skb"),
+    raw_tp("tcp_health_send_reset", "tcp_send_reset"),
+    raw_tp("tcp_health_receive_reset", "tcp_receive_reset"),
+    raw_tp("tcp_health_set_state", "inet_sock_set_state"),
+    kprobe("ktls_sendmsg", "tls_sw_sendmsg", false),
+    kprobe("ktls_recvmsg_entry", "tls_sw_recvmsg", false),
+    kprobe("ktls_recvmsg_ret", "tls_sw_recvmsg", true),
+    uprobe("ssl_write", false),
+    uprobe("ssl_read_entry", false),
+    uprobe("ssl_read_ret", true),
+    uprobe("go_tls_write", false),
+    uprobe("go_tls_read_entry", false),
+    // Go returns are probed at each `RET` instruction, as entries.
+    uprobe("go_tls_read_ret", false),
+    uprobe("crypto_call", false),
+];
+
+/// The held program of that name.
+#[must_use]
+pub fn held_program(name: &str) -> Option<&'static HeldProgram> {
+    HELD_PROGRAMS.iter().find(|p| p.name == name)
 }
 
 /// A routing-table entry, used by multi-WAN failover.
@@ -756,24 +865,20 @@ pub enum Command {
         /// cBPF/tcpdump filter expression.
         filter: String,
     },
-    /// Attach a uprobe (`is_ret` = uretprobe) at `offset` within the ELF at
-    /// `path`, binding the eBPF program whose fd rides in the accompanying
-    /// `SCM_RIGHTS` cmsg (sent right after this frame). The warden creates the
-    /// `uprobe_multi` `BPF_LINK_CREATE` - it holds the tracing capability the
-    /// rootless agent dropped, and resolves `path` in its own (init) mount + pid
-    /// namespace - then returns the link fd via [`Response::FdReady`]. This lets
-    /// the agent probe a neighbouring container's `libssl` under `cap-drop: ALL`.
-    /// The program fd is the agent's own verified eBPF object, and the kernel
-    /// rejects a program whose type does not match a uprobe link, so the warden
-    /// cannot be coerced into attaching an arbitrary program.
+    /// Attach the held uprobe program `program` at `offset` within the ELF at
+    /// `path`, entry or return as [`HELD_PROGRAMS`] lists it. The warden
+    /// creates the `uprobe_multi` link from the program it holds - the agent
+    /// sends none - resolving `path` in its own mount and pid namespace, and
+    /// returns the link fd via [`Response::FdReady`], so dropping it detaches.
+    /// The path passes the warden's uprobe admission.
     AttachUprobe {
+        /// A held program whose target is [`HeldTarget::Uprobe`].
+        program: String,
         /// Absolute path to the target ELF (e.g.
         /// `/proc/<pid>/root/usr/lib/libssl.so.3`).
         path: String,
         /// File offset of the symbol to probe.
         offset: u64,
-        /// `true` for a uretprobe (fires on function return).
-        is_ret: bool,
     },
     /// Attach the cgroup-type eBPF program whose fd rides in the accompanying
     /// `SCM_RIGHTS` cmsg (sent right after this frame) to the cgroup directory
@@ -1095,6 +1200,24 @@ pub enum Command {
         store: String,
         /// The container's 64-hex-digit id.
         id: String,
+    },
+    /// Hand the warden the program named `name`, whose fd rides in the
+    /// `SCM_RIGHTS` cmsg sent right after this frame. Accepted only for a
+    /// name in [`HELD_PROGRAMS`] and a program of the type listed for it; the
+    /// warden pins it in a directory of its own, replacing a program held
+    /// under that name before, and answers [`Response::Ok`]. The agent closes
+    /// its copies once the answer is in.
+    HoldProgram {
+        /// The program's name in its object.
+        name: String,
+    },
+    /// Attach the held program `program` to the raw tracepoint or kernel
+    /// function [`HELD_PROGRAMS`] lists for it, and return the link fd via
+    /// [`Response::FdReady`]. A uprobe program is attached with
+    /// [`Command::AttachUprobe`].
+    AttachHeld {
+        /// A held program whose target is a raw tracepoint or a kprobe.
+        program: String,
     },
 }
 
@@ -1457,7 +1580,8 @@ pub enum Family {
     FileWatch,
     /// `WriteRefusalGroup`: the fanotify write refusal.
     WriteRefusal,
-    /// `AttachUprobe`, `DlpScan`: the TLS plaintext and crypto-call probes.
+    /// `AttachUprobe`, `DlpScan`, and `AttachHeld` for a kernel TLS probe:
+    /// the TLS plaintext and crypto-call probes.
     Uprobe,
     /// `ResolverSocket`: the DNS allow-list resolver.
     Resolver,
@@ -1520,6 +1644,7 @@ impl Command {
             | Self::FimCanaries { .. } => Some(Family::FileWatch),
             Self::WriteRefusalGroup => Some(Family::WriteRefusal),
             Self::AttachUprobe { .. } | Self::DlpScan => Some(Family::Uprobe),
+            Self::AttachHeld { program } => held_program(program).and_then(|p| p.family),
             Self::ResolverSocket { .. } => Some(Family::Resolver),
             Self::HiddenPorts { .. } => Some(Family::HiddenPorts),
             Self::HiddenProcesses { .. } => Some(Family::HiddenProcesses),
@@ -1549,7 +1674,8 @@ impl Command {
             | Self::PinLink { .. }
             | Self::PinnedLinks
             | Self::OpenPinnedLink { .. }
-            | Self::UnpinLinks { .. } => None,
+            | Self::UnpinLinks { .. }
+            | Self::HoldProgram { .. } => None,
         }
     }
 
@@ -1601,6 +1727,8 @@ impl Command {
             Self::UnpinLinks { .. } => "UnpinLinks",
             Self::ConnectRootRuntime { .. } => "ConnectRootRuntime",
             Self::ReadPodmanRecord { .. } => "ReadPodmanRecord",
+            Self::HoldProgram { .. } => "HoldProgram",
+            Self::AttachHeld { .. } => "AttachHeld",
         }
     }
 
@@ -1655,7 +1783,9 @@ impl Command {
             | Self::PinnedLinks
             | Self::OpenPinnedLink { .. }
             | Self::ConnectRootRuntime { .. }
-            | Self::ReadPodmanRecord { .. } => CONTROL_FRAME_LEN,
+            | Self::ReadPodmanRecord { .. }
+            | Self::HoldProgram { .. }
+            | Self::AttachHeld { .. } => CONTROL_FRAME_LEN,
         }
     }
 
@@ -1701,9 +1831,9 @@ impl Command {
                 filter: "tcp port 443".into(),
             },
             Self::AttachUprobe {
+                program: "ssl_write".into(),
                 path: "libssl.so.3".into(),
                 offset: 4096,
-                is_ret: false,
             },
             Self::AttachCgroup {
                 cgroup_path: "cgroup".into(),
@@ -1793,6 +1923,12 @@ impl Command {
                 store: "storage".into(),
                 id: "0123456789abcdef".into(),
             },
+            Self::HoldProgram {
+                name: "process_exec".into(),
+            },
+            Self::AttachHeld {
+                program: "process_exec".into(),
+            },
         ]
     }
 
@@ -1803,7 +1939,7 @@ impl Command {
         matches!(
             self,
             Self::Delegate
-                | Self::AttachUprobe { .. }
+                | Self::HoldProgram { .. }
                 | Self::AttachCgroup { .. }
                 | Self::AttachTcxInNetns { .. }
                 | Self::PinLink { .. }
@@ -1919,6 +2055,60 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn every_held_program_has_one_name_and_the_type_of_its_target() {
+        use super::{
+            BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_RAW_TRACEPOINT, Family, HELD_PROGRAMS, HeldTarget,
+            held_program,
+        };
+        let mut names: Vec<&str> = HELD_PROGRAMS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            HELD_PROGRAMS.len(),
+            "a held name is listed twice"
+        );
+        for p in HELD_PROGRAMS {
+            assert_eq!(held_program(p.name), Some(p));
+            match p.target {
+                HeldTarget::RawTracepoint(tp) => {
+                    assert!(!tp.is_empty());
+                    assert_eq!(p.target.prog_type(), BPF_PROG_TYPE_RAW_TRACEPOINT);
+                    assert_eq!(p.family, None);
+                }
+                HeldTarget::Kprobe { symbol, .. } => {
+                    assert!(!symbol.is_empty());
+                    assert_eq!(p.target.prog_type(), BPF_PROG_TYPE_KPROBE);
+                    assert_eq!(p.family, Some(Family::Uprobe));
+                }
+                HeldTarget::Uprobe { .. } => {
+                    assert_eq!(p.target.prog_type(), BPF_PROG_TYPE_KPROBE);
+                    assert_eq!(p.family, Some(Family::Uprobe));
+                }
+            }
+        }
+        assert_eq!(held_program("xdp_firewall"), None);
+    }
+
+    #[test]
+    fn a_held_attach_takes_the_family_of_its_program() {
+        use super::Family;
+        let attach = |program: &str| Command::AttachHeld {
+            program: program.into(),
+        };
+        assert_eq!(attach("process_exec").family(), None);
+        assert_eq!(attach("ktls_sendmsg").family(), Some(Family::Uprobe));
+        assert_eq!(attach("not_held").family(), None);
+        assert_eq!(
+            Command::HoldProgram {
+                name: "ktls_sendmsg".into()
+            }
+            .family(),
+            None
+        );
+    }
+
+    #[test]
     fn a_sweep_call_outlasts_the_sweep_it_asks_for() {
         use super::{
             HIDDEN_PROCESSES_PID_SPACE_MAX, HIDDEN_PROCESSES_RATE_MIN,
@@ -2024,9 +2214,9 @@ mod tests {
                 filter: "tcp port 443".into(),
             },
             Command::AttachUprobe {
+                program: "ssl_read_ret".into(),
                 path: "/proc/4242/root/usr/lib/libssl.so.3".into(),
                 offset: 0x1234,
-                is_ret: true,
             },
             Command::AttachCgroup {
                 cgroup_path: "/sys/fs/cgroup".into(),
@@ -2102,6 +2292,12 @@ mod tests {
                 uid: Some(1000),
                 store: ".local/share/containers/storage".into(),
                 id: "a".repeat(64),
+            },
+            Command::HoldProgram {
+                name: "ktls_sendmsg".into(),
+            },
+            Command::AttachHeld {
+                program: "ktls_sendmsg".into(),
             },
         ]
     }
@@ -2600,7 +2796,7 @@ mod tests {
         let hello = Command::Hello {
             version: super::PROTOCOL_VERSION,
         };
-        assert_eq!(postcard::to_allocvec(&hello).expect("encode"), [0, 3]);
+        assert_eq!(postcard::to_allocvec(&hello).expect("encode"), [0, 4]);
         let refused = Response::Refused {
             family: super::Family::Routing,
             reason: String::new(),

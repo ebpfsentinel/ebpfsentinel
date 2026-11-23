@@ -219,7 +219,49 @@ impl DirectSignal {
     /// # Errors
     ///
     /// Returns what the kernel answered, with the reason it is not usable.
+    ///
+    /// While start-up keeps the kernel-reading objects, the program is loaded
+    /// once and kept with them: it is built against the maps of the signal
+    /// object, which every later load of that object is answered with, and
+    /// once start-up has handed over, an object it did not load is refused.
     pub fn load(
+        protected: BorrowedFd<'_>,
+        metrics: BorrowedFd<'_>,
+    ) -> Result<Self, DirectSignalProbe> {
+        static KEPT: std::sync::Mutex<Option<Result<OwnedFd, DirectSignalProbe>>> =
+            std::sync::Mutex::new(None);
+        if !super::preload::window_open() && !super::preload::handed_over() {
+            return Self::load_fresh(protected, metrics);
+        }
+        let mut kept = KEPT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.is_none() && super::preload::handed_over() {
+            return Err(DirectSignalProbe {
+                declared: None,
+                loaded: false,
+                reason: Some(
+                    "the signal object was not loaded at start-up, before the agent read input"
+                        .to_string(),
+                ),
+            });
+        }
+        let entry = kept
+            .get_or_insert_with(|| Self::load_fresh(protected, metrics).map(|direct| direct.prog));
+        match entry {
+            Ok(prog) => prog
+                .try_clone()
+                .map(|prog| Self { prog })
+                .map_err(|e| DirectSignalProbe {
+                    declared: Some(true),
+                    loaded: false,
+                    reason: Some(format!("the kept signal program could not be shared: {e}")),
+                }),
+            Err(probe) => Err(probe.clone()),
+        }
+    }
+
+    fn load_fresh(
         protected: BorrowedFd<'_>,
         metrics: BorrowedFd<'_>,
     ) -> Result<Self, DirectSignalProbe> {

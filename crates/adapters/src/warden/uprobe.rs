@@ -7,7 +7,7 @@
 //! and the attach lifecycle.
 
 use std::io;
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -53,8 +53,11 @@ pub fn scan_via_warden(client: &Mutex<ReconnectingClient>) -> io::Result<Vec<Dlp
     })
 }
 
-/// Attach a single uprobe link through the warden at `sock`. Returns the link fd;
-/// the agent owns it and dropping it detaches.
+/// Attach the held uprobe program `program` at `offset` within `path` through
+/// the warden. Returns the link fd; the agent owns it and dropping it
+/// detaches. The agent names the program, never carries it: the warden holds
+/// every uprobe program from start-up and attaches the one listed under that
+/// name, entry or return as the list says.
 ///
 /// The client replays this call once if the connection drops mid-flight, and
 /// that replay cannot leave two links behind. A link the warden created is kept
@@ -66,10 +69,9 @@ pub fn scan_via_warden(client: &Mutex<ReconnectingClient>) -> io::Result<Vec<Dlp
 /// rather than treating the live set as empty.
 pub fn attach_via_warden(
     client: &Mutex<ReconnectingClient>,
-    prog_fd: RawFd,
+    program: &str,
     path: &str,
     offset: u64,
-    is_ret: bool,
 ) -> io::Result<OwnedFd> {
-    held(client).attach_uprobe(path, offset, is_ret, prog_fd)
+    held(client).attach_uprobe(program, path, offset)
 }

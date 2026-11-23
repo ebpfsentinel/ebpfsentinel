@@ -53,6 +53,7 @@ pub mod file_facts;
 pub mod fim_watch;
 pub mod go_executables;
 pub mod handed;
+pub mod held_programs;
 pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod host_ops;
@@ -470,6 +471,29 @@ pub const DELEGATED_PROGS: &[&str] = &[
     "syscall",
 ];
 
+/// The commands a token is asked about, named as the kernel's `enum bpf_cmd`
+/// spells them without `BPF_`. The kernel reads a token on these three only;
+/// naming them rather than `any` keeps a command a later kernel makes
+/// tokenable out until it is listed here.
+pub const DELEGATED_CMDS: &[&str] = &["map_create", "prog_load", "btf_load"];
+
+/// The map types the agent's objects create, named as the kernel's
+/// `enum bpf_map_type` spells them without `BPF_MAP_TYPE_`.
+pub const DELEGATED_MAPS: &[&str] = &[
+    "hash",
+    "array",
+    "prog_array",
+    "percpu_hash",
+    "percpu_array",
+    "lru_hash",
+    "lru_percpu_hash",
+    "lpm_trie",
+    "hash_of_maps",
+    "devmap",
+    "ringbuf",
+    "user_ringbuf",
+];
+
 /// The attach types the agent's programs load with, named as the kernel's
 /// `enum bpf_attach_type` spells them without `BPF_`.
 ///
@@ -524,17 +548,16 @@ fn name_lists(names: &[&str]) -> impl Iterator<Item = String> {
 }
 
 /// Apply the delegation options + `FSCONFIG_CMD_CREATE` to a bpffs `fs_fd`
-/// whose superblock is owned by a (descendant) user namespace. Commands and map
-/// types are delegated whole; program and attach types only as far as
-/// [`DELEGATED_PROGS`] and [`DELEGATED_ATTACHS`] go. Requires `CAP_SYS_ADMIN` in
+/// whose superblock is owned by a (descendant) user namespace. Commands, map,
+/// program and attach types are delegated only as far as [`DELEGATED_CMDS`],
+/// [`DELEGATED_MAPS`], [`DELEGATED_PROGS`] and [`DELEGATED_ATTACHS`] go. Requires `CAP_SYS_ADMIN` in
 /// `init_user_ns` - done by the all-in-one parent or the bare-metal `warden
 /// serve`. Returns `true` on success; an option the kernel refuses fails the
 /// whole delegation rather than leaving a token narrower than the agent needs.
 pub fn delegate_over_fd(fs: RawFd) -> bool {
-    let mut options = vec![
-        ("delegate_cmds", "any".to_owned()),
-        ("delegate_maps", "any".to_owned()),
-    ];
+    let mut options: Vec<(&str, String)> = Vec::new();
+    options.extend(name_lists(DELEGATED_CMDS).map(|v| ("delegate_cmds", v)));
+    options.extend(name_lists(DELEGATED_MAPS).map(|v| ("delegate_maps", v)));
     options.extend(name_lists(DELEGATED_PROGS).map(|v| ("delegate_progs", v)));
     options.extend(name_lists(DELEGATED_ATTACHS).map(|v| ("delegate_attachs", v)));
     if !options
@@ -977,7 +1000,12 @@ mod tests {
 
     #[test]
     fn every_delegated_name_reaches_the_kernel_in_values_it_accepts() {
-        for names in [DELEGATED_PROGS, DELEGATED_ATTACHS] {
+        for names in [
+            DELEGATED_CMDS,
+            DELEGATED_MAPS,
+            DELEGATED_PROGS,
+            DELEGATED_ATTACHS,
+        ] {
             let lists: Vec<String> = name_lists(names).collect();
             assert!(lists.iter().all(|l| l.len() <= FSCONFIG_VALUE_MAX));
             let rejoined: Vec<&str> = lists.iter().flat_map(|l| l.split(':')).collect();

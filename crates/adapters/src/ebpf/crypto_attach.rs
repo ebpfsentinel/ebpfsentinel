@@ -152,7 +152,8 @@ impl CryptoCallCounter {
 /// Holds the links on every probed library, keyed by inode.
 pub struct CryptoAttacher {
     proc_root: PathBuf,
-    prog_fd: RawFd,
+    /// `None` when the warden holds the program and attaches it by name.
+    prog_fd: Option<RawFd>,
     warden: Option<Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
     attached: HashMap<(u64, u64), Vec<OwnedFd>>,
     /// Inodes found to carry none of the symbols, not opened again.
@@ -167,9 +168,10 @@ impl CryptoAttacher {
     ///
     /// Returns an error when the program is not in the loaded object.
     pub fn new(proc_root: impl Into<PathBuf>, loader: &EbpfLoader) -> anyhow::Result<Self> {
-        let prog_fd = loader
-            .program_fd(CRYPTO_PROGRAM)
-            .ok_or_else(|| anyhow::anyhow!("program `{CRYPTO_PROGRAM}` is not in the object"))?;
+        let prog_fd = loader.program_fd(CRYPTO_PROGRAM);
+        if prog_fd.is_none() && ebpfsentinel_warden_proto::held_program(CRYPTO_PROGRAM).is_none() {
+            anyhow::bail!("program `{CRYPTO_PROGRAM}` is not in the object");
+        }
         Ok(Self {
             proc_root: proc_root.into(),
             prog_fd,
@@ -304,24 +306,20 @@ impl CryptoAttacher {
                 Ok(_) | Err(_) => continue,
             };
             let link = if let Some(client) = &self.warden {
-                crate::warden::uprobe::attach_via_warden(
-                    client,
-                    self.prog_fd,
-                    target,
-                    offset,
-                    false,
-                )
-                .map_err(|e| e.to_string())
-            } else {
+                crate::warden::uprobe::attach_via_warden(client, CRYPTO_PROGRAM, target, offset)
+                    .map_err(|e| e.to_string())
+            } else if let Some(prog_fd) = self.prog_fd {
                 kfunc_attach::attach_uprobe_at_offset(
                     CRYPTO_PROGRAM,
-                    self.prog_fd,
+                    prog_fd,
                     target,
                     symbol,
                     offset,
                     false,
                 )
                 .map_err(|e| e.to_string())
+            } else {
+                Err("the warden holds the program and this attacher was not given it".to_owned())
             };
             match link {
                 Ok(link) => links.push(link),

@@ -10,7 +10,7 @@
 //! reason is published, so an operator reading a flow with no process can
 //! find out why instead of guessing.
 
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::sync::{Mutex, OnceLock};
 
 use aya::maps::{Array, MapData};
@@ -18,7 +18,6 @@ use ebpf_common::process::ProcessLayout;
 use tracing::{info, warn};
 
 use super::kfunc;
-use super::kfunc_attach;
 use super::loader::EbpfLoader;
 use super::map_store::MapStore;
 
@@ -274,10 +273,7 @@ impl ProcessTracingAttacher {
     /// about it: the attach is issued here rather than brokered, because the
     /// BPF token the agent loaded the object with already covers it.
     fn attach_one(loader: &EbpfLoader, program: &str, tracepoint: &str) -> Result<OwnedFd, String> {
-        let prog_fd: RawFd = loader
-            .program_fd(program)
-            .ok_or_else(|| format!("program `{program}` is not in the loaded object"))?;
-        kfunc_attach::attach_raw_tracepoint(program, prog_fd, tracepoint).map_err(|e| e.to_string())
+        super::preload::attach_raw_tracepoint(loader, program, tracepoint)
     }
 
     /// How many tracepoints this attacher currently holds a link for.

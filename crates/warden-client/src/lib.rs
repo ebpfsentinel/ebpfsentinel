@@ -632,30 +632,58 @@ impl WardenClient {
         }
     }
 
-    /// Ask the warden to attach a `uprobe_multi` link at `offset` within the ELF
-    /// at `path`, binding the agent's `prog_fd` (handed to the warden over
-    /// `SCM_RIGHTS`). `is_ret` selects a uretprobe. Returns the link fd; the agent
-    /// owns it and dropping it detaches. The warden holds the tracing capability
-    /// and resolves `path` in its own namespaces, so a rootless agent can probe a
-    /// neighbouring container's `libssl` under `cap-drop: ALL`.
+    /// Hand the warden the program `prog_fd`, loaded under `name`, to hold
+    /// and attach from then on. The agent closes its own copies once this
+    /// answers.
+    #[cfg(feature = "fd-pass")]
+    pub fn hold_program(&mut self, name: &str, prog_fd: std::os::fd::RawFd) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        self.send(&Command::HoldProgram {
+            name: name.to_owned(),
+        })?;
+        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd);
+        self.classify("HoldProgram", "sending the program fd to", sent)?;
+        match self.recv("HoldProgram")? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            other => Err(unexpected("HoldProgram", &other)),
+        }
+    }
+
+    /// Ask the warden to attach the held program `program` to the raw
+    /// tracepoint or kernel function listed for it. Returns the link fd; the
+    /// agent owns it and dropping it detaches.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_held(&mut self, program: &str) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::AttachHeld {
+            program: program.to_owned(),
+        })?;
+        match self.recv("AttachHeld")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("AttachHeld", "waiting for the link fd from", result)
+            }
+            other => Err(unexpected("AttachHeld", &other)),
+        }
+    }
+
+    /// Ask the warden to attach the held uprobe program `program` at `offset`
+    /// within the ELF at `path`, entry or return as the program is listed.
+    /// Returns the link fd; the agent owns it and dropping it detaches. The
+    /// warden resolves `path` in its own namespaces, so a rootless agent can
+    /// probe a neighbouring container's `libssl`.
     #[cfg(feature = "fd-pass")]
     pub fn attach_uprobe(
         &mut self,
+        program: &str,
         path: &str,
         offset: u64,
-        is_ret: bool,
-        prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
-        use std::os::fd::AsRawFd;
         self.send(&Command::AttachUprobe {
+            program: program.to_owned(),
             path: path.to_owned(),
             offset,
-            is_ret,
         })?;
-        // The program fd rides in an `SCM_RIGHTS` cmsg right after the frame, the
-        // mirror of the warden's `Delegate` fs-fd hand-off.
-        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd);
-        self.classify("AttachUprobe", "sending the program fd to", sent)?;
         match self.recv("AttachUprobe")? {
             Response::FdReady => {
                 let result = fd_pass::recv_one_fd(&self.stream);
@@ -1039,17 +1067,29 @@ impl ReconnectingClient {
         self.with_retry(|c| c.pcap_open(iface, filter))
     }
 
-    /// Attach a uprobe through the warden, reconnecting if it bounced. `prog_fd`
-    /// is the same descriptor on a retry, so the call is replayable.
+    /// Hand a program to the warden, reconnecting if it bounced. A hold
+    /// replaces one of the same name, so a replay is harmless.
+    #[cfg(feature = "fd-pass")]
+    pub fn hold_program(&mut self, name: &str, prog_fd: std::os::fd::RawFd) -> io::Result<()> {
+        self.with_retry(|c| c.hold_program(name, prog_fd))
+    }
+
+    /// Attach a held program to its listed target, reconnecting if the
+    /// warden bounced.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_held(&mut self, program: &str) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.attach_held(program))
+    }
+
+    /// Attach a held uprobe program, reconnecting if the warden bounced.
     #[cfg(feature = "fd-pass")]
     pub fn attach_uprobe(
         &mut self,
+        program: &str,
         path: &str,
         offset: u64,
-        is_ret: bool,
-        prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
-        self.with_retry(|c| c.attach_uprobe(path, offset, is_ret, prog_fd))
+        self.with_retry(|c| c.attach_uprobe(program, path, offset))
     }
 
     /// Attach a cgroup program through the warden, reconnecting if it

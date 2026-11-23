@@ -7,12 +7,11 @@
 //! published with the reason the kernel gave, and the service that arms reads
 //! it before it promises anything.
 
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::sync::{Mutex, OnceLock};
 
 use tracing::{info, warn};
 
-use super::kfunc_attach;
 use super::loader::EbpfLoader;
 
 /// The program of the signal object and the tracepoint it hooks.
@@ -118,11 +117,7 @@ impl SignalAttacher {
     }
 
     fn attach_one(loader: &EbpfLoader) -> Result<OwnedFd, String> {
-        let prog_fd: RawFd = loader
-            .program_fd(SIGNAL_PROGRAM)
-            .ok_or_else(|| format!("program `{SIGNAL_PROGRAM}` is not in the loaded object"))?;
-        kfunc_attach::attach_raw_tracepoint(SIGNAL_PROGRAM, prog_fd, SIGNAL_TRACEPOINT)
-            .map_err(|e| e.to_string())
+        super::preload::attach_raw_tracepoint(loader, SIGNAL_PROGRAM, SIGNAL_TRACEPOINT)
     }
 
     /// Whether this attacher holds the link.

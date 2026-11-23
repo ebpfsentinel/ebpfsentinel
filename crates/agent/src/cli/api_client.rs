@@ -2746,6 +2746,9 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the guard.
     #[serde(default)]
     pub self_protection: Option<SelfProtectionReport>,
+    /// Absent from an agent that predates the hand-over.
+    #[serde(default)]
+    pub preload: Option<PreloadReport>,
     /// Absent from an agent that predates the file kfunc probe.
     #[serde(default)]
     pub file_kfuncs: Option<FileKfuncReport>,
@@ -2843,6 +2846,16 @@ pub struct SelfProtectionReport {
     pub links: usize,
     #[serde(default)]
     pub tasks: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Whether the agent on the node handed its kernel-reading programs over.
+#[derive(Deserialize, Serialize)]
+pub struct PreloadReport {
+    pub handed_over: bool,
+    #[serde(default)]
+    pub held: Vec<String>,
     #[serde(default)]
     pub reason: Option<String>,
 }

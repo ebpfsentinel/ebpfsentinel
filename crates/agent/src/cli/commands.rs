@@ -5794,6 +5794,10 @@ fn print_lsm_blocks(resp: &crate::cli::api_client::KernelFeaturesResponse) {
         Some(report) => print_self_protection(report),
         None => println!("\nSelf-protection\n  Not reported by this agent."),
     }
+    match &resp.preload {
+        Some(report) => print_preload(report),
+        None => println!("\nKernel-reading programs\n  Not reported by this agent."),
+    }
     match &resp.file_kfuncs {
         Some(report) => print_file_kfuncs(report),
         None => println!("\nFile kfuncs\n  Not reported by this agent."),
@@ -5899,6 +5903,18 @@ fn print_self_protection(report: &crate::cli::api_client::SelfProtectionReport) 
         println!("  Maps:       {}", report.maps);
         println!("  Links:      {}", report.links);
         println!("  Allowed:    {} thread groups", report.tasks);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+}
+
+/// Print whether the kernel-reading programs were handed to the warden.
+fn print_preload(report: &crate::cli::api_client::PreloadReport) {
+    println!("\nKernel-reading programs");
+    println!("  Handed over: {}", yes_no(report.handed_over));
+    if !report.held.is_empty() {
+        println!("  Held:       {}", report.held.join(", "));
     }
     if let Some(reason) = &report.reason {
         println!("  Reason:     {reason}");

@@ -173,6 +173,11 @@ pub struct KernelFeaturesResponse {
     /// the agent's maps and a descriptor to its links. A node without the
     /// BPF LSM says it is unprotected and why, rather than saying nothing.
     pub self_protection: SelfProtectionReport,
+    /// Whether the agent loaded the programs that read the kernel before it
+    /// read any input and handed those attached by name to the warden, and
+    /// which the warden holds. Without a warden nothing is handed over, and
+    /// it says why.
+    pub preload: PreloadReport,
     /// Whether the kfuncs that read a task's executable and a file's path
     /// and attributes are usable here. Each is declared or not by the
     /// kernel's BTF, and usable only where a sleepable LSM program loads and
@@ -224,7 +229,10 @@ impl CapabilityEntry {
                 unlocks: entry.capability.unlocks.to_string(),
                 active: entry.active(),
                 cause: entry.inactive.as_ref().map(|i| i.code().to_string()),
-                reason: entry.inactive.as_ref().map(adapters::ebpf::capability_report::Inactive::describe),
+                reason: entry
+                    .inactive
+                    .as_ref()
+                    .map(adapters::ebpf::capability_report::Inactive::describe),
                 since: entry.capability.since.to_string(),
                 fallback: entry.capability.fallback.to_string(),
                 hint: entry.hint.clone(),
@@ -382,6 +390,29 @@ impl From<adapters::ebpf::bpf_guard::BpfGuardStatus> for SelfProtectionReport {
             links: status.links,
             tasks: status.tasks,
             reason,
+        }
+    }
+}
+
+/// Whether the kernel-reading programs were loaded before input and handed
+/// over to the warden.
+#[derive(Serialize, ToSchema)]
+pub struct PreloadReport {
+    /// Start-up loaded them before reading input and handed those attached
+    /// by name to the warden; an object it did not load is refused after.
+    pub handed_over: bool,
+    /// The programs the warden holds and attaches to their listed target.
+    pub held: Vec<String>,
+    /// Why nothing was handed over, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl From<adapters::ebpf::preload::PreloadStatus> for PreloadReport {
+    fn from(status: adapters::ebpf::preload::PreloadStatus) -> Self {
+        Self {
+            handed_over: status.handed_over,
+            held: status.held,
+            reason: status.reason,
         }
     }
 }
@@ -910,6 +941,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
     let write_refusal = WriteRefusalReport::from(adapters::ebpf::write_refusal::status());
     let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
+    let preload = PreloadReport::from(adapters::ebpf::preload::status());
     let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
     let kfunc_features = KfuncFeaturesReport::from(adapters::ebpf::kfunc_feature_probe::cached());
     // Read live, like every block above, so an attach that came up or went
@@ -938,6 +970,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             network_executables,
             write_refusal,
             self_protection,
+            preload,
             file_kfuncs,
             kfunc_features,
             capabilities,
@@ -989,6 +1022,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         network_executables,
         write_refusal,
         self_protection,
+        preload,
         file_kfuncs,
         kfunc_features,
         capabilities,

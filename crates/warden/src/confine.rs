@@ -80,8 +80,8 @@ pub fn confine(writable: &[(&Path, Writes)]) -> Result<Posture, String> {
     Ok(Posture { landlock_abi })
 }
 
-/// Confine a warden about to serve `policy`: link pins may be written in
-/// their directory, created first so the rule has a directory to hold, and a
+/// Confine a warden about to serve `policy`: link pins and held programs may
+/// be written in their directories, created first so the rule has a directory to hold, and a
 /// canary may be created in the directory of each canary path the policy
 /// names. Nothing else on the host stays writable, the socket included: it is
 /// bound before.
@@ -91,15 +91,21 @@ pub fn confine(writable: &[(&Path, Writes)]) -> Result<Posture, String> {
 /// As [`confine`].
 pub fn confine_for_serving(policy: &WardenPolicy) -> Result<Posture, String> {
     let pins = crate::link_pins::pin_dir();
-    if let Err(e) = std::fs::create_dir_all(&pins) {
-        eprintln!("[warden] link pin directory {}: {e}", pins.display());
+    let held = crate::held_programs::held_dir();
+    for dir in [&pins, &held] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[warden] pin directory {}: {e}", dir.display());
+        }
     }
     let canary_dirs: Vec<&Path> = policy
         .canaries
         .iter()
         .filter_map(|c| Path::new(c).parent())
         .collect();
-    let mut writable = vec![(pins.as_path(), Writes::Anything)];
+    let mut writable = vec![
+        (pins.as_path(), Writes::Anything),
+        (held.as_path(), Writes::Anything),
+    ];
     writable.extend(canary_dirs.into_iter().map(|d| (d, Writes::NewFiles)));
     confine(&writable)
 }

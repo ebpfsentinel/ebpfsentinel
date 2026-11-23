@@ -485,7 +485,7 @@ pub struct DlpUprobeAttacher {
     /// Raw fds of the DLP uprobe programs, aligned with [`SSL_UPROBES`] then
     /// [`GO_TLS_PROGRAMS`]. Valid for the life of the owning [`EbpfLoader`];
     /// `-1` for a scan-only attacher.
-    fds: [RawFd; PROGRAM_COUNT],
+    fds: [Option<RawFd>; PROGRAM_COUNT],
     /// Warden control socket. When set (rootless posture), the privileged
     /// `BPF_LINK_CREATE` is brokered to the warden; when `None`, the agent
     /// attaches directly (bare-metal / single privileged container).
@@ -513,7 +513,7 @@ impl DlpUprobeAttacher {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
         Self {
             proc_root: proc_root.into(),
-            fds: [-1; PROGRAM_COUNT],
+            fds: [None; PROGRAM_COUNT],
             warden_sock: None,
             warden: None,
             attached: HashMap::new(),
@@ -528,16 +528,19 @@ impl DlpUprobeAttacher {
         proc_root: impl Into<PathBuf>,
         loader: &EbpfLoader,
     ) -> anyhow::Result<Self> {
-        let mut fds: [RawFd; PROGRAM_COUNT] = [-1; PROGRAM_COUNT];
+        let mut fds: [Option<RawFd>; PROGRAM_COUNT] = [None; PROGRAM_COUNT];
         let programs = SSL_UPROBES
             .iter()
             .map(|(prog, _, _)| *prog)
             .chain(GO_TLS_PROGRAMS)
             .chain(KTLS_PROGRAMS.iter().map(|(prog, _, _)| *prog));
         for (i, prog) in programs.enumerate() {
-            fds[i] = loader.program_fd(prog).ok_or_else(|| {
-                anyhow::anyhow!("DLP uprobe program '{prog}' was not loaded through the BPF token")
-            })?;
+            // A program the warden holds is attached by name and has no
+            // descriptor here.
+            fds[i] = loader.program_fd(prog);
+            if fds[i].is_none() && ebpfsentinel_warden_proto::held_program(prog).is_none() {
+                anyhow::bail!("DLP uprobe program '{prog}' was not loaded through the BPF token");
+            }
         }
         Ok(Self {
             proc_root: proc_root.into(),
@@ -1082,12 +1085,14 @@ impl DlpUprobeAttacher {
         let mut links = Vec::with_capacity(KTLS_PROGRAMS.len());
         let mut probes = Vec::with_capacity(KTLS_PROGRAMS.len());
         for (i, (program, symbol, is_ret)) in KTLS_PROGRAMS.iter().enumerate() {
-            let link = kfunc_attach::attach_kprobe_by_symbol(
-                program,
-                self.fds[base + i],
-                symbol,
-                *is_ret,
-            )?;
+            let link = match self.fds[base + i] {
+                Some(prog_fd) => {
+                    kfunc_attach::attach_kprobe_by_symbol(program, prog_fd, symbol, *is_ret)?
+                }
+                // The warden holds the program and attaches it to the symbol
+                // listed for it, which is this one.
+                None => super::preload::attach_held(program).map_err(anyhow::Error::msg)?,
+            };
             links.push(link);
             probes.push(AttachedUprobe {
                 lib: KTLS_ATTACH_TARGET.to_owned(),
@@ -1150,13 +1155,8 @@ impl DlpUprobeAttacher {
             let link = if let Some(client) = &self.warden {
                 // Rootless: the warden - which holds the tracing capability and
                 // can read the target - creates the link and passes back its fd.
-                let link = crate::warden::uprobe::attach_via_warden(
-                    client,
-                    self.fds[p.index],
-                    path,
-                    p.offset,
-                    p.retprobe,
-                )?;
+                let link =
+                    crate::warden::uprobe::attach_via_warden(client, p.program, path, p.offset)?;
                 // The warden created the link, so the direct path's log line
                 // never fires here. Say the same thing anyway: an operator
                 // debugging a rootless deployment needs the same evidence
@@ -1174,13 +1174,14 @@ impl DlpUprobeAttacher {
             } else {
                 // Direct: the agent creates the link itself (bare-metal / single
                 // privileged container).
+                let prog_fd = self.fds[p.index].ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "program '{}' is held by a warden this attacher was not given",
+                        p.program
+                    )
+                })?;
                 kfunc_attach::attach_uprobe_at_offset(
-                    p.program,
-                    self.fds[p.index],
-                    path,
-                    &p.symbol,
-                    p.offset,
-                    p.retprobe,
+                    p.program, prog_fd, path, &p.symbol, p.offset, p.retprobe,
                 )?
             };
             links.push(link);

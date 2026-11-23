@@ -753,6 +753,84 @@ pub async fn run(
     let (run_journal, previous_run) = crate::lifecycle::open_journal(&config.audit.storage_path);
     let _run_guard = crate::lifecycle::RunGuard(Arc::clone(&run_journal));
 
+    // ── 2c. Load what reads the kernel before any input ──────────────
+    // Everything below may read input from the network or from the host, so
+    // the token, the pins and, under a warden, the kernel-reading programs
+    // come first: those the warden attaches by name are handed over before
+    // the first byte is read, and the agent keeps none it could aim.
+    let warden_sock = warden_sock_from_env();
+    // Reading a TCX chain back needs a capability this namespace lacks; the
+    // warden answers for it, so every TC attach can verify where it landed.
+    if let Some(sock) = &warden_sock {
+        adapters::ebpf::tcx_order::use_warden(sock.clone());
+    }
+    install_link_pins(&config);
+
+    check_kernel_version()?;
+
+    // Ask the running kernel what it actually offers, once, before anything
+    // loads. The version check above is a proxy for capability: vendors
+    // backport helpers into older trees and distributions compile features
+    // out, so version and truth drift apart. A gap found here names the
+    // helper, the object and the program type; the same gap found at load
+    // time is an opaque verifier rejection.
+    //
+    // The probe itself needs CAP_BPF, which the token-only loading path does
+    // not hold, so on the normal path this reports "not probed" and changes
+    // nothing. That is the intended outcome: an unknown must never read as a
+    // missing helper.
+    let helper_report = adapters::ebpf::init_kernel_helpers();
+    info!("{}", helper_report.summary());
+    for gap in &helper_report.missing_required {
+        warn!(%gap, "required BPF helper unavailable on this kernel");
+    }
+
+    let ebpf_dir = resolve_ebpf_program_dir(&config);
+
+    // Bootstrap the BPF token before any program load, so the loader can
+    // attach the token fd and the Prometheus gauge is set before eBPF
+    // attachment races with the metrics scrape.
+    let bpf_handle = establish_bpf_token(&config, warden_sock.is_some());
+    let ebpf_capable = bpf_handle.is_some();
+    if ebpf_capable {
+        // Pins from a previous generation cannot be inspected - the kernel
+        // offers no way to ask whether one is still held - so startup wipes
+        // rather than adopts. Links are the other half of that state and are
+        // handled the opposite way: they are inspected, and an attach that
+        // finds its own program already in place readopts it.
+        EbpfLoader::cleanup_pin_path_because(
+            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+            "startup: previous generation's pins are not introspectable",
+        );
+        // The links the previous run pinned are a directory apart and are
+        // adopted, not wiped: they keep the previous program enforcing until
+        // this run has written its rules and swaps its own program in.
+        adapters::ebpf::link_pin::adopt();
+        EbpfLoader::cleanup_pin_path_because(
+            DLP_PIN_PATH,
+            "startup: previous generation's pins are not introspectable",
+        );
+
+        // The kernel-filled tables take their capacity from the configuration
+        // at create time, so the plan has to be in force before the first
+        // object is loaded. This is the path every agent takes at start; the
+        // HA activate path installs the same plan, and whichever runs first
+        // wins, because a map keeps the capacity it was created with.
+        let sizing = adapters::ebpf::map_sizing::MapSizing::from_config(&config);
+        match adapters::ebpf::map_sizing::install(&sizing) {
+            Ok(()) => info!(plan = %sizing.describe(), "eBPF table capacities"),
+            Err(in_force) => warn!(
+                in_force = %in_force.describe(),
+                configured = %sizing.describe(),
+                "eBPF table capacities changed in the configuration; they apply at the next \
+                 agent start"
+            ),
+        }
+        if let Some(sock) = &warden_sock {
+            preload_before_input(&ebpf_dir, sock);
+        }
+    }
+
     // ── 3. Convert and load firewall rules ──────────────────────────
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
@@ -2122,40 +2200,6 @@ pub async fn run(
     // nothing" - the agent still loads here; it only proxies the host-network ops
     // it cannot perform from its user namespace (conntrack teardown, routes,
     // gratuitous ARP, packet capture) to the warden over that socket.
-    let warden_sock = warden_sock_from_env();
-    // Reading a TCX chain back needs a capability this namespace lacks; the
-    // warden answers for it, so every TC attach can verify where it landed.
-    if let Some(sock) = &warden_sock {
-        adapters::ebpf::tcx_order::use_warden(sock.clone());
-    }
-    install_link_pins(&config);
-
-    check_kernel_version()?;
-
-    // Ask the running kernel what it actually offers, once, before anything
-    // loads. The version check above is a proxy for capability: vendors
-    // backport helpers into older trees and distributions compile features
-    // out, so version and truth drift apart. A gap found here names the
-    // helper, the object and the program type; the same gap found at load
-    // time is an opaque verifier rejection.
-    //
-    // The probe itself needs CAP_BPF, which the token-only loading path does
-    // not hold, so on the normal path this reports "not probed" and changes
-    // nothing. That is the intended outcome: an unknown must never read as a
-    // missing helper.
-    let helper_report = adapters::ebpf::init_kernel_helpers();
-    info!("{}", helper_report.summary());
-    for gap in &helper_report.missing_required {
-        warn!(%gap, "required BPF helper unavailable on this kernel");
-    }
-
-    let ebpf_dir = resolve_ebpf_program_dir(&config);
-
-    // Bootstrap the BPF token before any program load, so the loader can
-    // attach the token fd and the Prometheus gauge is set before eBPF
-    // attachment races with the metrics scrape.
-    let bpf_handle = establish_bpf_token(&config, warden_sock.is_some());
-    let ebpf_capable = bpf_handle.is_some();
     metrics.set_bpf_token_used(ebpf_capable);
     if !ebpf_capable && let Some(refusal) = enforcement_without_ebpf(&config, &workload_policy)? {
         anyhow::bail!(refusal);
@@ -2264,40 +2308,6 @@ pub async fn run(
         tokio::sync::mpsc::channel::<domain::process::entity::ProcessLifecycleEvent>(4096);
 
     if ebpf_capable {
-        // Pins from a previous generation cannot be inspected - the kernel
-        // offers no way to ask whether one is still held - so startup wipes
-        // rather than adopts. Links are the other half of that state and are
-        // handled the opposite way: they are inspected, and an attach that
-        // finds its own program already in place readopts it.
-        EbpfLoader::cleanup_pin_path_because(
-            adapters::ebpf::DEFAULT_BPF_PIN_PATH,
-            "startup: previous generation's pins are not introspectable",
-        );
-        // The links the previous run pinned are a directory apart and are
-        // adopted, not wiped: they keep the previous program enforcing until
-        // this run has written its rules and swaps its own program in.
-        adapters::ebpf::link_pin::adopt();
-        EbpfLoader::cleanup_pin_path_because(
-            DLP_PIN_PATH,
-            "startup: previous generation's pins are not introspectable",
-        );
-
-        // The kernel-filled tables take their capacity from the configuration
-        // at create time, so the plan has to be in force before the first
-        // object is loaded. This is the path every agent takes at start; the
-        // HA activate path installs the same plan, and whichever runs first
-        // wins, because a map keeps the capacity it was created with.
-        let sizing = adapters::ebpf::map_sizing::MapSizing::from_config(&config);
-        match adapters::ebpf::map_sizing::install(&sizing) {
-            Ok(()) => info!(plan = %sizing.describe(), "eBPF table capacities"),
-            Err(in_force) => warn!(
-                in_force = %in_force.describe(),
-                configured = %sizing.describe(),
-                "eBPF table capacities changed in the configuration; they apply at the next \
-                 agent start"
-            ),
-        }
-
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
             match try_load_xdp_firewall(&ebpf_dir, &config) {
@@ -8878,18 +8888,111 @@ pub fn establish_bpf_token_at(
     bpf_handle
 }
 
+/// The objects holding programs that read the kernel, with the pin path and
+/// the programs each may do without, exactly as their own loads below name
+/// them: a load is answered from what start-up kept only when it asks the same.
+fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static str]); 10] {
+    use adapters::ebpf::DEFAULT_BPF_PIN_PATH as PINS;
+    const GUARD_OPTIONAL: [&str; 2] = [
+        adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_3,
+        adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_4,
+    ];
+    [
+        ("tracepoint-process", PINS, &[]),
+        ("tracepoint-signal", PINS, &[]),
+        ("tracepoint-drop-reason", PINS, &[]),
+        ("tracepoint-tcp-health", PINS, &[]),
+        ("uprobe-crypto", PINS, &[]),
+        ("uprobe-dlp", DLP_PIN_PATH, &[]),
+        (adapters::ebpf::exec_network::EXEC_NETWORK_OBJECT, PINS, &[]),
+        (
+            adapters::ebpf::write_refusal::WRITE_REFUSAL_OBJECT,
+            PINS,
+            &[],
+        ),
+        (
+            adapters::ebpf::bpf_guard::BPF_GUARD_OBJECT,
+            PINS,
+            &GUARD_OPTIONAL,
+        ),
+        (adapters::ebpf::tamper_guard::TAMPER_GUARD_OBJECT, PINS, &[]),
+    ]
+}
+
+/// Load every object holding a program that reads the kernel, hand the
+/// programs whose hook is chosen at attach to the warden, and give up the
+/// capabilities that load such programs, on every thread of the process.
+///
+/// Runs before the agent reads its first byte of input. Every later load of
+/// these objects, at start-up or on a reload, is answered with what was
+/// loaded here; a program the agent did not load here it cannot load at all.
+/// LSM programs stay with the agent, since their hook is fixed when they load.
+/// An object that is missing or that the kernel refuses is remembered as such,
+/// and its own load further down reports it as it always did.
+///
+/// Public so a process building its own start-up on these crates hands over
+/// the same way.
+pub fn preload_before_input(ebpf_dir: &str, warden_sock: &std::path::Path) {
+    use adapters::ebpf::preload;
+    preload::begin();
+    // Asked once and kept for the life of the process; the answer needs a
+    // program the agent no longer holds once it has handed over.
+    let _ = adapters::ebpf::pidns::decide(&host_proc_root());
+    for (name, pin_path, optional) in kernel_reading_objects() {
+        let Ok(bytes) = read_ebpf_program(ebpf_dir, name) else {
+            continue;
+        };
+        let loaded = if optional.is_empty() {
+            EbpfLoader::load_with_pin_path(&bytes, pin_path)
+        } else {
+            EbpfLoader::load_with_pin_path_optional(&bytes, pin_path, optional)
+        };
+        match loaded {
+            // The program that signals at once is built against this object's
+            // maps and kept beside it.
+            Ok(mut loader) if name == "tracepoint-signal" => {
+                if let Err(e) = adapters::ebpf::SignalMapManager::new(loader.ebpf_mut()) {
+                    debug!(error = %e, "signal maps not read before input");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => debug!(object = name, error = %e, "kept as refused before input"),
+        }
+    }
+    let handed = preload::hand_over(warden_sock);
+    info!(
+        held = handed.held.len(),
+        "kernel-reading programs loaded before input; the warden holds those it attaches by name"
+    );
+}
+
 /// The BPF token for a process another binary started, when a warden is
 /// configured: the warden is told to answer for the TCX chains this user
 /// namespace cannot read back, and the token is established as the agent's
 /// own startup does. Without a warden this does nothing and returns `None`,
 /// because a process loading with its own capabilities needs no token.
+///
+/// With a token, the table capacities are put in force and the kernel-reading
+/// programs are loaded and handed over as the agent's own start-up does
+/// ([`preload_before_input`]), so this must run before the process reads any
+/// input.
 pub fn bpf_token_under_warden(config: &AgentConfig) -> Option<adapters::ebpf::BpfLoadingHandle> {
     let sock = warden_sock_from_env()?;
-    adapters::ebpf::tcx_order::use_warden(sock);
+    adapters::ebpf::tcx_order::use_warden(sock.clone());
     let handle = establish_bpf_token(config, true);
     if handle.is_none() {
         warn!("a warden is configured but no BPF token could be created; eBPF will not load");
+        return None;
     }
+    let sizing = adapters::ebpf::map_sizing::MapSizing::from_config(config);
+    if let Err(in_force) = adapters::ebpf::map_sizing::install(&sizing) {
+        warn!(
+            in_force = %in_force.describe(),
+            configured = %sizing.describe(),
+            "eBPF table capacities changed in the configuration; they apply at the next start"
+        );
+    }
+    preload_before_input(&resolve_ebpf_program_dir(config), &sock);
     handle
 }
 

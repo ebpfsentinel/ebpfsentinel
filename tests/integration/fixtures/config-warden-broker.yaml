@@ -3,7 +3,8 @@
 #
 #   conntrack      → ConntrackDelete / ConntrackFlush (netlink teardown)
 #   capture        → PcapOpen (AF_PACKET fds handed over SCM_RIGHTS)
-#   dlp            → DlpScan + AttachUprobe (uprobe_multi link fd)
+#   dlp            → DlpScan + AttachUprobe (uprobe_multi link on a program
+#                    the warden holds, handed over at start-up by HoldProgram)
 #   loadbalancer   → ArpAnnounce (gratuitous ARP on speaker takeover)
 #
 # The agent runs rootless in a user namespace, so none of those syscalls can

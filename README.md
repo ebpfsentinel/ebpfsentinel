@@ -509,6 +509,16 @@ Managed Kubernetes, where the node kernel is the provider's choice:
 | AKS | Ubuntu 24.04 node image, Azure Linux 3.0 | 6.8, 6.6 | No |
 | Scaleway Kapsule | Ubuntu node image | not published | Check `uname -r` on a node |
 
+The refusal of an unsigned load, the network executables list and the self-protection guard also need the BPF LSM, `bpf` in the LSMs the kernel starts with. Without `lsm=` on its command line a kernel starts the list it was built with, read for each image above in [`tests/integration/records/2026-11-23-bpf-lsm-by-distribution.md`](tests/integration/records/2026-11-23-bpf-lsm-by-distribution.md) by `tests/integration/scripts/lsm-defaults.py`:
+
+| `bpf` at boot | Distributions and node images |
+|---|---|
+| Yes | Ubuntu 26.04 and 24.04 HWE (AKS included), Debian 13 backports, Fedora, openSUSE Tumbleweed, Arch Linux, NixOS 26.05, Talos, Amazon Linux 2023 and Bottlerocket on 6.18 (EKS) |
+| No, add `bpf` to `lsm=` | Alpine `linux-lts`, Flatcar |
+| Not measured | Container-Optimized OS (GKE): read `/sys/kernel/security/lsm` on a node |
+
+A command line that sets `lsm=` overrides the list; `ebpfsentinel-agent ebpf host-check` answers for a running host.
+
 | Runs as | How |
 |---|---|
 | Native package | `.deb` / `.rpm`, systemd units for the agent and the warden |
