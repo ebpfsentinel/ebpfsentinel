@@ -12,6 +12,7 @@ use ebpf_common::event::PacketEvent;
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
 use super::flow::{Ended, FlowTable, Packet, Seen, Wire};
+use super::http1::Ready;
 use super::packet::{IpPacket, L4};
 use super::prefilter::{Entry, Prefilter, needle};
 
@@ -480,11 +481,12 @@ impl IdsEngine {
                 _ => None,
             },
         };
-        let (seen, blocks) = self
+        let observed = self
             .flows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .observe(&Packet::of(event), event, wire);
+        let seen = observed.seen;
         let streamed = seen.stream_size.is_some();
         let mut matched: Vec<(usize, &IdsRule)> = self
             .prefilter()
@@ -492,12 +494,19 @@ impl IdsEngine {
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, &seen)?;
-                let on_packet = !streamed || program.inspect() != Inspect::Stream;
+                let on_packet = match program.inspect() {
+                    Inspect::Transaction => false,
+                    Inspect::Stream => !streamed,
+                    Inspect::Packet | Inspect::Both => true,
+                };
                 (on_packet && program.matches_packet(&packet)).then_some((idx, rule))
             })
             .collect();
-        for block in &blocks {
+        for block in &observed.blocks {
             matched.extend(self.stream_matches(event, ports, &seen, block));
+        }
+        for tx in &observed.txs {
+            matched.extend(self.transaction_matches(event, ports, &seen, tx));
         }
         self.run_state(event, matched)
     }
@@ -532,6 +541,9 @@ impl IdsEngine {
             let mut matched = Vec::new();
             for block in &end.blocks {
                 matched.extend(self.stream_matches(&end.event, ports, &end.seen, block));
+            }
+            for tx in &end.txs {
+                matched.extend(self.transaction_matches(&end.event, ports, &end.seen, tx));
             }
             out.extend(
                 self.run_state(&end.event, matched)
@@ -576,9 +588,42 @@ impl IdsEngine {
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
-                (program.inspect() != Inspect::Packet && program.matches_stream(block))
-                    .then_some((idx, rule))
+                (matches!(program.inspect(), Inspect::Stream | Inspect::Both)
+                    && program.matches_stream(block))
+                .then_some((idx, rule))
             })
+            .collect()
+    }
+
+    /// The rules matching one side of an HTTP transaction the packet's
+    /// sender completed, each raised once per transaction side.
+    fn transaction_matches(
+        &self,
+        event: &PacketEvent,
+        ports: Option<(u16, u16)>,
+        seen: &Seen,
+        tx: &Ready,
+    ) -> Vec<(usize, &IdsRule)> {
+        let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
+        let matched: Vec<(usize, &IdsRule)> = self
+            .prefilter()
+            .candidates(&keys, &[])
+            .into_iter()
+            .filter_map(|idx| {
+                let (rule, program) = self.imported(idx, event, ports, seen)?;
+                (program.inspect() == Inspect::Transaction
+                    && program.matches_transaction(tx.side, &tx.fields))
+                .then_some((idx, rule))
+            })
+            .collect();
+        if matched.is_empty() {
+            return matched;
+        }
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        let packet = Packet::of(event);
+        matched
+            .into_iter()
+            .filter(|(idx, _)| flows.first_alert(&packet, tx.id, tx.side, *idx))
             .collect()
     }
 

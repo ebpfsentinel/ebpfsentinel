@@ -165,16 +165,16 @@ def conversations():
     return out
 
 
-def main():
-    rules = [rule_text(n, r) for n, r in enumerate(RULES)]
-    packets = conversations()
+def verdicts(stem, script, first_sid, rules, packets):
+    """Runs `rules` over `packets` through Suricata and writes
+    `<stem>-verdicts.txt` beside this script."""
     with tempfile.TemporaryDirectory() as work:
         os.chmod(work, 0o777)
-        loaded = [rule[:-1] + f" sid:{FIRST_SID + n};)" for n, rule in enumerate(rules)]
-        with open(os.path.join(work, "applayer.rules"), "w", encoding="utf-8") as f:
+        loaded = [rule[:-1] + f" sid:{first_sid + n};)" for n, rule in enumerate(rules)]
+        with open(os.path.join(work, "case.rules"), "w", encoding="utf-8") as f:
             f.write("\n".join(loaded) + "\n")
         times = []
-        with open(os.path.join(work, "applayer.pcap"), "wb") as f:
+        with open(os.path.join(work, "case.pcap"), "wb") as f:
             f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
             for n, at, ip in packets:
                 ns = (n * 10_000 * 1000 + round(at * 1000)) * 1_000_000
@@ -187,7 +187,7 @@ def main():
         os.chmod(os.path.join(work, "out"), 0o777)
         run = subprocess.run(
             ["docker", "run", "--rm", "-v", f"{work}:/w", "--entrypoint", "suricata", IMAGE,
-             "-r", "/w/applayer.pcap", "-S", "/w/applayer.rules", "-l", "/w/out", "-k", "none",
+             "-r", "/w/case.pcap", "-S", "/w/case.rules", "-l", "/w/out", "-k", "none",
              "--runmode", "single", "--set", "packet-alert-max=255",
              "--set", "stream.reassembly.randomize-chunk-size=no"],
             capture_output=True, text=True, check=False,
@@ -219,7 +219,7 @@ def main():
             ["docker", "run", "--rm", "--entrypoint", "suricata", IMAGE, "-V"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-    lines = [f"# {version}, run by make-applayer-verdicts.py; do not edit by hand."]
+    lines = [f"# {version}, run by {script}; do not edit by hand."]
     lines.append("# 'rule SID RULE', or 'refused SID RULE' when Suricata does not load it,")
     lines.append("# then 'packet NS HEX SIDS': the packet's time in nanoseconds, its IP")
     lines.append("# bytes and the sids that alerted on it, a sid once per alert, '-' for none,")
@@ -228,7 +228,7 @@ def main():
     lines.append("# application protocol Suricata logged for flow N.")
     for n, rule in enumerate(rules):
         word = "refused" if n + 1 in refused else "rule"
-        lines.append(f"{word} {FIRST_SID + n} {rule}")
+        lines.append(f"{word} {first_sid + n} {rule}")
     for n, ((_, _, ip), ns) in enumerate(zip(packets, times)):
         sids = ",".join(str(s) for s in sorted(alerted.get(n, ()))) or "-"
         lines.append(f"packet {ns} {ip.hex()} {sids}")
@@ -238,8 +238,13 @@ def main():
         lines.append(f"end {n} {sids}")
     for n in flows:
         lines.append(f"proto {n} {protos.get(n, '-')}")
-    with open(os.path.join(HERE, "applayer-verdicts.txt"), "w", encoding="utf-8") as f:
+    with open(os.path.join(HERE, f"{stem}-verdicts.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def main():
+    rules = [rule_text(n, r) for n, r in enumerate(RULES)]
+    verdicts("applayer", "make-applayer-verdicts.py", FIRST_SID, rules, conversations())
 
 
 if __name__ == "__main__":

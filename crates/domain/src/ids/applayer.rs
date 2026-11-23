@@ -30,6 +30,8 @@
 //! These rules are held to Suricata by
 //! `tests/fixtures/suricata/applayer-verdicts.txt`.
 
+use super::http1::{Http1, Ready};
+
 /// An application protocol the agent finds, or the verdict that none was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppProto {
@@ -172,7 +174,13 @@ struct Direction {
     announce: bool,
     /// The last bytes seen, to find a message header's end across packets.
     tail: Vec<u8>,
+    /// Every byte the direction sent while its protocol is not named, for
+    /// the protocol's parser once it is.
+    raw: Vec<u8>,
 }
+
+/// The most a direction holds while its protocol is not named.
+const RAW_LIMIT: usize = 64 * 1024;
 
 /// What the application layer knows of a flow.
 #[derive(Debug, Clone)]
@@ -182,6 +190,8 @@ pub struct AppLayer {
     server_port: u16,
     udp: bool,
     closed: bool,
+    /// The HTTP/1 parser, once the flow speaks it.
+    http: Option<Box<Http1>>,
 }
 
 /// What the application layer says of one packet.
@@ -196,12 +206,14 @@ pub struct AppView {
 }
 
 /// What handing bytes to the application layer did.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Fed {
     /// The packet the bytes were handed on announces a detection.
     pub announced: bool,
     /// The direction's stream is to be inspected on its next packet.
     pub inspect: bool,
+    /// The transaction sides the bytes completed.
+    pub txs: Vec<Ready>,
 }
 
 impl AppLayer {
@@ -214,6 +226,7 @@ impl AppLayer {
             server_port,
             udp,
             closed: false,
+            http: None,
         }
     }
 
@@ -258,6 +271,11 @@ impl AppLayer {
         dir.fed = dir.fed.saturating_add(bytes.len() as u64);
         let mut tail = std::mem::take(&mut dir.tail);
         tail.extend_from_slice(bytes);
+        let known = dir.proto.is_some();
+        if !known {
+            let room = RAW_LIMIT.saturating_sub(dir.raw.len());
+            dir.raw.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        }
         if dir.proto.is_none() {
             let room = HEAD.saturating_sub(dir.head.len());
             dir.head.extend_from_slice(&bytes[..bytes.len().min(room)]);
@@ -291,7 +309,36 @@ impl AppLayer {
         }
         let keep = tail.len().saturating_sub(3);
         self.dirs[side].tail = tail.split_off(keep);
+        if known {
+            fed.txs = self.parse(side, bytes);
+        }
+        for d in 0..2 {
+            if self.dirs[d].proto.is_some() && !self.dirs[d].raw.is_empty() {
+                let raw = std::mem::take(&mut self.dirs[d].raw);
+                fed.txs.extend(self.parse(d, &raw));
+            }
+        }
         fed
+    }
+
+    /// Hand a direction's bytes to its protocol's parser, if the agent has
+    /// one for it.
+    fn parse(&mut self, side: usize, bytes: &[u8]) -> Vec<Ready> {
+        if self.dirs[side].proto != Some(AppProto::Http) {
+            return Vec::new();
+        }
+        self.http.get_or_insert_with(Box::default).feed(side, bytes)
+    }
+
+    /// The connection ended: what each direction's parser still held to the
+    /// close is complete.
+    pub fn end(&mut self) -> Vec<Ready> {
+        let Some(http) = self.http.as_mut() else {
+            return Vec::new();
+        };
+        let mut txs = http.close(0);
+        txs.extend(http.close(1));
+        txs
     }
 
     /// A connection's first FIN or RST, sent by `side`: one whose two
@@ -311,6 +358,7 @@ impl AppLayer {
         for dir in &mut self.dirs {
             dir.proto = Some(AppProto::Failed);
             dir.head = Vec::new();
+            dir.raw = Vec::new();
         }
         self.dirs[1 - side].announce = true;
         true

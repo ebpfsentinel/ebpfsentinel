@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use ebpf_common::event::PacketEvent;
 
 use super::applayer::{AppLayer, AppView};
+use super::http1::Ready;
 use super::sig::model::{
     BitOp, BitScope, Bits, Check, Flowint, FlowintOp, Signature, Threshold, ThresholdKind, Track,
     Value,
@@ -138,6 +139,12 @@ struct Flow {
     session: Option<Session>,
 }
 
+/// How many transaction alerts a connection records before forgetting the
+/// older transactions'.
+const ALERTED_LIMIT: usize = 4096;
+/// How many of the latest transactions keep their alerts past that.
+const KEPT_TRANSACTIONS: u64 = 16;
+
 const FIN: u8 = 0x01;
 const SYN: u8 = 0x02;
 const RST: u8 = 0x04;
@@ -185,6 +192,12 @@ struct Session {
     /// The last packet each side sent, which the alerts raised when the
     /// flow ends are reported on.
     last: [Option<PacketEvent>; 2],
+    /// Transaction sides parsed and waiting for the next packet their
+    /// sender sends, which inspects them, client first.
+    txs: [Vec<Ready>; 2],
+    /// The rules that alerted on a transaction side: transaction, side,
+    /// rule.
+    alerted: HashSet<(u64, usize, usize)>,
 }
 
 impl Session {
@@ -246,6 +259,18 @@ pub struct Ended {
     /// The session as it stood, in the side's direction.
     pub seen: Seen,
     pub blocks: Vec<Vec<u8>>,
+    /// The side's transactions not inspected yet.
+    pub txs: Vec<Ready>,
+}
+
+/// What the session says of one packet and hands it to inspect.
+#[derive(Debug)]
+pub struct Observation {
+    pub seen: Seen,
+    /// The windows of the sender's stream the packet inspects.
+    pub blocks: Vec<Vec<u8>>,
+    /// The sender's transaction sides the packet inspects.
+    pub txs: Vec<Ready>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -305,14 +330,9 @@ impl FlowTable {
     }
 
     /// Count a packet handed over whole in its flow's session and say what
-    /// the session knows of it, with the bytes of the sender's stream the
-    /// packet has inspected.
-    pub fn observe(
-        &mut self,
-        packet: &Packet,
-        event: &PacketEvent,
-        wire: Wire<'_>,
-    ) -> (Seen, Vec<Vec<u8>>) {
+    /// the session knows of it, with the bytes of the sender's stream and
+    /// the sender's transactions the packet inspects.
+    pub fn observe(&mut self, packet: &Packet, event: &PacketEvent, wire: Wire<'_>) -> Observation {
         let streams = self.streams;
         let app_layer = self.app_layer;
         self.flow(packet);
@@ -338,6 +358,8 @@ impl FlowTable {
                 }
                 .then(|| Box::new(AppLayer::new(wire.tcp_flags.is_none(), event.dst_port))),
                 last: [None; 2],
+                txs: [Vec::new(), Vec::new()],
+                alerted: HashSet::new(),
             }
         });
         let side = usize::from((packet.src, packet.sport) != session.client);
@@ -353,6 +375,7 @@ impl FlowTable {
         };
         let mut blocks = Vec::new();
         let mut sizes = None;
+        let txs = std::mem::take(&mut session.txs[side]);
         let mut announced = session.app.as_mut().is_some_and(|app| app.begin(side));
         if let (Some(streams), Some(segment)) = (session.streams.as_mut(), wire.segment) {
             let observed = streams.observe(side, segment, &mut self.held);
@@ -366,6 +389,9 @@ impl FlowTable {
                 if fed.inspect {
                     streams.inspect_next(other);
                 }
+                for tx in fed.txs {
+                    session.txs[tx.side].push(tx);
+                }
                 if segment.flags & (FIN | RST) != 0 {
                     announced |= app.close(side);
                 }
@@ -378,7 +404,7 @@ impl FlowTable {
             seen.stream_size = sizes;
         }
         seen.app.announced = announced;
-        (seen, blocks)
+        Observation { seen, blocks, txs }
     }
 
     /// Hand over the stream bytes of the flows idle past their timeout, at
@@ -414,23 +440,51 @@ impl FlowTable {
             let Some(session) = flow.session.as_mut() else {
                 continue;
             };
-            let Some(streams) = session.streams.as_mut().filter(|s| s.pending()) else {
-                continue;
+            let mut txs = std::mem::take(&mut session.txs);
+            if let Some(app) = session.app.as_mut() {
+                for tx in app.end() {
+                    txs[tx.side].push(tx);
+                }
+            }
+            let drained = match session.streams.as_mut().filter(|s| s.pending()) {
+                Some(streams) => streams.drain(&mut self.held),
+                None => [Vec::new(), Vec::new()],
             };
-            let drained = streams.drain(&mut self.held);
             let established = session.handshake == Handshake::Established;
-            for (side, blocks) in drained.into_iter().enumerate() {
-                let Some(event) = session.last[side].filter(|_| !blocks.is_empty()) else {
+            for (side, (blocks, txs)) in drained.into_iter().zip(txs).enumerate() {
+                let Some(event) =
+                    session.last[side].filter(|_| !blocks.is_empty() || !txs.is_empty())
+                else {
                     continue;
                 };
                 ended.push(Ended {
                     event,
                     seen: session.seen(side, flow.last, established),
                     blocks,
+                    txs,
                 });
             }
         }
         ended
+    }
+
+    /// Whether `rule` alerts on this side of the flow's transaction for the
+    /// first time, which it then records. A connection remembers the
+    /// latest transactions only, a transaction long answered being
+    /// inspected no more.
+    pub fn first_alert(&mut self, packet: &Packet, tx: u64, side: usize, rule: usize) -> bool {
+        let Some(session) = self
+            .flows
+            .get_mut(&packet.flow)
+            .and_then(|f| f.session.as_mut())
+        else {
+            return true;
+        };
+        if session.alerted.len() >= ALERTED_LIMIT {
+            let floor = tx.saturating_sub(KEPT_TRANSACTIONS);
+            session.alerted.retain(|&(id, _, _)| id >= floor);
+        }
+        session.alerted.insert((tx, side, rule))
     }
 
     /// Forget the filters' counters, whose rule indices no longer hold.

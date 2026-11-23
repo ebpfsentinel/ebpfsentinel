@@ -4,6 +4,7 @@ pub mod engine;
 pub mod entity;
 pub mod error;
 pub mod flow;
+pub mod http1;
 pub mod packet;
 pub mod prefilter;
 pub mod sig;

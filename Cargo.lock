@@ -967,6 +967,7 @@ dependencies = [
  "aho-corasick",
  "criterion",
  "ebpf-common",
+ "flate2",
  "hmac",
  "lru",
  "md-5",

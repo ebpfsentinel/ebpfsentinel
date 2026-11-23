@@ -96,8 +96,8 @@ fn the_engine_decides_what_suricata_decides() {
         };
         for (number, expected, bytes) in &case.buffers {
             let got = if case.header {
-                program.matches_with(b"x", &|name| {
-                    (name == "tcp.hdr").then_some(bytes.as_slice())
+                program.matches_with(b"x", &|name, index| {
+                    (name == "tcp.hdr" && index == 0).then_some(bytes.as_slice())
                 })
             } else {
                 program.matches(bytes)

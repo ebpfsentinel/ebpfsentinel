@@ -25,6 +25,7 @@ use super::model::{
 };
 use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::flow::{Seen, State};
+use crate::ids::http1::Fields;
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
 
@@ -64,6 +65,7 @@ fn inspect(
     lists: &[List],
     headers: &[HeaderCheck],
     session: &Session,
+    tx: Option<[bool; 2]>,
 ) -> Inspect {
     let flow = &signature.flow;
     let stream_proto = signature.header.proto == RuleProto::TcpStream;
@@ -71,6 +73,9 @@ fn inspect(
         && lists
             .iter()
             .all(|l| matches!(l.source, Source::Payload | Source::Decoded));
+    if tx.is_some() {
+        return Inspect::Transaction;
+    }
     if !matches!(
         signature.header.proto,
         RuleProto::Tcp | RuleProto::TcpStream | RuleProto::App(_)
@@ -94,6 +99,144 @@ fn inspect(
     }
 }
 
+/// The HTTP buffers only a request fills.
+const REQUEST_ONLY: &[&str] = &[
+    "http.uri",
+    "http.uri.raw",
+    "http.method",
+    "http.request_line",
+    "http.request_body",
+    "http.user_agent",
+    "http.host",
+    "http.host.raw",
+    "http.accept",
+    "http.accept_enc",
+    "http.accept_lang",
+    "http.referer",
+    "http.request_header",
+];
+
+/// The HTTP buffers only a response fills.
+const RESPONSE_ONLY: &[&str] = &[
+    "http.response_header",
+    "http.stat_code",
+    "http.stat_msg",
+    "http.response_line",
+    "http.server",
+    "http.location",
+    "http.response_body",
+];
+
+/// Whether a buffer is one an HTTP transaction fills.
+fn transaction_buffer(name: &str) -> bool {
+    name == "file.data" || sticky(name).is_some_and(|b| b.proto == "http")
+}
+
+/// The transaction sides a rule reading HTTP buffers is inspected on,
+/// request then response, or `None` for a rule reading none. Suricata
+/// refuses a rule mixing request and response buffers, a request buffer
+/// with `flow:to_client`, a response buffer with `flow:to_server` (but for
+/// the response body, which it then inspects on the response), the raw
+/// header without a direction, and a host matched on uppercase letters.
+fn transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    session: &mut Session,
+) -> Compiled<Option<[bool; 2]>> {
+    let names: Vec<&'static str> = lists
+        .iter()
+        .filter_map(|l| match l.source {
+            Source::Sticky(name) if transaction_buffer(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let Some(&first) = names.first() else {
+        return Ok(None);
+    };
+    if let RuleProto::App(name) = &signature.header.proto
+        && !matches!(name.as_str(), "http" | "http1")
+    {
+        return Err(refused(
+            first,
+            format!("is read on HTTP alone, not yet on {name}"),
+        ));
+    }
+    if lists
+        .iter()
+        .any(|l| !matches!(l.source, Source::Sticky(name) if transaction_buffer(name)))
+    {
+        return Err(refused(
+            first,
+            "is not yet read beside the payload or a buffer of another protocol",
+        ));
+    }
+    if !headers.is_empty() {
+        return Err(refused(
+            first,
+            "is not yet read beside a packet header keyword",
+        ));
+    }
+    let request = names.iter().find(|n| REQUEST_ONLY.contains(n));
+    let response = names.iter().find(|n| RESPONSE_ONLY.contains(n));
+    if let (Some(_), Some(answer)) = (request, response) {
+        return Err(refused(
+            *answer,
+            "mixes request and response buffers, which Suricata refuses",
+        ));
+    }
+    let flow = &signature.flow;
+    if let (Some(name), true) = (request, flow.to_client) {
+        return Err(refused(
+            *name,
+            "is a request buffer under flow:to_client, which Suricata refuses",
+        ));
+    }
+    let mut sides = match (request, response) {
+        (Some(_), _) => [true, false],
+        (_, Some(_)) => [false, true],
+        _ if flow.to_server => [true, false],
+        _ if flow.to_client => [false, true],
+        _ => [true, true],
+    };
+    if response.is_some() && flow.to_server {
+        if let Some(name) = names
+            .iter()
+            .find(|n| RESPONSE_ONLY.contains(n) && **n != "http.response_body")
+        {
+            return Err(refused(
+                *name,
+                "is a response buffer under flow:to_server, which Suricata refuses",
+            ));
+        }
+        session.to_server = None;
+        sides = [false, true];
+    }
+    if names.contains(&"http.header.raw") && !flow.to_server && !flow.to_client {
+        return Err(refused(
+            "http.header.raw",
+            "needs a flow direction in Suricata, which refuses it without one",
+        ));
+    }
+    for list in lists {
+        if list.source != Source::Sticky("http.host") {
+            continue;
+        }
+        for op in &list.ops {
+            if let Op::Content(c) = op
+                && !c.nocase
+                && c.bytes.iter().any(u8::is_ascii_uppercase)
+            {
+                return Err(refused(
+                    "http.host",
+                    "is lowercase, so Suricata refuses a content with uppercase letters on it",
+                ));
+            }
+        }
+    }
+    Ok(Some(sides))
+}
+
 /// How many times one inspection may return to an earlier match to try its
 /// next occurrence, Suricata's default `inspection-recursion-limit`.
 const RETRY_BUDGET: u32 = 3000;
@@ -108,6 +251,9 @@ pub struct Program {
     state: Option<State>,
     session: Session,
     inspect: Inspect,
+    /// The HTTP transaction sides the rule is inspected on, request then
+    /// response, for a rule reading HTTP buffers.
+    tx: Option<[bool; 2]>,
 }
 
 /// Where a rule's payload matches run on a TCP connection whose streams are
@@ -125,6 +271,9 @@ pub enum Inspect {
     /// On both: a content placed from the start of the buffer by `offset`,
     /// `depth` or `startswith`, or a rule that also reads `stream_size`.
     Both,
+    /// On the HTTP transactions of the connection, each side once, on the
+    /// buffers the parser fills.
+    Transaction,
 }
 
 /// What the rule asks of the flow's session: `flow`, its counters, the
@@ -619,9 +768,10 @@ impl Program {
             .iter()
             .filter_map(|check| HeaderCheck::compile(check).transpose())
             .collect::<Compiled<Vec<_>>>()?;
-        let session = Session::compile(signature, &lists)?;
+        let mut session = Session::compile(signature, &lists)?;
         stream_alone(signature, &lists, &headers, &session)?;
-        let inspect = inspect(signature, &lists, &headers, &session);
+        let tx = transaction(signature, &lists, &headers, &mut session)?;
+        let inspect = inspect(signature, &lists, &headers, &session, tx);
         Ok(Self {
             lists,
             headers,
@@ -630,6 +780,7 @@ impl Program {
             state: State::compile(signature)?,
             session,
             inspect,
+            tx,
         })
     }
 
@@ -650,7 +801,18 @@ impl Program {
     /// Whether the rule reads the flow's application protocol.
     #[must_use]
     pub fn reads_app_layer(&self) -> bool {
-        self.session.alproto.is_some() || !self.session.protocols.is_empty()
+        self.session.alproto.is_some() || !self.session.protocols.is_empty() || self.tx.is_some()
+    }
+
+    /// Whether the rule holds on one side of an HTTP transaction, 0 the
+    /// request, its buffers read from `fields`.
+    #[must_use]
+    pub fn matches_transaction(&self, side: usize, fields: &Fields) -> bool {
+        if !self.tx.is_some_and(|sides| sides[side]) {
+            return false;
+        }
+        let sticky = |name: &str, index: usize| fields.get(name, index);
+        self.run(&[], &sticky)
     }
 
     /// Whether the signature's matches hold on a window of a stream: its
@@ -658,7 +820,7 @@ impl Program {
     /// its first byte.
     #[must_use]
     pub fn matches_stream(&self, bytes: &[u8]) -> bool {
-        self.run(bytes, &|_| None)
+        self.run(bytes, &|_, _| None)
     }
 
     /// Whether the flow's session, as it stands with the packet counted,
@@ -690,7 +852,7 @@ impl Program {
     /// other than `dsize`, the payload carrying no header.
     #[must_use]
     pub fn matches(&self, payload: &[u8]) -> bool {
-        self.matches_with(payload, &|_| None)
+        self.matches_with(payload, &|_, _| None)
     }
 
     /// Whether the signature's matches hold, `sticky` handing the bytes of a
@@ -699,7 +861,7 @@ impl Program {
     pub fn matches_with<'a>(
         &self,
         payload: &'a [u8],
-        sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>,
+        sticky: &'a dyn Fn(&str, usize) -> Option<&'a [u8]>,
     ) -> bool {
         let len = len_u64(payload.len());
         if !self.headers.iter().all(|h| match h {
@@ -720,11 +882,21 @@ impl Program {
             return false;
         }
         let packet = *packet;
-        let sticky = move |name: &str| packet.header_buffer(name);
+        let sticky = move |name: &str, index: usize| {
+            if index == 0 {
+                packet.header_buffer(name)
+            } else {
+                None
+            }
+        };
         self.run(packet.payload().unwrap_or_default(), &sticky)
     }
 
-    fn run<'a>(&self, payload: &'a [u8], sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>) -> bool {
+    fn run<'a>(
+        &self,
+        payload: &'a [u8],
+        sticky: &'a dyn Fn(&str, usize) -> Option<&'a [u8]>,
+    ) -> bool {
         let mut run = Run {
             payload,
             sticky,
@@ -758,11 +930,24 @@ impl Program {
                 Some(bytes) => Cow::Owned(bytes.clone()),
                 None => return false,
             },
-            Source::Sticky(name) => match (run.sticky)(name) {
-                Some(bytes) => Cow::Borrowed(bytes),
-                None => return false,
-            },
+            Source::Sticky(name) => {
+                // A buffer holding several instances, one per header, is
+                // matched when any instance holds the list.
+                let mut instance = 0;
+                while let Some(bytes) = (run.sticky)(name, instance) {
+                    if self.list_on(index, Cow::Borrowed(bytes), run) {
+                        return true;
+                    }
+                    instance += 1;
+                }
+                return false;
+            }
         };
+        self.list_on(index, raw, run)
+    }
+
+    fn list_on(&self, index: usize, raw: Cow<'_, [u8]>, run: &mut Run<'_>) -> bool {
+        let list = &self.lists[index];
         let mut bytes = raw;
         for xform in &list.transforms {
             bytes = Cow::Owned(apply(xform, &bytes));
@@ -976,7 +1161,7 @@ impl Program {
 
 struct Run<'a> {
     payload: &'a [u8],
-    sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>,
+    sticky: &'a dyn Fn(&str, usize) -> Option<&'a [u8]>,
     slots: Vec<u64>,
     decoded: Option<Vec<u8>>,
     budget: u32,
