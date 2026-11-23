@@ -418,8 +418,10 @@ fn assert_threatintel(family: Family, listing: Listing, slot: char, reads: u32, 
             outcome.retval, want,
             "{family:?} {listing:?} in slot {slot}, selector {reads}"
         ),
-        Err(e) if e.is_unavailable() => eprintln!("skipped: {e}"),
-        Err(e) => panic!("tc_threatintel could not be run: {e}"),
+        Err(e) => {
+            assert!(e.is_unavailable(), "tc_threatintel could not be run: {e}");
+            eprintln!("skipped: {e}");
+        }
     }
 }
 

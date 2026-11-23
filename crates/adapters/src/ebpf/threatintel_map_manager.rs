@@ -195,7 +195,7 @@ impl Slot {
         let nets_v6 = take(ebpf, &format!("THREATINTEL_NETS_V6_{name}"))?;
         let capacity = [&v4, &v6, &nets_v4, &nets_v6]
             .into_iter()
-            .filter_map(|m| max_entries(m))
+            .filter_map(max_entries)
             .min()
             .ok_or_else(|| anyhow::anyhow!("threat intel slot {name}: no table size readable"))?;
         let v4_fd = duplicate_fd(&v4, "THREATINTEL_IOCS");
