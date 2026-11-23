@@ -61,56 +61,6 @@ fn is_timeout(err: &io::Error) -> bool {
     )
 }
 
-/// The command's name, for an error that has to say which call timed out.
-fn op_name(cmd: &Command) -> &'static str {
-    match cmd {
-        Command::Hello { .. } => "Hello",
-        Command::Delegate => "Delegate",
-        Command::ConntrackDump => "ConntrackDump",
-        Command::ConntrackDelete { .. } => "ConntrackDelete",
-        Command::ConntrackFlush => "ConntrackFlush",
-        Command::ConntrackRestore { .. } => "ConntrackRestore",
-        Command::RouteAdd { .. } => "RouteAdd",
-        Command::ArpAnnounce { .. } => "ArpAnnounce",
-        Command::PcapOpen { .. } => "PcapOpen",
-        Command::AttachUprobe { .. } => "AttachUprobe",
-        Command::AttachCgroup { .. } => "AttachCgroup",
-        Command::DlpScan => "DlpScan",
-        Command::Extension { .. } => "Extension",
-        Command::TcxChain { .. } => "TcxChain",
-        Command::AttachTcxInNetns { .. } => "AttachTcxInNetns",
-        Command::ReadExecutable { .. } => "ReadExecutable",
-        Command::PacketSockets => "PacketSockets",
-        Command::NetworkPrograms => "NetworkPrograms",
-        Command::Identity => "Identity",
-        Command::FimOpen { .. } => "FimOpen",
-        Command::FimRead { .. } => "FimRead",
-        Command::FimFacts { .. } => "FimFacts",
-        Command::FimCanaries { .. } => "FimCanaries",
-        Command::HiddenPorts { .. } => "HiddenPorts",
-        Command::HiddenProcesses { .. } => "HiddenProcesses",
-        Command::NamespaceIds => "NamespaceIds",
-        Command::FileRoots => "FileRoots",
-        Command::ReadRootedFile { .. } => "ReadRootedFile",
-        Command::GoExecutables => "GoExecutables",
-        Command::ProcessMappings { .. } => "ProcessMappings",
-        Command::WriteRefusalGroup => "WriteRefusalGroup",
-        Command::OpenerReadings { .. } => "OpenerReadings",
-        Command::ReadProcessFacts { .. } => "ReadProcessFacts",
-        Command::OpenExecutable { .. } => "OpenExecutable",
-        Command::ReadServedPeer { .. } => "ReadServedPeer",
-        Command::ReadShareWriters { .. } => "ReadShareWriters",
-        Command::ConnectPodman { .. } => "ConnectPodman",
-        Command::ResolverSocket { .. } => "ResolverSocket",
-        Command::PinLink { .. } => "PinLink",
-        Command::PinnedLinks => "PinnedLinks",
-        Command::OpenPinnedLink { .. } => "OpenPinnedLink",
-        Command::UnpinLinks { .. } => "UnpinLinks",
-        Command::ConnectRootRuntime { .. } => "ConnectRootRuntime",
-        Command::ReadPodmanRecord { .. } => "ReadPodmanRecord",
-    }
-}
-
 /// A connected, handshaked client to a warden socket.
 pub struct WardenClient {
     stream: UnixStream,
@@ -181,7 +131,7 @@ impl WardenClient {
 
     /// Write one command frame, bounded by the send timeout.
     fn send(&mut self, cmd: &Command) -> io::Result<()> {
-        let op = op_name(cmd);
+        let op = cmd.name();
         self.check_usable(op)?;
         let result = write_frame(&mut self.stream, cmd);
         self.classify(op, "sending to", result)
@@ -214,7 +164,7 @@ impl WardenClient {
     /// Issue one command and read its response.
     fn call(&mut self, cmd: &Command) -> io::Result<Response> {
         self.send(cmd)?;
-        self.recv(op_name(cmd))
+        self.recv(cmd.name())
     }
 
     /// Ask the warden to scan `/proc` for SSL libraries and return the DLP

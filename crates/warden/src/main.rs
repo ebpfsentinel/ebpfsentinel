@@ -46,7 +46,7 @@ const DEFAULT_UID: u32 = 65534;
 /// of the host's instead.
 const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
 
-const USAGE: &str = "usage: warden serve <socket> [--uid <n> | --user <name>] [--policy <file>]\n       warden prepare-state <dir> [--uid <n> | --user <name>]\n       warden install-seccomp-profile <dir>";
+const USAGE: &str = "usage: warden serve <socket> [--uid <n> | --user <name>] [--policy <file>] [--max-connections <n>]\n       warden prepare-state <dir> [--uid <n> | --user <name>]\n       warden install-seccomp-profile <dir>";
 
 /// The agent's seccomp profile, compiled in from the one file the compose
 /// deployment and the release read, so the copy a cluster installs cannot
@@ -87,7 +87,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            serve(sock, uid, policy)
+            let max_connections = match ebpfsentinel_warden::max_connections_from_args(&args) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[warden] {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            serve(sock, uid, policy, max_connections)
         }
         Some("prepare-state") => {
             let Some(dir) = args.get(2) else {
@@ -151,7 +158,8 @@ fn install_profile(dir: &Path, profile: &[u8]) -> ExitCode {
     }
 }
 
-/// Bind the listening socket (mode `0600`) and broker for rootless agents.
+/// Bind the listening socket (mode `0666`, peer-uid gated) and broker for
+/// rootless agents.
 ///
 /// The warden is a pure privilege broker: it loads no eBPF and holds no maps (the
 /// rootless agent loads its own programs against the bpffs the warden delegates).
@@ -162,6 +170,7 @@ fn serve(
     sockpath: &str,
     allowed_uid: u32,
     policy: ebpfsentinel_warden::policy::WardenPolicy,
+    max_connections: usize,
 ) -> ExitCode {
     // Privileged setup the agent cannot perform once rootless (the XDP syncookie
     // offload needs always-on kernel syncookies).
@@ -189,7 +198,10 @@ fn serve(
     };
     // 0666 so the rootless agent (a different uid - nobody under a container
     // runtime) can connect; `SO_PEERCRED == allowed_uid` (not the file mode) is
-    // the auth gate, checked at accept.
+    // the auth gate, checked at accept, before a thread or a byte is spent.
+    // Owning the socket by the agent's uid with 0600 would need `CAP_CHOWN`,
+    // which the warden does not hold, and the agent's uid is not the same
+    // number in every deployment's view of the file.
     if let Err(e) = fs::set_permissions(sockpath, fs::Permissions::from_mode(0o666)) {
         eprintln!("[warden] chmod {sockpath}: {e}");
     }
@@ -228,6 +240,7 @@ fn serve(
         allowed_uid,
         std::sync::Arc::new(proc_root),
         std::sync::Arc::new(policy),
+        max_connections,
     );
     ExitCode::SUCCESS
 }

@@ -7,17 +7,19 @@
 //! (`Delegate`), an on-demand pcap capture socket (`PcapOpen`), the conntrack-table
 //! read, conntrack teardown, route programming, and gratuitous ARP.
 
+use std::cell::Cell;
+use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use ebpfsentinel_warden_proto::{
-    Command, FIM_NO_WATCH, MAX_SHARE_SERVERS, PROTOCOL_VERSION, Response, TaskIdentity, read_frame,
-    write_frame,
+    Command, FIM_NO_WATCH, MAX_SHARE_SERVERS, PROTOCOL_VERSION, Response, TaskIdentity,
+    read_command, write_frame,
 };
 
 use crate::fim_watch::FimWatch;
@@ -50,6 +52,117 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// ever ends it. Well above every interval the agent polls on, so a working
 /// deployment reconnects rarely if at all.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Connections served at once when the deployment names no other number.
+///
+/// The agent keeps one connection per subsystem that talks to the warden,
+/// some of them for its whole life (the capture pool, the file watch), and
+/// about forty subsystems can; a short-lived command line call adds one.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
+
+/// The most connections a deployment may let one warden serve at once.
+pub const MAX_CONNECTIONS_CEILING: usize = 256;
+
+/// The connections being served, counted against a ceiling: past it the
+/// warden does not accept, so the next connection waits in the listen
+/// backlog until one closes rather than costing a thread.
+struct Seats {
+    taken: Mutex<usize>,
+    freed: Condvar,
+    max: usize,
+}
+
+/// One connection's place, given back when its thread ends.
+struct Seat(Arc<Seats>);
+
+impl Seats {
+    fn new(max: usize) -> Arc<Self> {
+        Arc::new(Self {
+            taken: Mutex::new(0),
+            freed: Condvar::new(),
+            max,
+        })
+    }
+
+    /// Wait for a free place and take it.
+    fn take(self: &Arc<Self>) -> Seat {
+        // A count that is only ever raised or lowered by one stays a count
+        // after a panic between the two.
+        let mut taken = self.taken.lock().unwrap_or_else(PoisonError::into_inner);
+        if *taken >= self.max {
+            eprintln!(
+                "[warden] {} connections in use: the next waits until one closes",
+                self.max
+            );
+        }
+        while *taken >= self.max {
+            taken = self
+                .freed
+                .wait(taken)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *taken += 1;
+        Seat(Arc::clone(self))
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let mut taken = self.0.taken.lock().unwrap_or_else(PoisonError::into_inner);
+        *taken = taken.saturating_sub(1);
+        self.0.freed.notify_one();
+    }
+}
+
+thread_local! {
+    /// Whether the last answer written on this thread's connection was an
+    /// error. Each connection has its own thread, so this is the
+    /// connection's.
+    static ANSWER_FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Write `resp` on the connection and remember whether it reported a failure,
+/// for the command's audit line.
+fn reply(writer: &mut UnixStream, resp: &Response) -> io::Result<()> {
+    if matches!(
+        resp,
+        Response::Error { .. } | Response::Unimplemented | Response::Refused { .. }
+    ) {
+        ANSWER_FAILED.with(|failed| failed.set(true));
+    }
+    write_frame(writer, resp)
+}
+
+/// How one command ended, as its audit line says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Served,
+    Refused,
+    Failed,
+}
+
+impl Outcome {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One line per command: what was asked, by which process, how it ended and
+/// how long it took. Never a parameter: a path, an address or a payload stays
+/// out of the log, so the line says what the agent did and not what it read.
+fn audit(cmd: &Command, who: &str, outcome: Outcome, started: Instant) {
+    eprintln!(
+        "[warden] audit command={} family={} outcome={} {who} duration_ms={}",
+        cmd.name(),
+        cmd.family().map_or("none", |f| f.name()),
+        outcome.name(),
+        started.elapsed().as_millis()
+    );
+}
 
 /// What waiting for the next frame ended with.
 enum Waited {
@@ -130,6 +243,9 @@ pub trait ExtHandler: Send + Sync {
 ///
 /// `policy` decides which commands are served at all; it is read before any
 /// handler runs and never changes for the life of the loop.
+///
+/// `max_connections` connections are served at once, at most
+/// [`MAX_CONNECTIONS_CEILING`]; the next waits in the listen backlog.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn serve_loop(
     listener: &UnixListener,
@@ -140,6 +256,7 @@ pub fn serve_loop(
     allowed_uid: u32,
     proc_root: Arc<PathBuf>,
     policy: Arc<WardenPolicy>,
+    max_connections: usize,
 ) {
     // The pcap pool is shared across all connections as claimable slots: a slot
     // belongs to the connection that took it until that connection's thread
@@ -157,9 +274,11 @@ pub fn serve_loop(
         );
     }
     let ledger = Arc::new(Ledger::new());
-    for stream in listener.incoming() {
-        match stream {
-            Ok(conn) => {
+    let seats = Seats::new(max_connections.clamp(1, MAX_CONNECTIONS_CEILING));
+    loop {
+        let seat = seats.take();
+        match listener.accept() {
+            Ok((conn, _)) => {
                 if peer_allowed(&conn, allowed_uid) {
                     let btf = Arc::clone(&btf);
                     let host = Arc::clone(&host);
@@ -169,6 +288,7 @@ pub fn serve_loop(
                     let policy = Arc::clone(&policy);
                     let ledger = Arc::clone(&ledger);
                     std::thread::spawn(move || {
+                        let _seat = seat;
                         handle_conn(
                             conn,
                             &Served {
@@ -192,6 +312,11 @@ pub fn serve_loop(
 /// The uid of the process at the other end of `conn`, read via `SO_PEERCRED`
 /// (the stable-Rust path; `UnixStream::peer_cred` is still nightly).
 pub(crate) fn peer_uid(conn: &UnixStream) -> Option<u32> {
+    peer_cred(conn).map(|cred| cred.uid)
+}
+
+/// The credentials of the process at the other end of `conn`.
+fn peer_cred(conn: &UnixStream) -> Option<libc::ucred> {
     // SAFETY: `ucred` is plain old data, for which all-zero is valid.
     let mut cred: libc::ucred = unsafe { mem::zeroed() };
     let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -206,7 +331,7 @@ pub(crate) fn peer_uid(conn: &UnixStream) -> Option<u32> {
             &raw mut len,
         )
     };
-    (rc == 0).then_some(cred.uid)
+    (rc == 0).then_some(cred)
 }
 
 /// Confirm the connected peer's uid matches the one the warden serves.
@@ -282,6 +407,14 @@ fn handle_conn_with_timeouts(
     // peer the kernel names no pidfd for is served everything else and
     // refused those.
     let peer = handed::Peer::of(&conn).map_err(|e| format!("the agent's pidfd: {e}"));
+    // Who every audit line of this connection names: the pid as this warden
+    // sees it and the process identity the ledger counts by.
+    let who = format!(
+        "pid={} process={}",
+        peer_cred(&conn).map_or_else(|| "unknown".into(), |c| c.pid.to_string()),
+        peer.as_ref()
+            .map_or_else(|_| "unknown".into(), |p| p.id().to_string())
+    );
     // Every slot this connection claimed, held until the connection ends: the
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
@@ -302,12 +435,12 @@ fn handle_conn_with_timeouts(
         );
         return;
     }
-    let Ok(first) = read_frame::<_, Command>(&mut reader) else {
+    let Ok(first) = read_command(&mut reader) else {
         return;
     };
     match first {
         Command::Hello { version } if version == PROTOCOL_VERSION => {
-            if write_frame(
+            if reply(
                 &mut writer,
                 &Response::HelloOk {
                     version: PROTOCOL_VERSION,
@@ -321,11 +454,11 @@ fn handle_conn_with_timeouts(
         Command::Hello { version } => {
             let message =
                 format!("protocol version mismatch: warden {PROTOCOL_VERSION}, agent {version}");
-            let _ = write_frame(&mut writer, &Response::Error { message });
+            let _ = reply(&mut writer, &Response::Error { message });
             return;
         }
         _ => {
-            let _ = write_frame(
+            let _ = reply(
                 &mut writer,
                 &Response::Error {
                     message: "expected Hello as the first message".into(),
@@ -358,9 +491,17 @@ fn handle_conn_with_timeouts(
             }
             Waited::Failed => return,
         }
-        let Ok(cmd) = read_frame::<_, Command>(&mut reader) else {
-            break;
+        let cmd = match read_command(&mut reader) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                if e.kind() != io::ErrorKind::UnexpectedEof {
+                    eprintln!("[warden] closing a connection whose frame was refused: {e}");
+                }
+                break;
+            }
         };
+        let started = Instant::now();
+        ANSWER_FAILED.with(|failed| failed.set(false));
         // The policy is checked before any handler runs: a refused command
         // touches nothing on the host. A descriptor the agent sent with it is
         // still taken off the socket and closed, so it is not read as the
@@ -375,11 +516,12 @@ fn handle_conn_with_timeouts(
                 }
             }
             eprintln!("[warden] refused ({}): {}", refusal.family, refusal.reason);
+            audit(&cmd, &who, Outcome::Refused, started);
             let resp = Response::Refused {
                 family: refusal.family,
                 reason: refusal.reason,
             };
-            if write_frame(&mut writer, &resp).is_err() {
+            if reply(&mut writer, &resp).is_err() {
                 break;
             }
             continue;
@@ -393,6 +535,7 @@ fn handle_conn_with_timeouts(
                 .and_then(|peer| handed.take(peer, what));
             if let Err(message) = taken {
                 eprintln!("[warden] refused: {message}");
+                audit(&cmd, &who, Outcome::Refused, started);
                 if !refuse_handed(&mut writer, &cmd, message) {
                     break;
                 }
@@ -534,7 +677,7 @@ fn handle_conn_with_timeouts(
                         }
                     }
                 };
-                write_frame(&mut writer, &resp).is_ok()
+                reply(&mut writer, &resp).is_ok()
             }
             // `OpenPinnedLink` answers out-of-band: the link, after an
             // `FdReady`.
@@ -555,7 +698,7 @@ fn handle_conn_with_timeouts(
                     }
                 }
                 fim = watch;
-                write_frame(&mut writer, &Response::FimOpened { marks }).is_ok()
+                reply(&mut writer, &Response::FimOpened { marks }).is_ok()
             }
             Command::FimRead { max_wait_ms } => {
                 let resp = match fim.as_mut() {
@@ -569,7 +712,7 @@ fn handle_conn_with_timeouts(
                         message: FIM_NO_WATCH.into(),
                     },
                 };
-                write_frame(&mut writer, &resp).is_ok()
+                reply(&mut writer, &resp).is_ok()
             }
             Command::FimCanaries { paths } => {
                 let resp = match fim.as_mut() {
@@ -587,7 +730,7 @@ fn handle_conn_with_timeouts(
                         message: FIM_NO_WATCH.into(),
                     },
                 };
-                write_frame(&mut writer, &resp).is_ok()
+                reply(&mut writer, &resp).is_ok()
             }
             Command::FimFacts {
                 paths,
@@ -603,7 +746,7 @@ fn handle_conn_with_timeouts(
                         message: FIM_NO_WATCH.into(),
                     },
                 };
-                write_frame(&mut writer, &resp).is_ok()
+                reply(&mut writer, &resp).is_ok()
             }
             // `AttachUprobe` answers out-of-band: it first receives the agent's
             // program fd over `SCM_RIGHTS`, creates the link, then replies
@@ -635,10 +778,16 @@ fn handle_conn_with_timeouts(
                     },
                     None => Response::Unimplemented,
                 };
-                write_frame(&mut writer, &resp).is_ok()
+                reply(&mut writer, &resp).is_ok()
             }
-            other => write_frame(&mut writer, &dispatch(other, host, proc_root)).is_ok(),
+            other => reply(&mut writer, &dispatch(other, host, proc_root)).is_ok(),
         };
+        let outcome = if ANSWER_FAILED.with(Cell::get) {
+            Outcome::Failed
+        } else {
+            Outcome::Served
+        };
+        audit(&cmd, &who, outcome, started);
         if !ok {
             break;
         }
@@ -652,14 +801,14 @@ fn handle_conn_with_timeouts(
 fn serve_passed_fd(writer: &mut UnixStream, fd: Result<RawFd, String>) -> bool {
     match fd {
         Ok(fd) => {
-            if write_frame(writer, &Response::FdReady).is_err() {
+            if reply(writer, &Response::FdReady).is_err() {
                 return false;
             }
             // One sentinel payload byte carries the fd; the agent reads `FdReady`,
             // then recvmsg's exactly this byte to collect the descriptor.
             send_msg_fds(writer.as_raw_fd(), &[0u8], &[fd])
         }
-        Err(message) => write_frame(writer, &Response::Error { message }).is_ok(),
+        Err(message) => reply(writer, &Response::Error { message }).is_ok(),
     }
 }
 
@@ -691,7 +840,7 @@ fn refuse_handed(writer: &mut UnixStream, cmd: &Command, message: String) -> boo
         }
     }
     match cmd {
-        Command::Delegate => write_frame(writer, &Response::Error { message }).is_ok(),
+        Command::Delegate => reply(writer, &Response::Error { message }).is_ok(),
         _ => serve_passed_fd(writer, Err(message)),
     }
 }
@@ -704,7 +853,7 @@ fn refuse_handed(writer: &mut UnixStream, cmd: &Command, message: String) -> boo
 fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawFd]) -> bool {
     let fs = recv_fd(writer.as_raw_fd());
     if fs < 0 {
-        return write_frame(
+        return reply(
             writer,
             &Response::Error {
                 message: "no bpffs fd received for delegation".into(),
@@ -717,7 +866,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     // uses it after this close.
     unsafe { libc::close(fs) };
     if !ok {
-        return write_frame(
+        return reply(
             writer,
             &Response::Error {
                 message: "bpffs delegation refused by the kernel; the warden log names the option"
@@ -731,7 +880,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
         btf_names,
         pcap_count: u32::try_from(pcap.len()).unwrap_or(0),
     };
-    if write_frame(writer, &resp).is_err() {
+    if reply(writer, &resp).is_err() {
         return false;
     }
     // BTF fds first (in `btf_names` order), then the pcap fds - the order the
@@ -749,7 +898,7 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
 fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret: bool) -> bool {
     let prog_fd = recv_fd(writer.as_raw_fd());
     if prog_fd < 0 {
-        return write_frame(
+        return reply(
             writer,
             &Response::Error {
                 message: "no program fd received for uprobe attach".into(),
@@ -780,7 +929,7 @@ fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret:
 fn serve_attach_cgroup(writer: &mut UnixStream, cgroup_path: &str, attach_type: u32) -> bool {
     let prog_fd = recv_fd(writer.as_raw_fd());
     if prog_fd < 0 {
-        return write_frame(
+        return reply(
             writer,
             &Response::Error {
                 message: "no program fd received for cgroup attach".into(),
@@ -816,7 +965,7 @@ fn serve_attach_tcx_in_netns(
 ) -> bool {
     let prog_fd = recv_fd(writer.as_raw_fd());
     if prog_fd < 0 {
-        return write_frame(
+        return reply(
             writer,
             &Response::Error {
                 message: "no program fd received for a pod namespace attach".into(),
@@ -1080,6 +1229,55 @@ mod tests {
         drop(client);
         handle.join().unwrap();
         resp
+    }
+
+    #[test]
+    fn a_full_house_waits_for_a_connection_to_close() {
+        let seats = super::Seats::new(1);
+        let first = seats.take();
+        let waiting = {
+            let seats = Arc::clone(&seats);
+            std::thread::spawn(move || drop(seats.take()))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!waiting.is_finished(), "the second waits while the first is served");
+        drop(first);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn an_oversized_control_frame_closes_the_connection_unread() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server(server, None);
+        hello(&mut client);
+        // A length past the control bound and a `PinLink` tag; no body
+        // follows, and none is waited for.
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &Command::PinLink { name: "x".into() }).unwrap();
+        let tag = encoded[4];
+        let mut frame = (ebpfsentinel_warden_proto::CONTROL_FRAME_LEN + 1)
+            .to_le_bytes()
+            .to_vec();
+        frame.extend_from_slice(&[tag, 0, 0, 0, 0]);
+        std::io::Write::write_all(&mut client, &frame).unwrap();
+        handle.join().unwrap();
+        assert!(read_frame::<_, Response>(&mut client).is_err());
+    }
+
+    #[test]
+    fn an_answer_that_reports_an_error_is_audited_as_failed() {
+        super::ANSWER_FAILED.with(|f| f.set(false));
+        let (mut a, _b) = UnixStream::pair().unwrap();
+        super::reply(&mut a, &Response::Ok).unwrap();
+        assert!(!super::ANSWER_FAILED.with(std::cell::Cell::get));
+        super::reply(
+            &mut a,
+            &Response::Error {
+                message: "no".into(),
+            },
+        )
+        .unwrap();
+        assert!(super::ANSWER_FAILED.with(std::cell::Cell::get));
     }
 
     #[test]

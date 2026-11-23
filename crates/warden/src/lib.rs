@@ -665,6 +665,32 @@ pub fn policy_from_args(args: &[String]) -> Result<policy::WardenPolicy, String>
     Ok(policy)
 }
 
+/// How many connections `serve` takes at once: `--max-connections <n>`, from 1
+/// to [`server::MAX_CONNECTIONS_CEILING`], else
+/// [`server::DEFAULT_MAX_CONNECTIONS`].
+///
+/// # Errors
+///
+/// `--max-connections` is given without a number, or with one outside the
+/// range.
+pub fn max_connections_from_args(args: &[String]) -> Result<usize, String> {
+    let Some(i) = args.iter().position(|a| a == "--max-connections") else {
+        return Ok(server::DEFAULT_MAX_CONNECTIONS);
+    };
+    let n = args
+        .get(i + 1)
+        .and_then(|v| v.parse::<usize>().ok())
+        .ok_or_else(|| "--max-connections needs a number".to_string())?;
+    if (1..=server::MAX_CONNECTIONS_CEILING).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!(
+            "--max-connections {n} is outside 1 to {}",
+            server::MAX_CONNECTIONS_CEILING
+        ))
+    }
+}
+
 /// Which host setting refused an unprivileged user namespace, read through
 /// `read` (a sysctl path to its trimmed value), or `None` when none of the known
 /// ones is set against it.

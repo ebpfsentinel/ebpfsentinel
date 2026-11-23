@@ -30,6 +30,11 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// corrupt length prefix from forcing a huge allocation.
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
+/// Largest command a warden reads when the command carries no list: an
+/// interface, an address, a path or a pid fits many times over, so a longer
+/// frame is refused before its body is read.
+pub const CONTROL_FRAME_LEN: u32 = 64 * 1024;
+
 /// A conntrack entry identity, used to delete a single flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConntrackTuple {
@@ -1548,6 +1553,249 @@ impl Command {
         }
     }
 
+    /// The command's name, as an audit line and an error write it.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => "Hello",
+            Self::Delegate => "Delegate",
+            Self::ConntrackDump => "ConntrackDump",
+            Self::ConntrackDelete { .. } => "ConntrackDelete",
+            Self::ConntrackFlush => "ConntrackFlush",
+            Self::ConntrackRestore { .. } => "ConntrackRestore",
+            Self::RouteAdd { .. } => "RouteAdd",
+            Self::ArpAnnounce { .. } => "ArpAnnounce",
+            Self::PcapOpen { .. } => "PcapOpen",
+            Self::AttachUprobe { .. } => "AttachUprobe",
+            Self::AttachCgroup { .. } => "AttachCgroup",
+            Self::DlpScan => "DlpScan",
+            Self::Extension { .. } => "Extension",
+            Self::TcxChain { .. } => "TcxChain",
+            Self::AttachTcxInNetns { .. } => "AttachTcxInNetns",
+            Self::ReadExecutable { .. } => "ReadExecutable",
+            Self::PacketSockets => "PacketSockets",
+            Self::NetworkPrograms => "NetworkPrograms",
+            Self::Identity => "Identity",
+            Self::FimOpen { .. } => "FimOpen",
+            Self::FimRead { .. } => "FimRead",
+            Self::FimFacts { .. } => "FimFacts",
+            Self::FimCanaries { .. } => "FimCanaries",
+            Self::HiddenPorts { .. } => "HiddenPorts",
+            Self::HiddenProcesses { .. } => "HiddenProcesses",
+            Self::NamespaceIds => "NamespaceIds",
+            Self::FileRoots => "FileRoots",
+            Self::ReadRootedFile { .. } => "ReadRootedFile",
+            Self::GoExecutables => "GoExecutables",
+            Self::ProcessMappings { .. } => "ProcessMappings",
+            Self::WriteRefusalGroup => "WriteRefusalGroup",
+            Self::OpenerReadings { .. } => "OpenerReadings",
+            Self::ReadProcessFacts { .. } => "ReadProcessFacts",
+            Self::OpenExecutable { .. } => "OpenExecutable",
+            Self::ReadServedPeer { .. } => "ReadServedPeer",
+            Self::ReadShareWriters { .. } => "ReadShareWriters",
+            Self::ConnectPodman { .. } => "ConnectPodman",
+            Self::ResolverSocket { .. } => "ResolverSocket",
+            Self::PinLink { .. } => "PinLink",
+            Self::PinnedLinks => "PinnedLinks",
+            Self::OpenPinnedLink { .. } => "OpenPinnedLink",
+            Self::UnpinLinks { .. } => "UnpinLinks",
+            Self::ConnectRootRuntime { .. } => "ConnectRootRuntime",
+            Self::ReadPodmanRecord { .. } => "ReadPodmanRecord",
+        }
+    }
+
+    /// The longest frame a warden reads for this command. A command that
+    /// carries a list (paths, thread ids, process stamps, ports, link names,
+    /// servers, an extension's payload) keeps [`MAX_FRAME_LEN`], since the list
+    /// grows with the host; every other command is bounded by
+    /// [`CONTROL_FRAME_LEN`].
+    #[must_use]
+    pub fn frame_limit(&self) -> u32 {
+        match self {
+            Self::FimOpen { .. }
+            | Self::FimFacts { .. }
+            | Self::FimCanaries { .. }
+            | Self::HiddenPorts { .. }
+            | Self::ProcessMappings { .. }
+            | Self::OpenerReadings { .. }
+            | Self::ReadShareWriters { .. }
+            | Self::UnpinLinks { .. }
+            | Self::Extension { .. } => MAX_FRAME_LEN,
+            Self::Hello { .. }
+            | Self::Delegate
+            | Self::ConntrackDump
+            | Self::ConntrackDelete { .. }
+            | Self::ConntrackFlush
+            | Self::ConntrackRestore { .. }
+            | Self::RouteAdd { .. }
+            | Self::ArpAnnounce { .. }
+            | Self::PcapOpen { .. }
+            | Self::AttachUprobe { .. }
+            | Self::AttachCgroup { .. }
+            | Self::DlpScan
+            | Self::TcxChain { .. }
+            | Self::AttachTcxInNetns { .. }
+            | Self::ReadExecutable { .. }
+            | Self::PacketSockets
+            | Self::NetworkPrograms
+            | Self::Identity
+            | Self::FimRead { .. }
+            | Self::HiddenProcesses { .. }
+            | Self::FileRoots
+            | Self::ReadRootedFile { .. }
+            | Self::GoExecutables
+            | Self::WriteRefusalGroup
+            | Self::ReadProcessFacts { .. }
+            | Self::OpenExecutable { .. }
+            | Self::ReadServedPeer { .. }
+            | Self::ConnectPodman { .. }
+            | Self::NamespaceIds
+            | Self::ResolverSocket { .. }
+            | Self::PinLink { .. }
+            | Self::PinnedLinks
+            | Self::OpenPinnedLink { .. }
+            | Self::ConnectRootRuntime { .. }
+            | Self::ReadPodmanRecord { .. } => CONTROL_FRAME_LEN,
+        }
+    }
+
+    /// One command of every variant. The warden reads each one's wire tag off
+    /// it to bound a frame before reading the body, and the tests and the fuzz
+    /// corpus start from it.
+    // One literal per variant, in declaration order: splitting it would only
+    // make a missing one harder to see.
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub fn samples() -> Vec<Self> {
+        let tuple = ConntrackTuple {
+            proto: 6,
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 40000,
+            dst_port: 443,
+        };
+        vec![
+            Self::Hello {
+                version: PROTOCOL_VERSION,
+            },
+            Self::Delegate,
+            Self::ConntrackDump,
+            Self::ConntrackDelete {
+                tuple: tuple.clone(),
+            },
+            Self::ConntrackFlush,
+            Self::RouteAdd {
+                route: RouteSpec {
+                    dst_cidr: "0.0.0.0/0".into(),
+                    gateway: "192.0.2.1".into(),
+                    iface: "eth0".into(),
+                    table: 254,
+                },
+            },
+            Self::ArpAnnounce {
+                iface: "eth0".into(),
+                ip: "192.0.2.10".into(),
+            },
+            Self::PcapOpen {
+                iface: "eth0".into(),
+                filter: "tcp port 443".into(),
+            },
+            Self::AttachUprobe {
+                path: "/usr/lib/x86_64-linux-gnu/libssl.so.3".into(),
+                offset: 4096,
+                is_ret: false,
+            },
+            Self::AttachCgroup {
+                cgroup_path: "/sys/fs/cgroup".into(),
+                attach_type: 0,
+            },
+            Self::DlpScan,
+            Self::Extension {
+                kind: "kind".into(),
+                payload: vec![1, 2, 3],
+            },
+            Self::TcxChain {
+                iface: "eth0".into(),
+                egress: true,
+            },
+            Self::AttachTcxInNetns {
+                pid: 1,
+                iface: "eth0".into(),
+                egress: false,
+            },
+            Self::ReadExecutable { pid: 1 },
+            Self::PacketSockets,
+            Self::NetworkPrograms,
+            Self::Identity,
+            Self::FimOpen {
+                paths: vec!["/etc".into()],
+            },
+            Self::FimRead { max_wait_ms: 100 },
+            Self::FimFacts {
+                paths: vec!["/etc/passwd".into()],
+                max_hash_bytes: 1024,
+            },
+            Self::FimCanaries {
+                paths: vec!["/srv/0000-archive.docx".into()],
+            },
+            Self::HiddenPorts { ports: vec![22] },
+            Self::HiddenProcesses { rate: 100 },
+            Self::FileRoots,
+            Self::ReadRootedFile {
+                pid: 1,
+                file: RootedFile::DpkgStatus,
+                offset: 0,
+                len: 4096,
+            },
+            Self::GoExecutables,
+            Self::ProcessMappings {
+                known: vec![ProcessStamp {
+                    pid: 1,
+                    start_time: 2,
+                    vsize: 3,
+                }],
+            },
+            Self::WriteRefusalGroup,
+            Self::OpenerReadings { tids: vec![1] },
+            Self::ReadProcessFacts { pid: 1 },
+            Self::OpenExecutable { pid: 1 },
+            Self::ReadServedPeer { pid: 1 },
+            Self::ReadShareWriters {
+                servers: vec![std::net::IpAddr::from([192, 0, 2, 20])],
+            },
+            Self::ConnectPodman { uid: 1000 },
+            Self::ConntrackRestore {
+                restore: ConntrackRestore {
+                    flow: tuple,
+                    reply: None,
+                },
+            },
+            Self::NamespaceIds,
+            Self::ResolverSocket {
+                listen: std::net::SocketAddr::from(([127, 0, 0, 1], 53)),
+                stream: false,
+            },
+            Self::PinLink {
+                name: "xdp-firewall".into(),
+            },
+            Self::PinnedLinks,
+            Self::OpenPinnedLink {
+                name: "xdp-firewall".into(),
+            },
+            Self::UnpinLinks {
+                names: vec!["xdp-firewall".into()],
+            },
+            Self::ConnectRootRuntime {
+                runtime: RootRuntime::Docker,
+            },
+            Self::ReadPodmanRecord {
+                uid: None,
+                store: "/var/lib/containers/storage".into(),
+                id: "0123456789abcdef".into(),
+            },
+        ]
+    }
+
     /// Whether the agent sends a descriptor right after this frame, which a
     /// warden that refuses the command still has to take off the socket.
     #[must_use]
@@ -1588,6 +1836,71 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
     }
     let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body)?;
+    postcard::from_bytes(&body).map_err(io::Error::other)
+}
+
+/// The wire tag at the start of `body`: postcard writes an enum's variant
+/// index as a varint, so a command's tag is its first bytes.
+fn variant_tag(body: &[u8]) -> Option<u32> {
+    let mut tag: u32 = 0;
+    for (i, byte) in body.iter().take(5).enumerate() {
+        tag |= u32::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(tag);
+        }
+    }
+    None
+}
+
+/// [`Command::frame_limit`] by wire tag, read once off [`Command::samples`].
+fn limit_for_tag(tag: u32) -> Option<u32> {
+    static LIMITS: std::sync::OnceLock<Vec<(u32, u32)>> = std::sync::OnceLock::new();
+    LIMITS
+        .get_or_init(|| {
+            Command::samples()
+                .iter()
+                .filter_map(|cmd| {
+                    let body = postcard::to_allocvec(cmd).ok()?;
+                    Some((variant_tag(&body)?, cmd.frame_limit()))
+                })
+                .collect()
+        })
+        .iter()
+        .find(|(t, _)| *t == tag)
+        .map(|(_, limit)| *limit)
+}
+
+/// Read one [`Command`], refusing a frame longer than its command's
+/// [`Command::frame_limit`] before its body is read: the length and the first
+/// bytes, which carry the command's tag, are all a refused frame costs.
+///
+/// # Errors
+///
+/// The stream ended or failed, the tag names no command, the frame is longer
+/// than that command's bound, or the body does not decode.
+pub fn read_command<R: Read>(r: &mut R) -> io::Result<Command> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_LEN {
+        return Err(io::Error::other("frame length exceeds MAX_FRAME_LEN"));
+    }
+    let len = len as usize;
+    let mut head = [0u8; 5];
+    let head_len = len.min(head.len());
+    r.read_exact(&mut head[..head_len])?;
+    let tag = variant_tag(&head[..head_len])
+        .ok_or_else(|| io::Error::other("frame carries no command tag"))?;
+    let limit = limit_for_tag(tag)
+        .ok_or_else(|| io::Error::other(format!("frame tag {tag} names no command")))?;
+    if len > limit as usize {
+        return Err(io::Error::other(format!(
+            "a {len}-byte frame exceeds its command's bound of {limit} bytes"
+        )));
+    }
+    let mut body = vec![0u8; len];
+    body[..head_len].copy_from_slice(&head[..head_len]);
+    r.read_exact(&mut body[head_len..])?;
     postcard::from_bytes(&body).map_err(io::Error::other)
 }
 
@@ -2293,5 +2606,78 @@ mod tests {
             reason: String::new(),
         };
         assert_eq!(postcard::to_allocvec(&refused).expect("encode")[0], 31);
+    }
+
+    #[test]
+    fn the_samples_hold_one_command_of_every_variant() {
+        use super::{limit_for_tag, variant_tag};
+        let samples = Command::samples();
+        let mut tags: Vec<u32> = samples
+            .iter()
+            .map(|c| variant_tag(&postcard::to_allocvec(c).expect("encode")).expect("tag"))
+            .collect();
+        tags.sort_unstable();
+        tags.dedup();
+        let expected: Vec<u32> = (0..u32::try_from(samples.len()).expect("count")).collect();
+        assert_eq!(tags, expected, "one sample per variant, no variant twice");
+        // The tag after the last names no command: a new variant without a
+        // sample is a tag the warden would refuse.
+        let next = u32::try_from(samples.len()).expect("count");
+        assert!(postcard::from_bytes::<Command>(&[u8::try_from(next).expect("tag")]).is_err());
+        assert!(limit_for_tag(next).is_none());
+    }
+
+    #[test]
+    fn every_command_is_read_back_within_its_bound() {
+        use super::read_command;
+        for cmd in Command::samples() {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &cmd).expect("encode");
+            assert!(
+                buf.len() - 4 <= cmd.frame_limit() as usize,
+                "{}",
+                cmd.name()
+            );
+            let back = read_command(&mut Cursor::new(&buf))
+                .unwrap_or_else(|e| panic!("{}: {e}", cmd.name()));
+            assert_eq!(back, cmd);
+        }
+    }
+
+    #[test]
+    fn a_control_command_past_its_bound_is_refused_before_its_body_is_read() {
+        use super::{CONTROL_FRAME_LEN, read_command};
+        let cmd = Command::PinLink {
+            name: "x".repeat(CONTROL_FRAME_LEN as usize),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &cmd).expect("encode");
+        // Only the length and the first five bytes are on the stream: a
+        // reader that wanted the body would fail on the missing bytes instead.
+        buf.truncate(4 + 5);
+        let err = read_command(&mut Cursor::new(&buf)).expect_err("refused");
+        assert!(
+            err.to_string().contains("exceeds its command's bound"),
+            "{err}"
+        );
+
+        // A list command of the same length is read.
+        let list = Command::UnpinLinks {
+            names: vec!["x".repeat(CONTROL_FRAME_LEN as usize)],
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &list).expect("encode");
+        assert_eq!(read_command(&mut Cursor::new(&buf)).expect("read"), list);
+    }
+
+    #[test]
+    fn a_frame_naming_no_command_is_refused() {
+        use super::read_command;
+        let mut buf = 1_u32.to_le_bytes().to_vec();
+        buf.push(0x7f);
+        let err = read_command(&mut Cursor::new(&buf)).expect_err("refused");
+        assert!(err.to_string().contains("names no command"), "{err}");
+        let empty = 0_u32.to_le_bytes();
+        assert!(read_command(&mut Cursor::new(&empty)).is_err());
     }
 }

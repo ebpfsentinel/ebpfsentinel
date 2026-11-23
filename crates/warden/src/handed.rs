@@ -75,6 +75,13 @@ impl Peer {
         let ino = inode(&pidfd)?;
         Ok(Self { pidfd, ino })
     }
+
+    /// The process's identity: its pidfs inode, never reused while the host
+    /// runs and the same whichever pid namespace it is seen from.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.ino
+    }
 }
 
 fn inode(fd: &OwnedFd) -> io::Result<u64> {
