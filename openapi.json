@@ -11102,7 +11102,7 @@
               "string",
               "null"
             ],
-            "description": "Why not, as a word to match on: `kernel_older`, `not_declared`,\n`lsm_inactive`, `not_probed` or `refused`. Absent when active.\n`not_probed` says nothing about the kernel."
+            "description": "Why not, as a word to match on: `not_declared`, `lsm_inactive`,\n`not_probed` or `refused`. Absent when active.\n`not_probed` says nothing about the kernel."
           },
           "fallback": {
             "type": "string",
@@ -11113,7 +11113,7 @@
               "string",
               "null"
             ],
-            "description": "How to switch it on here: a kernel to install or a boot parameter to\nset. Absent when active, when the probe could not run and when the\nkernel refused, since none of those names a change that would help."
+            "description": "How to switch it on here: a boot parameter to set. Absent when\nactive, when the probe could not run and when the kernel refused,\nsince none of those names a change that would help."
           },
           "id": {
             "type": "string",
@@ -11128,7 +11128,7 @@
           },
           "since": {
             "type": "string",
-            "description": "The kernel that introduced what it rests on, or the floor. Used to\nword the hint, never to decide `active`."
+            "description": "The kernel that introduced what it rests on, or the floor. Never used\nto decide `active`."
           },
           "unlocks": {
             "type": "string",

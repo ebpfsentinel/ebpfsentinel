@@ -1,7 +1,7 @@
 //! Every capability that switches on host by host, in one table.
 //!
 //! The floor guarantees the base programs load. Above it, each entry here is
-//! something a host may or may not offer: a kfunc a vendor backported or a
+//! something a host may or may not offer: a kfunc a kernel was built without, a
 //! configuration left out, the BPF LSM that only a boot parameter turns on, or
 //! a hook a deployment's privilege lets the agent attach. Each entry says what
 //! it unlocks, how the agent asks for it, the kernel that introduced it and
@@ -12,10 +12,10 @@
 //! status that already exists and that the agent already publishes; the
 //! report built from it reads those answers rather than asking again.
 //!
-//! A capability is enabled by a probe, never by a version. `since` is used to
-//! word a hint and for nothing else, because a vendor kernel that keeps its
-//! number for its whole life carries work backported into it, and a kernel
-//! whose number says a kfunc is there may have been built without it.
+//! A capability is enabled by a probe, never by a version. Every entry rests
+//! on something the floor already guarantees exists, so what can still turn
+//! one off is a kernel built without it, the BPF LSM missing from the boot, a
+//! sleepable context refused, or a configuration that does not use it.
 
 use super::kernel_probe::{MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR, parse_version};
 
@@ -93,7 +93,7 @@ pub struct Capability {
     /// How the kernel is asked.
     pub probe: ProbeKind,
     /// The kernel that introduced what it rests on, or the floor when that is
-    /// older. Used to word a hint, never to enable anything.
+    /// older; published, never used to enable anything or to word a hint.
     pub since: KernelVersion,
     /// Whether it rests on the BPF LSM being active at boot.
     pub needs_lsm: bool,
@@ -253,12 +253,6 @@ impl Capability {
             ProbeKind::AttachStatus => {
                 "turned on in the configuration and attached on the node".to_owned()
             }
-            ProbeKind::Loaded | ProbeKind::DeclaredInBtf if self.since > KernelVersion::FLOOR => {
-                format!(
-                    "a kernel offering it, from Linux {} or through a vendor backport",
-                    self.since
-                )
-            }
             ProbeKind::Loaded
             | ProbeKind::DeclaredInBtf
             | ProbeKind::SleepableLsm
@@ -329,9 +323,10 @@ mod tests {
         for c in CATALOGUE {
             assert!(!c.unlocks.trim().is_empty(), "{} unlocks nothing", c.id);
             assert!(!c.fallback.trim().is_empty(), "{} has no fallback", c.id);
-            assert!(
-                c.since >= KernelVersion::FLOOR,
-                "{} names {} below the floor",
+            assert_eq!(
+                c.since,
+                KernelVersion::FLOOR,
+                "{} names {}, not the floor: an entry above it needs its version hint back",
                 c.id,
                 c.since
             );

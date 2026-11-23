@@ -197,20 +197,20 @@ pub struct CapabilityEntry {
     /// What it gives where it is active.
     pub unlocks: String,
     pub active: bool,
-    /// Why not, as a word to match on: `kernel_older`, `not_declared`,
-    /// `lsm_inactive`, `not_probed` or `refused`. Absent when active.
+    /// Why not, as a word to match on: `not_declared`, `lsm_inactive`,
+    /// `not_probed` or `refused`. Absent when active.
     /// `not_probed` says nothing about the kernel.
     pub cause: Option<String>,
     /// Why not, in one sentence. Absent when active.
     pub reason: Option<String>,
-    /// The kernel that introduced what it rests on, or the floor. Used to
-    /// word the hint, never to decide `active`.
+    /// The kernel that introduced what it rests on, or the floor. Never used
+    /// to decide `active`.
     pub since: String,
     /// What runs where it is absent.
     pub fallback: String,
-    /// How to switch it on here: a kernel to install or a boot parameter to
-    /// set. Absent when active, when the probe could not run and when the
-    /// kernel refused, since none of those names a change that would help.
+    /// How to switch it on here: a boot parameter to set. Absent when
+    /// active, when the probe could not run and when the kernel refused,
+    /// since none of those names a change that would help.
     pub hint: Option<String>,
 }
 
@@ -224,7 +224,7 @@ impl CapabilityEntry {
                 unlocks: entry.capability.unlocks.to_string(),
                 active: entry.active(),
                 cause: entry.inactive.as_ref().map(|i| i.code().to_string()),
-                reason: entry.inactive.as_ref().map(|i| i.describe(report.kernel)),
+                reason: entry.inactive.as_ref().map(adapters::ebpf::capability_report::Inactive::describe),
                 since: entry.capability.since.to_string(),
                 fallback: entry.capability.fallback.to_string(),
                 hint: entry.hint.clone(),

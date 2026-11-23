@@ -6,14 +6,14 @@
 //! every catalogue entry one answer: active, or inactive for exactly one
 //! reason. When more than one reason holds, the most actionable is kept,
 //! in a fixed order: a probe that could not run says so first, because it
-//! proves nothing about the kernel; a kernel older than the capability comes
-//! before a kfunc the kernel does not declare; the BPF LSM missing from the
-//! boot comes before a refusal, because a refusal on a host without it is a
+//! proves nothing about the kernel; a kfunc the kernel does not declare comes
+//! next; the BPF LSM missing from the boot comes before a refusal, because a refusal on a host without it is a
 //! consequence rather than a cause.
 //!
-//! A version never enables anything: an entry is active only on evidence that
-//! the kernel offers it, whatever its number says, and inactive on evidence
-//! that it does not, whatever its number says.
+//! A version never enables anything and never disables anything: every entry
+//! rests on something the floor guarantees exists, so an entry is active only
+//! on evidence that the kernel offers it, and inactive on evidence that it
+//! does not.
 
 use std::sync::OnceLock;
 
@@ -21,7 +21,7 @@ use domain::ransom::refusal::WriteRefusalRoute;
 
 use super::capabilities::{CATALOGUE, Capability, KernelVersion};
 use super::file_kfunc_probe::FileKfuncStatus;
-use super::kernel_probe::{distribution_family, upgrade_hint};
+use super::kernel_probe::distribution_family;
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
 use super::signal_task::DirectSignalProbe;
@@ -36,11 +36,7 @@ const OSRELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
 /// Why a capability is not active here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inactive {
-    /// The running kernel is older than the one that introduced it, and
-    /// nothing says a vendor backported it.
-    KernelOlder { since: KernelVersion },
-    /// The kernel is recent enough and does not declare it: a backport
-    /// missing or a configuration leaving it out.
+    /// The kernel does not declare it: a configuration leaving it out.
     NotDeclared,
     /// It rests on the BPF LSM, which is not among the active security
     /// modules.
@@ -58,7 +54,6 @@ impl Inactive {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::KernelOlder { .. } => "kernel_older",
             Self::NotDeclared => "not_declared",
             Self::LsmInactive => "lsm_inactive",
             Self::NotProbed(_) => "not_probed",
@@ -68,16 +63,10 @@ impl Inactive {
 
     /// The reason in one sentence.
     #[must_use]
-    pub fn describe(&self, kernel: Option<KernelVersion>) -> String {
+    pub fn describe(&self) -> String {
         match self {
-            Self::KernelOlder { since } => match kernel {
-                Some(found) => format!("needs {since}, found {found}"),
-                None => format!("needs {since}"),
-            },
             Self::NotDeclared => {
-                "the kernel does not declare it: a backport is missing or the kernel \
-                 configuration leaves it out"
-                    .to_string()
+                "the kernel does not declare it: its configuration leaves it out".to_string()
             }
             Self::LsmInactive => "the BPF LSM is not among the active security modules".to_string(),
             Self::NotProbed(why) => format!("not probed: {why}"),
@@ -127,8 +116,8 @@ pub struct CapabilityState {
     pub capability: &'static Capability,
     /// `None` when active.
     pub inactive: Option<Inactive>,
-    /// How to switch it on, where something on the host can: a kernel to
-    /// install or a boot parameter to set. `None` when active, and when the
+    /// How to switch it on, where something on the host can: a boot
+    /// parameter to set. `None` when active, and when the
     /// probe could not run or the kernel refused, since neither names a
     /// change that would help.
     pub hint: Option<String>,
@@ -162,12 +151,10 @@ impl CapabilityReport {
 #[must_use]
 pub fn classify(
     capability: &Capability,
-    kernel: Option<KernelVersion>,
     lsm_active: bool,
     evidence: &Evidence,
 ) -> Option<Inactive> {
     let lsm_ok = !capability.needs_lsm || lsm_active;
-    let older = kernel.is_some_and(|k| k < capability.since);
     match evidence {
         Evidence::Lsm {
             active,
@@ -180,10 +167,6 @@ pub fn classify(
                 Some(Inactive::NotProbed(
                     "the list of active security modules could not be read".to_string(),
                 ))
-            } else if older {
-                Some(Inactive::KernelOlder {
-                    since: capability.since,
-                })
             } else if *built == Some(false) {
                 Some(Inactive::NotDeclared)
             } else {
@@ -204,13 +187,7 @@ pub fn classify(
                 ));
             }
             if *declared == Some(false) {
-                return Some(if older {
-                    Inactive::KernelOlder {
-                        since: capability.since,
-                    }
-                } else {
-                    Inactive::NotDeclared
-                });
+                return Some(Inactive::NotDeclared);
             }
             if !lsm_ok {
                 return Some(Inactive::LsmInactive);
@@ -234,11 +211,6 @@ pub fn classify(
                     "nothing in the configuration uses it, so no attach was attempted".to_string()
                 })));
             }
-            if older {
-                return Some(Inactive::KernelOlder {
-                    since: capability.since,
-                });
-            }
             if !lsm_ok {
                 return Some(Inactive::LsmInactive);
             }
@@ -253,7 +225,6 @@ pub fn classify(
 fn hint_for(
     capability: &Capability,
     inactive: &Inactive,
-    release: Option<&str>,
     lsm_remedy: Option<&str>,
 ) -> Option<String> {
     let lsm = || lsm_remedy.unwrap_or(LSM_BOOT_PARAMETER).to_string();
@@ -262,9 +233,7 @@ fn hint_for(
         // The LSM itself is switched on at boot, or by a kernel built with it,
         // which is what the LSM probe's remedy already says.
         Inactive::NotDeclared if capability.id == "bpf_lsm" => Some(lsm()),
-        Inactive::KernelOlder { since } => release.map(|r| upgrade_hint(r, *since)),
-        Inactive::NotDeclared => release.map(|r| upgrade_hint(r, capability.since)),
-        Inactive::NotProbed(_) | Inactive::Refused(_) => None,
+        Inactive::NotDeclared | Inactive::NotProbed(_) | Inactive::Refused(_) => None,
     }
 }
 
@@ -282,14 +251,14 @@ pub fn build(
         .iter()
         .map(|capability| {
             let inactive = match evidence(capability.id) {
-                Some(e) => classify(capability, kernel, lsm_active, &e),
+                Some(e) => classify(capability, lsm_active, &e),
                 None => Some(Inactive::NotProbed(
                     "startup has not reached the probe that answers for it".to_string(),
                 )),
             };
             let hint = inactive
                 .as_ref()
-                .and_then(|i| hint_for(capability, i, release.as_deref(), lsm_remedy));
+                .and_then(|i| hint_for(capability, i, lsm_remedy));
             CapabilityState {
                 capability,
                 inactive,
@@ -494,7 +463,7 @@ pub fn log(report: &CapabilityReport) {
             continue;
         };
         let capability = entry.capability.id;
-        let reason = inactive.describe(report.kernel);
+        let reason = inactive.describe();
         let fallback = entry.capability.fallback;
         if let Some(hint) = entry.hint.as_deref() {
             tracing::info!(
@@ -539,51 +508,25 @@ pub fn cached() -> Option<&'static CapabilityReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ebpf::capabilities::{ProbeKind, find};
-
-    const ABOVE: Capability = Capability {
-        id: "string_kfuncs",
-        unlocks: "kernel strings compared in the kernel",
-        probe: ProbeKind::Loaded,
-        since: KernelVersion { major: 7, minor: 1 },
-        needs_lsm: false,
-        fallback: "compared in userspace",
-    };
+    use crate::ebpf::capabilities::find;
 
     fn k(major: u32, minor: u32) -> KernelVersion {
         KernelVersion { major, minor }
     }
 
     #[test]
-    fn a_recent_kernel_that_lacks_the_kfunc_is_not_declared_not_active() {
+    fn a_kernel_that_lacks_the_kfunc_is_not_declared_not_active() {
+        let reqsk = find("tcp_reqsk_assign").expect("entry");
         let e = Evidence::Kfunc {
             declared: Some(false),
             load: Load::Refused("not declared".into()),
         };
-        assert_eq!(
-            classify(&ABOVE, Some(k(7, 2)), true, &e),
-            Some(Inactive::NotDeclared)
+        let inactive = classify(reqsk, true, &e).expect("inactive");
+        assert_eq!(inactive, Inactive::NotDeclared);
+        assert!(
+            !inactive.describe().contains("needs"),
+            "no version is named"
         );
-    }
-
-    #[test]
-    fn a_backport_on_an_older_number_is_active() {
-        let e = Evidence::Kfunc {
-            declared: Some(true),
-            load: Load::Loaded,
-        };
-        assert_eq!(classify(&ABOVE, Some(k(6, 18)), false, &e), None);
-    }
-
-    #[test]
-    fn an_older_kernel_without_it_names_the_version_before_the_declaration() {
-        let e = Evidence::Kfunc {
-            declared: Some(false),
-            load: Load::Refused("not declared".into()),
-        };
-        let inactive = classify(&ABOVE, Some(k(6, 18)), true, &e).expect("inactive");
-        assert_eq!(inactive, Inactive::KernelOlder { since: ABOVE.since });
-        assert_eq!(inactive.describe(Some(k(6, 18))), "needs 7.1, found 6.18");
     }
 
     #[test]
@@ -592,9 +535,10 @@ mod tests {
             declared: Some(false),
             load: Load::NotRun("the load needs a BPF token and none was granted".into()),
         };
-        let inactive = classify(&ABOVE, Some(k(6, 18)), true, &e).expect("inactive");
+        let reqsk = find("tcp_reqsk_assign").expect("entry");
+        let inactive = classify(reqsk, true, &e).expect("inactive");
         assert_eq!(inactive.code(), "not_probed");
-        let said = inactive.describe(Some(k(6, 18)));
+        let said = inactive.describe();
         assert!(!said.contains("needs 6."), "{said}");
         assert!(!said.contains("found 6."), "{said}");
         assert!(!said.contains("kernel does not"), "{said}");
@@ -608,12 +552,9 @@ mod tests {
             declared: Some(true),
             load: Load::Refused("sleepable programs refused".into()),
         };
+        assert_eq!(classify(file, false, &e), Some(Inactive::LsmInactive));
         assert_eq!(
-            classify(file, Some(k(6, 18)), false, &e),
-            Some(Inactive::LsmInactive)
-        );
-        assert_eq!(
-            classify(file, Some(k(6, 18)), true, &e),
+            classify(file, true, &e),
             Some(Inactive::Refused("sleepable programs refused".into()))
         );
     }
@@ -625,11 +566,8 @@ mod tests {
             declared: Some(true),
             load: Load::Loaded,
         };
-        assert_eq!(
-            classify(file, Some(k(7, 0)), false, &e),
-            Some(Inactive::LsmInactive)
-        );
-        assert_eq!(classify(file, Some(k(7, 0)), true, &e), None);
+        assert_eq!(classify(file, false, &e), Some(Inactive::LsmInactive));
+        assert_eq!(classify(file, true, &e), None);
     }
 
     #[test]
@@ -639,7 +577,7 @@ mod tests {
             declared: Some(true),
             load: Load::NotAttempted,
         };
-        assert_eq!(classify(reqsk, Some(k(6, 18)), false, &e), None);
+        assert_eq!(classify(reqsk, false, &e), None);
     }
 
     #[test]
@@ -650,7 +588,7 @@ mod tests {
             loaded: true,
             reason: None,
         });
-        assert_eq!(classify(entry, Some(k(7, 0)), false, &loaded), None);
+        assert_eq!(classify(entry, false, &loaded), None);
 
         let undeclared = immediate_signal_evidence(&DirectSignalProbe {
             declared: Some(false),
@@ -658,7 +596,7 @@ mod tests {
             reason: Some("the kernel does not declare bpf_send_signal_task".into()),
         });
         assert_eq!(
-            classify(entry, Some(k(6, 18)), false, &undeclared),
+            classify(entry, false, &undeclared),
             Some(Inactive::NotDeclared)
         );
 
@@ -668,7 +606,7 @@ mod tests {
             reason: Some("the kernel refused the signal program (errno 22)".into()),
         });
         assert_eq!(
-            classify(entry, Some(k(6, 18)), false, &refused),
+            classify(entry, false, &refused),
             Some(Inactive::Refused(
                 "the kernel refused the signal program (errno 22)".into()
             ))
@@ -676,9 +614,7 @@ mod tests {
 
         let off = immediate_signal_evidence(&DirectSignalProbe::default());
         assert_eq!(
-            classify(entry, Some(k(6, 18)), false, &off)
-                .expect("inactive")
-                .code(),
+            classify(entry, false, &off).expect("inactive").code(),
             "not_probed"
         );
     }
@@ -691,16 +627,14 @@ mod tests {
             Some("stopping a process is turned off in the configuration".into()),
         );
         assert_eq!(
-            classify(signal, Some(k(6, 18)), true, &e),
+            classify(signal, true, &e),
             Some(Inactive::NotProbed(
                 "stopping a process is turned off in the configuration".into()
             ))
         );
         let never = attach_evidence(false, None);
         assert_eq!(
-            classify(signal, Some(k(6, 18)), true, &never)
-                .expect("inactive")
-                .code(),
+            classify(signal, true, &never).expect("inactive").code(),
             "not_probed"
         );
     }
@@ -709,12 +643,9 @@ mod tests {
     fn an_lsm_attach_refused_on_a_host_without_the_lsm_names_the_lsm() {
         let guard = find("self_protection").expect("entry");
         let e = attach_evidence(false, Some("the LSM hook did not attach".into()));
+        assert_eq!(classify(guard, false, &e), Some(Inactive::LsmInactive));
         assert_eq!(
-            classify(guard, Some(k(6, 18)), false, &e),
-            Some(Inactive::LsmInactive)
-        );
-        assert_eq!(
-            classify(guard, Some(k(6, 18)), true, &e),
+            classify(guard, true, &e),
             Some(Inactive::Refused("the LSM hook did not attach".into()))
         );
     }
@@ -728,7 +659,7 @@ mod tests {
             read: true,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 18)), false, &booted_without),
+            classify(lsm, false, &booted_without),
             Some(Inactive::LsmInactive)
         );
         let built_without = Evidence::Lsm {
@@ -737,7 +668,7 @@ mod tests {
             read: true,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 18)), false, &built_without),
+            classify(lsm, false, &built_without),
             Some(Inactive::NotDeclared)
         );
         let unread = Evidence::Lsm {
@@ -746,9 +677,7 @@ mod tests {
             read: false,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 18)), false, &unread)
-                .expect("inactive")
-                .code(),
+            classify(lsm, false, &unread).expect("inactive").code(),
             "not_probed"
         );
     }
@@ -807,24 +736,16 @@ mod tests {
             None,
             "not probed names no change"
         );
-        let declared = entry("tcp_reqsk_assign").hint.as_deref().expect("hint");
-        assert!(declared.contains("backports"), "{declared}");
+        assert_eq!(
+            entry("tcp_reqsk_assign").hint,
+            None,
+            "the floor guarantees it exists, so no kernel is named"
+        );
         assert_eq!(
             entry("kprobe_session").hint,
             None,
             "a refusal names no change"
         );
-    }
-
-    #[test]
-    fn an_older_kernel_is_pointed_at_the_version_it_lacks() {
-        let inactive = Inactive::KernelOlder { since: ABOVE.since };
-        let hint = hint_for(&ABOVE, &inactive, Some("6.18.12+deb13-amd64"), None).expect("hint");
-        assert!(
-            hint.starts_with("This needs 7.1 and the host runs 6.18"),
-            "{hint}"
-        );
-        assert_eq!(hint_for(&ABOVE, &inactive, None, None), None);
     }
 
     /// Collects every formatted line a subscriber writes.
