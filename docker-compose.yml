@@ -51,13 +51,51 @@
 # changes automatically and reloads rules without restart.
 
 services:
+  # Writes what the warden answers, from the configuration the agent will read,
+  # and exits: every family that configuration does not use is refused, and the
+  # gateways, VIPs, ports and paths it names fence the rest. It runs before the
+  # warden and the agent, as root with no capability but reading a file it does
+  # not own, into a volume only the warden mounts, read-only. The warden reads
+  # it once when it starts: `docker compose up -d --force-recreate warden-policy
+  # warden` after changing a setting the warden serves.
+  warden-policy:
+    image: ebpfsentinel:latest
+    container_name: ebpfsentinel-warden-policy
+    command:
+      - "--config"
+      - "/etc/ebpfsentinel/config.yaml"
+      - "warden-policy"
+      - "--output"
+      - "/run/ebpfsentinel-policy/warden-policy.json"
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add:
+      - DAC_READ_SEARCH # the configuration belongs to the agent's uid, mode 0640
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config/ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml:ro
+      - warden-policy:/run/ebpfsentinel-policy
+    restart: "no"
+
   warden:
     build:
       context: .
       dockerfile: Dockerfile.warden
     image: ebpfsentinel-warden:latest
     container_name: ebpfsentinel-warden
-    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    command:
+      - "serve"
+      - "/run/ebpfsentinel/warden.sock"
+      - "--uid"
+      - "65534"
+      - "--policy"
+      - "/run/ebpfsentinel-policy/warden-policy.json"
+    depends_on:
+      warden-policy:
+        condition: service_completed_successfully
     # The warden programs the host network namespace (conntrack, routes, ARP) and
     # attaches to host interfaces.
     network_mode: host
@@ -84,6 +122,9 @@ services:
       - seccomp=unconfined # mount/bpf/netlink syscalls
     volumes:
       - warden-sock:/run/ebpfsentinel
+      # What the warden answers, written by warden-policy; the agent never
+      # mounts this volume.
+      - warden-policy:/run/ebpfsentinel-policy:ro
       # Read-only host /proc so the warden resolves the same
       # /host/proc/<pid>/root/<lib> path the agent sends for a brokered uprobe.
       - /proc:/host/proc:ro
@@ -299,4 +340,6 @@ volumes:
   ebpfsentinel-captures:
     driver: local
   warden-sock:
+    driver: local
+  warden-policy:
     driver: local

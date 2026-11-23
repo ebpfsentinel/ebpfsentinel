@@ -10,18 +10,42 @@ use std::process::{Child, Command as Proc, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+use ebpfsentinel_warden::policy::WardenPolicy;
 use ebpfsentinel_warden_proto::{
     Command, FIM_NO_WATCH, PROTOCOL_VERSION, Response, read_frame, write_frame,
 };
 
-/// Spawn `warden serve <sock> --uid <uid>` and return the child handle.
+/// Spawn `warden serve <sock> --uid <uid>` and return the child handle. The
+/// warden is given a policy that opens the file watch, with one canary path,
+/// written beside the socket.
 fn spawn_warden(sock: &str, uid: u32) -> Child {
+    let policy = format!("{sock}.policy.json");
+    let allowed = WardenPolicy {
+        file_watch: true,
+        canaries: vec![CANARY.into()],
+        ..WardenPolicy::default()
+    };
+    std::fs::write(
+        &policy,
+        serde_json::to_string(&allowed).expect("encode the policy"),
+    )
+    .expect("write the policy");
     Proc::new(env!("CARGO_BIN_EXE_warden"))
-        .args(["serve", sock, "--uid", &uid.to_string()])
+        .args([
+            "serve",
+            sock,
+            "--uid",
+            &uid.to_string(),
+            "--policy",
+            &policy,
+        ])
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn warden")
 }
+
+/// The one path the policy lets a canary be planted at.
+const CANARY: &str = "/srv/0000-archive.docx";
 
 /// Connect to the warden socket, retrying until it is bound (or timing out).
 fn connect(sock: &str) -> UnixStream {
@@ -52,6 +76,7 @@ impl Drop for Guard {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock);
+        let _ = std::fs::remove_file(format!("{}.policy.json", self.sock));
     }
 }
 
@@ -131,7 +156,7 @@ fn a_file_read_without_a_watch_is_refused_and_a_refused_mark_is_named() {
     write_frame(
         &mut s,
         &Command::FimCanaries {
-            paths: vec!["/srv/0000-archive.docx".into()],
+            paths: vec![CANARY.into()],
         },
     )
     .unwrap();

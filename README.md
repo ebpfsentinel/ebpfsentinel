@@ -404,9 +404,14 @@ cargo xtask ebpf-build        # eBPF programs (the pinned nightly)
 # the token - never CAP_BPF, never as root: started as root it drops to 65534
 # first, the uid the broker serves by default. Start the broker, then the agent
 # in a mount namespace with a tmpfs on /sys/fs/bpf, where it creates the
-# directory the delegated bpffs is mounted on:
-sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock &
+# directory the delegated bpffs is mounted on. The broker answers only what the
+# configuration uses, written by the agent binary before it starts:
 sudo chown 65534 config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
+sudo mkdir -p /run/ebpfsentinel
+sudo ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml warden-policy \
+  --output /run/ebpfsentinel/warden-policy.json
+sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock \
+  --policy /run/ebpfsentinel/warden-policy.json &
 sudo unshare --mount --propagation private sh -c \
   'mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec "$@"' sh \
   env EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \

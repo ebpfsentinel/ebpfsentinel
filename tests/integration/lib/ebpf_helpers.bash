@@ -392,6 +392,17 @@ start_ebpf_agent() {
             chmod 755 "$staged_ebpf"
             chmod a+r "$staged_ebpf"/* 2>/dev/null || true
             rm -f "$sock"
+            # What the warden answers, written from the agent's configuration
+            # by the agent binary, as root and before the agent runs, the way
+            # the unit, the chart and the compose file do. A suite whose
+            # configuration leaves a family off sees the warden refuse it.
+            local policy="${sock%.sock}.policy.json"
+            rm -f "$policy"
+            if ! "$AGENT_BIN" --config "$config_file" warden-policy --output "$policy" \
+                >>"${AGENT_LOG_FILE}.warden" 2>&1; then
+                echo "  [warden] the agent binary could not write the policy" >&2
+                return 1
+            fi
             # The privileged warden broker (root, init netns). It serves its
             # default uid, 65534, the one the agent drops to.
             # The warden gets its own log: the agent's redirection below
@@ -409,10 +420,10 @@ start_ebpf_agent() {
                     sh -c "mount --bind /proc '${WARDEN_PID_NS_HOST_PROC}' \
                         && mount -t proc proc /proc \
                         && exec env EBPFSENTINEL_HOST_PROC='${WARDEN_PID_NS_HOST_PROC}' \
-                            '$warden' serve '$sock'" \
+                            '$warden' serve '$sock' --policy '$policy'" \
                     </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
             else
-                setsid "$warden" serve "$sock" \
+                setsid "$warden" serve "$sock" --policy "$policy" \
                     </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
             fi
             echo "$!" > "${AGENT_PID_FILE}.warden"

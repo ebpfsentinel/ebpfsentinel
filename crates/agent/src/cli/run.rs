@@ -30,6 +30,11 @@ pub(super) async fn run_oss(mut cli: Cli) -> Result<Option<Cli>> {
             Ok(())
         }
 
+        Some(Command::WardenPolicy { output }) => {
+            let policy = crate::warden_policy::derive_from_file(std::path::Path::new(&cli.config))?;
+            crate::warden_policy::write(&policy, output.as_deref())
+        }
+
         Some(Command::Stop { conn, reason }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_stop(&client, reason.as_deref(), output).await

@@ -28,8 +28,8 @@ use ebpfsentinel_warden::host_ops::LocalHostOps;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
     AGENT_SECCOMP_PROFILE_FILE, ProfileInstall, collect_module_btf_fds, enable_tcp_syncookies,
-    install_seccomp_profile, open_pcap_pool, peer_uid_from_args, prepare_state_dir,
-    prioritize_and_cap_btf,
+    install_seccomp_profile, open_pcap_pool, peer_uid_from_args, policy_from_args,
+    prepare_state_dir, prioritize_and_cap_btf,
 };
 use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 
@@ -46,7 +46,7 @@ const DEFAULT_UID: u32 = 65534;
 /// of the host's instead.
 const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
 
-const USAGE: &str = "usage: warden serve <socket> [--uid <n> | --user <name>]\n       warden prepare-state <dir> [--uid <n> | --user <name>]\n       warden install-seccomp-profile <dir>";
+const USAGE: &str = "usage: warden serve <socket> [--uid <n> | --user <name>] [--policy <file>]\n       warden prepare-state <dir> [--uid <n> | --user <name>]\n       warden install-seccomp-profile <dir>";
 
 /// The agent's seccomp profile, compiled in from the one file the compose
 /// deployment and the release read, so the copy a cluster installs cannot
@@ -80,7 +80,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            serve(sock, uid)
+            let policy = match policy_from_args(&args) {
+                Ok(policy) => policy,
+                Err(e) => {
+                    eprintln!("[warden] {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            serve(sock, uid, policy)
         }
         Some("prepare-state") => {
             let Some(dir) = args.get(2) else {
@@ -151,7 +158,11 @@ fn install_profile(dir: &Path, profile: &[u8]) -> ExitCode {
 /// It answers only the privileged operations the agent cannot perform from its
 /// user namespace - bpffs delegation + module-BTF/pcap fd hand-off (`Delegate`),
 /// conntrack read/teardown, route programming, and gratuitous ARP.
-fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
+fn serve(
+    sockpath: &str,
+    allowed_uid: u32,
+    policy: ebpfsentinel_warden::policy::WardenPolicy,
+) -> ExitCode {
     // Privileged setup the agent cannot perform once rootless (the XDP syncookie
     // offload needs always-on kernel syncookies).
     enable_tcp_syncookies();
@@ -207,6 +218,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
         None,
         allowed_uid,
         std::sync::Arc::new(proc_root),
+        std::sync::Arc::new(policy),
     );
     ExitCode::SUCCESS
 }

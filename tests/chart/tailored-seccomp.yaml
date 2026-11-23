@@ -209,6 +209,37 @@ spec:
           volumeMounts:
             - name: seccomp-profile
               mountPath: /seccomp/ebpfsentinel
+        # What the warden answers, written by the agent binary from the
+        # configuration the agent reads, before either starts: every family
+        # that configuration does not use is refused, and the gateways, VIPs,
+        # ports and paths it names fence the rest. The volume is mounted here
+        # and, read-only, in the warden; never in the agent. The warden reads
+        # it once, so a configuration change reaches it with the next rollout.
+        - name: warden-policy
+          image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config"
+            - "/etc/ebpfsentinel/config.yaml"
+            - "warden-policy"
+            - "--output"
+            - "/run/ebpfsentinel-policy/warden-policy.json"
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ebpfsentinel
+              readOnly: true
+            - name: warden-policy
+              mountPath: /run/ebpfsentinel-policy
         - name: warden
           image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
           imagePullPolicy: IfNotPresent
@@ -236,6 +267,8 @@ spec:
             - "/run/ebpfsentinel/warden.sock"
             - "--uid"
             - "65534" # only the agent's uid is served (SO_PEERCRED gate)
+            - "--policy"
+            - "/run/ebpfsentinel-policy/warden-policy.json"
           env:
             # The DLP scan walks this procfs rather than its own /proc, which
             # is what lets the pod run without the host pid namespace: the
@@ -252,6 +285,9 @@ spec:
           volumeMounts:
             - name: warden-sock
               mountPath: /run/ebpfsentinel
+            - name: warden-policy
+              mountPath: /run/ebpfsentinel-policy
+              readOnly: true
             - name: host-proc
               # Read-only host /proc so the warden resolves the same
               # /host/proc/<pid>/root/<lib> path the agent sends and creates the
@@ -397,6 +433,10 @@ spec:
       volumes:
         - name: warden-sock
           emptyDir: {}
+        - name: warden-policy
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
         - name: config
           configMap:
             name: ebpfsentinel-config

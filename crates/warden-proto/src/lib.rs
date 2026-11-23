@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 /// Protocol version negotiated by the [`Command::Hello`] handshake. Bump on any
 /// wire-breaking change so a mismatched agent/warden image pair refuses to talk
 /// rather than misinterpreting each other's frames.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Largest frame payload accepted from a peer. A conntrack dump is the largest
 /// legitimate message and stays far below this; the bound just stops a hostile or
@@ -1421,6 +1421,146 @@ pub enum Response {
     PinnedLinks { names: Vec<String> },
     /// One container's record, answering [`Command::ReadPodmanRecord`].
     PodmanRecord { read: PodmanStoreRead },
+    /// The warden's policy does not serve this command: its family is off
+    /// on this node, or a parameter lies outside what the configuration
+    /// names. The handler was never reached.
+    Refused {
+        /// The family the command belongs to.
+        family: Family,
+        /// What the policy found wrong, naming the parameter when one was.
+        reason: String,
+    },
+}
+
+/// The groups of commands a warden policy switches on one by one, each
+/// with the feature that needs it. Commands outside every family here are
+/// served to any agent: the handshake, the delegation, the agent's own link
+/// pins, read-only facts about processes, the conntrack table the firewall
+/// tears flows out of, and the attaches of the agent's own verified programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Family {
+    /// `RouteAdd`: the Multi-WAN gateways.
+    Routing,
+    /// `ArpAnnounce`: the load balancer's VIP announcer.
+    Neighbour,
+    /// `ConntrackRestore`: flows taken over from a failed HA peer.
+    ConntrackRestore,
+    /// `ConnectRootRuntime`, `ConnectPodman`, `ReadPodmanRecord`: the
+    /// container runtimes read for attribution.
+    Runtime,
+    /// `FimOpen`, `FimRead`, `FimFacts`, `FimCanaries`: the file watch.
+    FileWatch,
+    /// `WriteRefusalGroup`: the fanotify write refusal.
+    WriteRefusal,
+    /// `AttachUprobe`, `DlpScan`: the TLS plaintext and crypto-call probes.
+    Uprobe,
+    /// `ResolverSocket`: the DNS allow-list resolver.
+    Resolver,
+    /// `HiddenPorts`: the hidden port sweep.
+    HiddenPorts,
+    /// `HiddenProcesses`: the hidden process sweep.
+    HiddenProcesses,
+    /// `FileRoots`, `ReadRootedFile`, `GoExecutables`, `ProcessMappings`:
+    /// the package inventory.
+    PackageInventory,
+    /// `PacketSockets`, `NetworkPrograms`: the network inventory.
+    NetworkInventory,
+    /// `Extension`: operations a downstream warden build adds.
+    Extension,
+}
+
+impl Family {
+    /// The family's name as the policy file and the logs write it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Routing => "routing",
+            Self::Neighbour => "neighbour",
+            Self::ConntrackRestore => "conntrack-restore",
+            Self::Runtime => "runtime",
+            Self::FileWatch => "file-watch",
+            Self::WriteRefusal => "write-refusal",
+            Self::Uprobe => "uprobe",
+            Self::Resolver => "resolver",
+            Self::HiddenPorts => "hidden-ports",
+            Self::HiddenProcesses => "hidden-processes",
+            Self::PackageInventory => "package-inventory",
+            Self::NetworkInventory => "network-inventory",
+            Self::Extension => "extension",
+        }
+    }
+}
+
+impl std::fmt::Display for Family {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl Command {
+    /// The family a policy switches this command with, `None` for a command
+    /// every agent is served.
+    #[must_use]
+    pub fn family(&self) -> Option<Family> {
+        match self {
+            Self::RouteAdd { .. } => Some(Family::Routing),
+            Self::ArpAnnounce { .. } => Some(Family::Neighbour),
+            Self::ConntrackRestore { .. } => Some(Family::ConntrackRestore),
+            Self::ConnectRootRuntime { .. }
+            | Self::ConnectPodman { .. }
+            | Self::ReadPodmanRecord { .. } => Some(Family::Runtime),
+            Self::FimOpen { .. }
+            | Self::FimRead { .. }
+            | Self::FimFacts { .. }
+            | Self::FimCanaries { .. } => Some(Family::FileWatch),
+            Self::WriteRefusalGroup => Some(Family::WriteRefusal),
+            Self::AttachUprobe { .. } | Self::DlpScan => Some(Family::Uprobe),
+            Self::ResolverSocket { .. } => Some(Family::Resolver),
+            Self::HiddenPorts { .. } => Some(Family::HiddenPorts),
+            Self::HiddenProcesses { .. } => Some(Family::HiddenProcesses),
+            Self::FileRoots
+            | Self::ReadRootedFile { .. }
+            | Self::GoExecutables
+            | Self::ProcessMappings { .. } => Some(Family::PackageInventory),
+            Self::PacketSockets | Self::NetworkPrograms => Some(Family::NetworkInventory),
+            Self::Extension { .. } => Some(Family::Extension),
+            Self::Hello { .. }
+            | Self::Delegate
+            | Self::ConntrackDump
+            | Self::ConntrackDelete { .. }
+            | Self::ConntrackFlush
+            | Self::PcapOpen { .. }
+            | Self::AttachCgroup { .. }
+            | Self::TcxChain { .. }
+            | Self::AttachTcxInNetns { .. }
+            | Self::ReadExecutable { .. }
+            | Self::Identity
+            | Self::OpenerReadings { .. }
+            | Self::ReadProcessFacts { .. }
+            | Self::OpenExecutable { .. }
+            | Self::ReadServedPeer { .. }
+            | Self::ReadShareWriters { .. }
+            | Self::NamespaceIds
+            | Self::PinLink { .. }
+            | Self::PinnedLinks
+            | Self::OpenPinnedLink { .. }
+            | Self::UnpinLinks { .. } => None,
+        }
+    }
+
+    /// Whether the agent sends a descriptor right after this frame, which a
+    /// warden that refuses the command still has to take off the socket.
+    #[must_use]
+    pub fn sends_fd(&self) -> bool {
+        matches!(
+            self,
+            Self::Delegate
+                | Self::AttachUprobe { .. }
+                | Self::AttachCgroup { .. }
+                | Self::AttachTcxInNetns { .. }
+                | Self::PinLink { .. }
+        )
+    }
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -2120,5 +2260,38 @@ mod tests {
         ] {
             assert!(!root_runtime_path_allowed(target), "{target}");
         }
+    }
+
+    /// `tests/integration/scripts/warden-route-probe.py` writes a `RouteAdd`
+    /// by hand and reads the answer's tag, so it can ask the warden as the
+    /// agent would without a Rust client. These are the bytes it writes and
+    /// the tag it expects back.
+    #[test]
+    fn the_integration_probe_speaks_the_wire_format() {
+        let route = Command::RouteAdd {
+            route: super::RouteSpec {
+                dst_cidr: "0.0.0.0/0".into(),
+                gateway: "192.0.2.254".into(),
+                iface: "lo".into(),
+                table: 254,
+            },
+        };
+        let mut expected = vec![5u8, 9];
+        expected.extend_from_slice(b"0.0.0.0/0");
+        expected.push(11);
+        expected.extend_from_slice(b"192.0.2.254");
+        expected.push(2);
+        expected.extend_from_slice(b"lo");
+        expected.extend_from_slice(&[0xfe, 0x01]);
+        assert_eq!(postcard::to_allocvec(&route).expect("encode"), expected);
+        let hello = Command::Hello {
+            version: super::PROTOCOL_VERSION,
+        };
+        assert_eq!(postcard::to_allocvec(&hello).expect("encode"), [0, 3]);
+        let refused = Response::Refused {
+            family: super::Family::Routing,
+            reason: String::new(),
+        };
+        assert_eq!(postcard::to_allocvec(&refused).expect("encode")[0], 31);
     }
 }

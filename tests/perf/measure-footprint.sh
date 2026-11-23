@@ -274,7 +274,16 @@ case "${LAUNCH}" in
         # when started as root. That id reads the config and writes the data
         # directory, and creates the bpffs mount target on a tmpfs of its own,
         # as the installed unit gives it.
-        systemd-run --unit fp-warden "${PROPS[@]}" -- /usr/local/bin/warden serve "${REMOTE}/warden.sock"
+        # The warden answers what the configuration uses, written by the
+        # binary about to run before either starts.
+        if [ "${LAUNCH}" = oss ]; then
+            POLICY_BIN=/usr/local/bin/ebpfsentinel-agent
+        else
+            POLICY_BIN="${REMOTE}/ebpfsentinel-enterprise-agent"
+        fi
+        "${POLICY_BIN}" --config "${CONFIG}" warden-policy --output "${REMOTE}/warden-policy.json" \
+            || { echo '{"error":"the warden policy could not be written"}'; exit 1; }
+        systemd-run --unit fp-warden "${PROPS[@]}" -- /usr/local/bin/warden serve "${REMOTE}/warden.sock" --policy "${REMOTE}/warden-policy.json"
         chown 65534:65534 "${CONFIG}"
         chown -R 65534:65534 "${REMOTE}/data"
         PROPS+=(-p TemporaryFileSystem=/sys/fs/bpf:mode=1777)

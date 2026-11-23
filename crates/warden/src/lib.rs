@@ -63,6 +63,7 @@ pub mod packet_sockets;
 pub mod pcap_slots;
 pub mod podman_connect;
 pub mod podman_store;
+pub mod policy;
 pub mod process_maps;
 pub mod resolver_socket;
 pub mod root_runtime;
@@ -635,6 +636,31 @@ pub fn peer_uid_from_args(args: &[String]) -> Result<Option<u32>, String> {
         }
         (None, None) => Ok(None),
     }
+}
+
+/// The policy `--policy <file>` names, or the policy of a warden started
+/// without one: the commands in no family, nothing else. The start-up log
+/// says which families are on, so a refusal later can be read against it.
+///
+/// # Errors
+///
+/// `--policy` is given without a file, or the file is not a policy this
+/// warden can read whole.
+pub fn policy_from_args(args: &[String]) -> Result<policy::WardenPolicy, String> {
+    let Some(i) = args.iter().position(|a| a == "--policy") else {
+        eprintln!("[warden] no --policy: serving the commands every agent needs and nothing else");
+        return Ok(policy::WardenPolicy::default());
+    };
+    let path = args
+        .get(i + 1)
+        .ok_or_else(|| "--policy needs a file".to_string())?;
+    let policy = policy::WardenPolicy::load(std::path::Path::new(path))?;
+    let on: Vec<&str> = policy.families().iter().map(|f| f.name()).collect();
+    eprintln!(
+        "[warden] policy {path}: families on [{}], everything else refused",
+        on.join(", ")
+    );
+    Ok(policy)
 }
 
 /// Which host setting refused an unprivileged user namespace, read through

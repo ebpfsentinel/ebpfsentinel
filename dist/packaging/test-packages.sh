@@ -84,6 +84,8 @@ installed_files_are_in_place() {
     [ "$(stat -c %U /var/lib/ebpfsentinel)" = ebpfsentinel ]
   check "the agent unit runs as that user" grep -qx 'User=ebpfsentinel' /usr/lib/systemd/system/ebpfsentinel.service
   check "the warden serves that user" grep -q -- '--user ebpfsentinel' /usr/lib/systemd/system/ebpfsentinel-warden.service
+  check "the warden is started on the policy the agent binary writes" \
+    sh -c "grep -q -- '--policy /run/ebpfsentinel/warden-policy.json' /usr/lib/systemd/system/ebpfsentinel-warden.service && grep -q '^ExecStartPre=/usr/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml warden-policy' /usr/lib/systemd/system/ebpfsentinel-warden.service"
   check "the AppArmor profile is installed" [ -f /etc/apparmor.d/ebpfsentinel-agent ]
   check "the userns sysctl is shipped, not applied" \
     sh -c '[ -f /usr/share/ebpfsentinel/sysctl.d/60-ebpfsentinel-userns.conf ] && [ ! -e /etc/sysctl.d/60-ebpfsentinel-userns.conf ]'

@@ -8,6 +8,7 @@
 
 use std::process::{Child, Command as Proc, Stdio};
 
+use ebpfsentinel_warden::policy::{RuntimeFence, WardenPolicy};
 use ebpfsentinel_warden_client::{PodmanStoreRead, WardenClient};
 
 struct Guard(Child);
@@ -27,6 +28,23 @@ fn current_uid() -> u32 {
 fn a_store_that_is_not_its_owners_answers_no_store_over_the_wire() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sock = dir.path().join("warden.sock");
+    // The Podman reads are served only to a deployment configured for them,
+    // the executable list only to one that keeps a package inventory.
+    let policy = dir.path().join("policy.json");
+    let allowed = WardenPolicy {
+        runtimes: RuntimeFence {
+            podman: true,
+            podman_rootless: true,
+            ..RuntimeFence::default()
+        },
+        package_inventory: true,
+        ..WardenPolicy::default()
+    };
+    std::fs::write(
+        &policy,
+        serde_json::to_string(&allowed).expect("encode the policy"),
+    )
+    .expect("write the policy");
     let _guard = Guard(
         Proc::new(env!("CARGO_BIN_EXE_warden"))
             .args([
@@ -34,6 +52,8 @@ fn a_store_that_is_not_its_owners_answers_no_store_over_the_wire() {
                 sock.to_str().expect("utf-8 path"),
                 "--uid",
                 &current_uid().to_string(),
+                "--policy",
+                policy.to_str().expect("utf-8 path"),
             ])
             .stderr(Stdio::null())
             .spawn()

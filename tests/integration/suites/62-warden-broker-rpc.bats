@@ -26,9 +26,11 @@
 # behaviour of each feature; here the claim is narrower - the broker served
 # the privileged half.
 #
-# `RouteAdd` is absent: it replaces the host's default route, which multi-WAN
-# failover issues and which this suite will not do to the VM it runs on; the
-# warden's refusal of any other route is held by its own unit tests.
+# `RouteAdd` is never served here: the fixture configures no multi-WAN
+# gateway, so the policy the agent binary wrote before the warden started
+# leaves routing off, and a route asked for by the served uid is refused
+# without the host's routing table being touched. The fenced acceptance of a
+# configured gateway is held by the warden's own unit tests.
 #
 # Requires: root, kernel >= 6.12, local eBPF build + warden binary, python3,
 # setpriv, ncat, jq. VM-only (Vagrant agent).
@@ -116,6 +118,12 @@ teardown_file() {
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-warden-$$}"
     rm -f "${PREPARED_CONFIG:-}"
+}
+
+_route_probe() {
+    local staged="/tmp/ebpfsentinel-warden-route-probe.py"
+    install -m 0755 "${BATS_TEST_DIRNAME}/../scripts/warden-route-probe.py" "${staged}"
+    echo "${staged}"
 }
 
 # ── Broker process + socket ────────────────────────────────────────
@@ -464,6 +472,54 @@ teardown_file() {
     echo "${metrics}" | grep -qE 'ebpfsentinel_lb_vip_takeovers_total\{[^}]*vip="warden-vip"' || {
         echo "no lb_vip_takeovers_total series for vip=warden-vip" >&2
         echo "${metrics}" | grep -i "vip" >&2 || true
+        return 1
+    }
+}
+
+# ── Policy ─────────────────────────────────────────────────────────
+
+@test "the warden starts on the policy the agent binary wrote from its configuration" {
+    local policy
+    policy="$(_warden_sock)"
+    policy="${policy%.sock}.policy.json"
+    [ -f "${policy}" ] || {
+        echo "no policy at ${policy}" >&2
+        return 1
+    }
+    [ "$(stat -c %U "${policy}")" = root ] || {
+        echo "the policy is not root's: $(stat -c '%U %a' "${policy}")" >&2
+        return 1
+    }
+    # The fixture names no gateway: routing stays off.
+    [ "$(jq -c '.routes' "${policy}")" = "[]" ] || {
+        echo "routing switched on by a configuration that names no gateway" >&2
+        cat "${policy}" >&2
+        return 1
+    }
+    grep -q "\[warden\] policy ${policy}: families on" "$(_warden_log)" || {
+        echo "the warden never said which policy it serves" >&2
+        tail -20 "$(_warden_log)" >&2
+        return 1
+    }
+}
+
+@test "a route the configuration does not name is refused and the table is untouched" {
+    local before after answer
+    before="$(ip route show default)"
+    answer="$(setpriv --reuid 65534 --regid 65534 --clear-groups \
+        python3 "$(_route_probe)" "$(_warden_sock)" 192.0.2.254 lo)"
+    after="$(ip route show default)"
+    [ "${answer}" = "refused" ] || {
+        echo "the warden answered '${answer}' to a route outside its policy" >&2
+        return 1
+    }
+    [ "${before}" = "${after}" ] || {
+        echo "the default route changed: '${before}' -> '${after}'" >&2
+        return 1
+    }
+    grep -q "refused (routing)" "$(_warden_log)" || {
+        echo "the refusal is not in the warden's log" >&2
+        tail -20 "$(_warden_log)" >&2
         return 1
     }
 }

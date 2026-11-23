@@ -72,6 +72,17 @@ pub enum Command {
         warden_sock: Option<std::path::PathBuf>,
     },
 
+    /// Write the policy the warden serves this configuration with: which
+    /// privileged operations it answers, fenced by the gateways, VIPs, ports
+    /// and paths the configuration names. Run by the deployment before the
+    /// warden starts, from the file the agent reads
+    WardenPolicy {
+        /// File the policy is written to, replaced in one rename; standard
+        /// output without one
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+
     /// Stop the running agent and keep it stopped: the stop is recorded under
     /// the caller's name, and the agent exits with a status its service unit
     /// does not restart

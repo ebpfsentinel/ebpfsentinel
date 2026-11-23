@@ -31,13 +31,39 @@
 name: ebpfsentinel
 
 services:
+  # Writes what the warden answers, from the configuration the agent will read,
+  # and exits: every family that configuration does not use is refused, and the
+  # gateways, VIPs, ports and paths it names fence the rest. Its volume is
+  # mounted, read-only, in the warden alone. The warden reads it once when it
+  # starts: `docker compose up -d --force-recreate warden-policy warden` after
+  # changing a setting the warden serves.
+  warden-policy:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev
+    container_name: ebpfsentinel-warden-policy
+    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output", "/run/ebpfsentinel-policy/warden-policy.json"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    # The configuration belongs to the agent's uid, mode 0640.
+    cap_add: [DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml:ro
+      - warden-policy:/run/ebpfsentinel-policy
+    restart: "no"
+
   # The privileged broker: it delegates a bpffs to the agent and performs the
   # host network operations a user namespace cannot (conntrack, routes, ARP,
   # pcap) and the DLP uprobe link. It loads no eBPF and holds no maps.
   warden:
     image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
     container_name: ebpfsentinel-warden
-    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534", "--policy", "/run/ebpfsentinel-policy/warden-policy.json"]
+    depends_on:
+      warden-policy:
+        condition: service_completed_successfully
     network_mode: host
     environment:
       EBPFSENTINEL_HOST_PROC: /host/proc
@@ -50,6 +76,7 @@ services:
       - seccomp=unconfined
     volumes:
       - warden-sock:/run/ebpfsentinel
+      - warden-policy:/run/ebpfsentinel-policy:ro
       - /proc:/host/proc:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # The host bpffs, where the warden pins the agent's XDP, TC and cgroup
@@ -147,6 +174,7 @@ services:
       start_period: 10s
 
 volumes:
+  warden-policy:
   warden-sock:
   ebpfsentinel-state:
   ebpfsentinel-captures:

@@ -1367,6 +1367,16 @@ fn unexpected(op: &str, resp: &Response) -> io::Error {
         Response::Unimplemented => {
             io::Error::other(format!("{op}: not implemented by this warden build"))
         }
+        // The warden reads its policy once, when it starts, from the same
+        // configuration the agent reads: a setting turned on since then is
+        // refused until the warden is restarted.
+        Response::Refused { family, reason } => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{op}: refused by the warden's policy ({family}): {reason}; \
+                 the warden reads its policy when it starts, restart it after changing this setting"
+            ),
+        ),
         other => io::Error::other(format!("{op}: unexpected response {other:?}")),
     }
 }

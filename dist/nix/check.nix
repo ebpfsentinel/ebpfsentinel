@@ -129,8 +129,12 @@ let
 
     "the warden is served on the socket the agent is told about" =
       warden.serviceConfig.ExecStart
-      == "${package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel"
+      == "${package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel --policy /run/ebpfsentinel/warden-policy.json"
       && agent.environment.EBPFSENTINEL_WARDEN_SOCK == "/run/ebpfsentinel/warden.sock";
+
+    "the warden's policy is written from the agent's configuration before it starts" =
+      warden.serviceConfig.ExecStartPre
+      == "${package}/bin/ebpfsentinel-agent --config ${package}/share/ebpfsentinel/ebpfsentinel.yaml warden-policy --output /run/ebpfsentinel/warden-policy.json";
 
     "the agent loads its objects from the store" =
       agent.environment.EBPF_PROGRAM_DIR == "${package}/lib/ebpfsentinel";

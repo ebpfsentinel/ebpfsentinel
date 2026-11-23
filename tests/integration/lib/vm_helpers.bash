@@ -390,7 +390,9 @@ start_ebpf_agent() {
           WARDEN=/usr/local/bin/warden; SOCK=/run/ebpfsentinel/warden.sock; \
           if [ -x \"\$WARDEN\" ]; then \
             mkdir -p /run/ebpfsentinel; rm -f \"\$SOCK\"; \
-            nohup \"\$WARDEN\" serve \"\$SOCK\" >>${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}.warden; \
+            POLICY=/run/ebpfsentinel/warden-policy.json; \
+            /usr/local/bin/ebpfsentinel-agent --config ${remote_config} warden-policy --output \"\$POLICY\" >>${_REMOTE_LOG_FILE} 2>&1 || exit 1; \
+            nohup \"\$WARDEN\" serve \"\$SOCK\" --policy \"\$POLICY\" >>${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}.warden; \
             for _ in \$(seq 1 100); do [ -S \"\$SOCK\" ] && break; sleep 0.1; done; \
             nohup unshare --mount --propagation private sh -c \"mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec \\\"\\\$@\\\"\" sh env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel EBPFSENTINEL_WARDEN_SOCK=\"\$SOCK\" /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           else \

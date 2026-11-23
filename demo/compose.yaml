@@ -23,9 +23,30 @@ x-lab: &lab
   restart: unless-stopped
 
 services:
+  # What the warden answers, written from the agent's configuration before
+  # either starts, into a volume only the warden mounts.
+  warden-policy:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel:${EBPFSENTINEL_TAG:-latest}
+    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output", "/run/ebpfsentinel-policy/warden-policy.json"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    # The configuration belongs to the agent's uid, mode 0640.
+    cap_add: [DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./.run/agent.yaml:/etc/ebpfsentinel/config.yaml:ro
+      - warden-policy:/run/ebpfsentinel-policy
+    restart: "no"
+
   warden:
     image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:${EBPFSENTINEL_TAG:-latest}
-    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534", "--policy", "/run/ebpfsentinel-policy/warden-policy.json"]
+    depends_on:
+      warden-policy:
+        condition: service_completed_successfully
     network_mode: host
     # No `pid: host`: the scan reads the host's processes through the read-only
     # /host/proc mount below and the uprobe attaches by path and offset.
@@ -38,6 +59,7 @@ services:
       - seccomp=unconfined
     volumes:
       - warden-sock:/run/ebpfsentinel
+      - warden-policy:/run/ebpfsentinel-policy:ro
       - /proc:/host/proc:ro
       # The cgroup hooks the warden links attach to the host's hierarchy.
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
@@ -119,5 +141,6 @@ networks:
           gateway: 172.30.66.1
 
 volumes:
+  warden-policy:
   warden-sock:
   agent-state:

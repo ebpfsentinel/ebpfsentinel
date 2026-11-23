@@ -23,6 +23,7 @@ use ebpfsentinel_warden_proto::{
 use crate::fim_watch::FimWatch;
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
+use crate::policy::WardenPolicy;
 use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
@@ -125,7 +126,10 @@ pub trait ExtHandler: Send + Sync {
 // The loop never returns, so the shared state is owned here for the life of
 // the process; taking references would only move the same `Arc`s into the
 // caller's frame.
-#[allow(clippy::needless_pass_by_value)]
+///
+/// `policy` decides which commands are served at all; it is read before any
+/// handler runs and never changes for the life of the loop.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn serve_loop(
     listener: &UnixListener,
     btf: Arc<Vec<(String, RawFd)>>,
@@ -134,6 +138,7 @@ pub fn serve_loop(
     ext: Option<Arc<dyn ExtHandler>>,
     allowed_uid: u32,
     proc_root: Arc<PathBuf>,
+    policy: Arc<WardenPolicy>,
 ) {
     // The pcap pool is shared across all connections as claimable slots: a slot
     // belongs to the connection that took it until that connection's thread
@@ -159,6 +164,7 @@ pub fn serve_loop(
                     let ext = ext.clone();
                     let slots = Arc::clone(&slots);
                     let proc_root = Arc::clone(&proc_root);
+                    let policy = Arc::clone(&policy);
                     std::thread::spawn(move || {
                         handle_conn(
                             conn,
@@ -168,6 +174,7 @@ pub fn serve_loop(
                                 host: &*host,
                                 ext: ext.as_deref(),
                                 proc_root: &proc_root,
+                                policy: &policy,
                             },
                         );
                     });
@@ -241,6 +248,8 @@ struct Served<'a> {
     /// The procfs the DLP scan walks: `/proc` on a host, the read-only bind
     /// mount in a container that was not given the host pid namespace.
     proc_root: &'a Path,
+    /// What this warden serves, read once at start.
+    policy: &'a WardenPolicy,
 }
 
 /// [`handle_conn`] with both waits given rather than taken from the constants,
@@ -260,6 +269,7 @@ fn handle_conn_with_timeouts(
         host,
         ext,
         proc_root,
+        policy,
     } = *served;
     // Every slot this connection claimed, held until the connection ends: the
     // agent's own pool keeps this connection open for its whole life, so the
@@ -340,6 +350,29 @@ fn handle_conn_with_timeouts(
         let Ok(cmd) = read_frame::<_, Command>(&mut reader) else {
             break;
         };
+        // The policy is checked before any handler runs: a refused command
+        // touches nothing on the host. A descriptor the agent sent with it is
+        // still taken off the socket and closed, so it is not read as the
+        // next command's.
+        if let Err(refusal) = policy.check(&cmd) {
+            if cmd.sends_fd() {
+                let stray = recv_fd(writer.as_raw_fd());
+                if stray >= 0 {
+                    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one
+                    // refused request and nothing else holds this number.
+                    unsafe { libc::close(stray) };
+                }
+            }
+            eprintln!("[warden] refused ({}): {}", refusal.family, refusal.reason);
+            let resp = Response::Refused {
+                family: refusal.family,
+                reason: refusal.reason,
+            };
+            if write_frame(&mut writer, &resp).is_err() {
+                break;
+            }
+            continue;
+        }
         // `PcapOpen` answers out-of-band: an `FdReady` frame followed by a fd in an
         // `SCM_RIGHTS` cmsg, so it bypasses `dispatch`.
         let ok = match &cmd {
@@ -861,10 +894,10 @@ fn result_to_response(result: Result<(), String>) -> Response {
 mod tests {
     use super::{
         ExtHandler, HANDSHAKE_TIMEOUT, HostOps, IDLE_TIMEOUT, PcapSlots, Served, Waited,
-        handle_conn, handle_conn_with_timeouts, wait_for_frame,
+        WardenPolicy, handle_conn, handle_conn_with_timeouts, wait_for_frame,
     };
     use ebpfsentinel_warden_proto::{
-        Command, ConntrackRestore, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec,
+        Command, ConntrackRestore, ConntrackTuple, Family, PROTOCOL_VERSION, Response, RouteSpec,
         read_frame, write_frame,
     };
     use std::os::fd::{AsRawFd, RawFd};
@@ -917,6 +950,15 @@ mod tests {
         }
     }
 
+    /// The policy `run_server` serves: the extension kinds the tests send,
+    /// every other family off.
+    fn test_policy() -> WardenPolicy {
+        WardenPolicy {
+            extensions: vec!["echo".into(), "boom".into(), "mystery".into()],
+            ..WardenPolicy::default()
+        }
+    }
+
     /// Drive `handle_conn` on the server end of a socket pair on its own thread.
     fn run_server(server: UnixStream, ext: Option<Arc<dyn ExtHandler>>) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -930,6 +972,7 @@ mod tests {
                     host: &host,
                     ext: ext.as_deref(),
                     proc_root: Path::new("/proc"),
+                    policy: &test_policy(),
                 },
             );
         })
@@ -1070,6 +1113,83 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_kind_the_policy_does_not_name_is_refused() {
+        let resp = one_extension(Some(Arc::new(FakeExt)), "other", vec![]);
+        match resp {
+            Response::Refused { family, .. } => assert_eq!(family, Family::Extension),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_command_carrying_a_descriptor_leaves_the_connection_in_step() {
+        // The uprobe family is off: the warden refuses, takes the program
+        // descriptor off the socket, and the next command is read as itself.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server(server, None);
+        hello(&mut client);
+        write_frame(
+            &mut client,
+            &Command::AttachUprobe {
+                path: "/usr/lib/libssl.so.3".into(),
+                offset: 0,
+                is_ret: false,
+            },
+        )
+        .unwrap();
+        let program = std::fs::File::open("/dev/null").unwrap();
+        assert!(crate::send_fd(client.as_raw_fd(), program.as_raw_fd()));
+        let resp: Response = read_frame(&mut client).unwrap();
+        match resp {
+            Response::Refused { family, .. } => assert_eq!(family, Family::Uprobe),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        write_frame(
+            &mut client,
+            &Command::TcxChain {
+                iface: "eth0".into(),
+                egress: false,
+            },
+        )
+        .unwrap();
+        let resp: Response = read_frame(&mut client).unwrap();
+        drop(client);
+        handle.join().unwrap();
+        assert_eq!(
+            resp,
+            Response::TcxChain {
+                prog_ids: vec![41, 7]
+            }
+        );
+    }
+
+    #[test]
+    fn a_route_to_an_unconfigured_gateway_never_reaches_the_host() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server(server, None);
+        hello(&mut client);
+        write_frame(
+            &mut client,
+            &Command::RouteAdd {
+                route: RouteSpec {
+                    dst_cidr: "0.0.0.0/0".into(),
+                    gateway: "203.0.113.1".into(),
+                    iface: "eth0".into(),
+                    table: 254,
+                },
+            },
+        )
+        .unwrap();
+        let resp: Response = read_frame(&mut client).unwrap();
+        drop(client);
+        handle.join().unwrap();
+        match resp {
+            Response::Refused { family, .. } => assert_eq!(family, Family::Routing),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn extension_without_handler_is_unimplemented() {
         let resp = one_extension(None, "echo", vec![1]);
         assert_eq!(resp, Response::Unimplemented);
@@ -1087,6 +1207,7 @@ mod tests {
                     host: &host,
                     ext: None,
                     proc_root: Path::new("/proc"),
+                    policy: &WardenPolicy::default(),
                 },
             );
         })
@@ -1205,6 +1326,7 @@ mod tests {
                     host: &host,
                     ext: None,
                     proc_root: Path::new("/proc"),
+                    policy: &WardenPolicy::default(),
                 },
                 handshake,
                 idle,
@@ -1314,6 +1436,7 @@ mod tests {
                     host: &host,
                     ext: None,
                     proc_root: Path::new("/proc"),
+                    policy: &WardenPolicy::default(),
                 },
                 Duration::from_secs(5),
                 Duration::from_millis(50),
