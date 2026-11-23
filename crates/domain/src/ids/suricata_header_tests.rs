@@ -5,6 +5,9 @@
 //! `header.rules` run over every packet the script builds. Each rule Suricata
 //! loads must compile here, each it refuses must be refused, and on every
 //! packet the rules alerting here must be the rules that alerted there.
+//! `session-verdicts.txt` and `stream-verdicts.txt` hold conversations the
+//! same way, the second with what alerted when each connection's streams
+//! were flushed at the end of the capture.
 
 use ebpf_common::event::{FLAG_IPV6, PacketEvent};
 
@@ -16,6 +19,7 @@ use crate::ids::suricata::SuricataVars;
 
 const VERDICTS: &str = include_str!("../../tests/fixtures/suricata/header-verdicts.txt");
 const SESSIONS: &str = include_str!("../../tests/fixtures/suricata/session-verdicts.txt");
+const STREAMS: &str = include_str!("../../tests/fixtures/suricata/stream-verdicts.txt");
 
 /// The Ethernet header Suricata counts in a flow's bytes, as `skb->len`
 /// does where tc-ids reads it.
@@ -214,6 +218,91 @@ fn session_rules_alert_on_the_packets_suricata_alerts_on() {
             let extra: Vec<_> = got.iter().filter(|s| !sids.contains(s)).collect();
             let missing: Vec<_> = sids.iter().filter(|s| !got.contains(s)).collect();
             wrong.push(format!("packet {n}: extra {extra:?}, missing {missing:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "differs from Suricata:\n{}",
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn stream_rules_alert_on_the_packets_suricata_alerts_on() {
+    let vars = SuricataVars::default();
+    let mut rules: Vec<IdsRule> = Vec::new();
+    let mut packets: Vec<(u64, Vec<u8>, Vec<u32>)> = Vec::new();
+    let mut ends: Vec<(u8, Vec<u32>)> = Vec::new();
+    let sids = |text: &str| -> Vec<u32> {
+        if text == "-" {
+            Vec::new()
+        } else {
+            text.split(',').map(|s| s.parse().expect("sid")).collect()
+        }
+    };
+    for line in STREAMS.lines() {
+        let mut fields = line.splitn(3, ' ');
+        let (Some(kind), Some(number), Some(rest)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        match kind {
+            "rule" => {
+                let sid: u32 = number.parse().expect("sid");
+                let mut compiled = compile_rule_admitting(&with_sid(rest, sid), &vars, true)
+                    .unwrap_or_else(|refused| {
+                        panic!(
+                            "sid {sid} loads in Suricata, refused here: {} {}",
+                            refused.keyword, refused.reason
+                        )
+                    });
+                rules.append(&mut compiled);
+            }
+            "packet" => {
+                let (bytes, alerted) = rest.split_once(' ').expect("packet bytes then sids");
+                packets.push((number.parse().expect("time"), hex(bytes), sids(alerted)));
+            }
+            "end" => ends.push((number.parse().expect("connection"), sids(rest))),
+            _ => {}
+        }
+    }
+    assert!(packets.len() > 100, "the fixture holds the conversations");
+
+    let mut engine = IdsEngine::new();
+    engine
+        .reload(rules)
+        .expect("the engine loads the compiled rules");
+    let mut wrong = Vec::new();
+    for (n, (ns, bytes, want)) in packets.iter().enumerate() {
+        let decoded = IpPacket::decode(bytes).expect("the packet decodes");
+        let mut header = event(&decoded);
+        header.timestamp_ns = *ns;
+        header.pkt_len = u32::try_from(bytes.len()).expect("a short packet") + ETHERNET;
+        let mut got: Vec<u32> = engine
+            .evaluate_packet(&header, bytes, None)
+            .into_iter()
+            .filter_map(|(_, rule)| rule.imported.as_ref().map(|i| i.sid))
+            .collect();
+        got.sort_unstable();
+        if &got != want {
+            wrong.push(format!("packet {n}: got {got:?}, Suricata {want:?}"));
+        }
+    }
+    let mut ended: Vec<(u8, Vec<u32>)> = ends.iter().map(|(n, _)| (*n, Vec::new())).collect();
+    for (event, _, rule) in engine.flush_all() {
+        let connection = event.src_addr[0].to_be_bytes()[3];
+        let sid = rule.imported.as_ref().map_or(0, |i| i.sid);
+        match ended.iter_mut().find(|(n, _)| *n == connection) {
+            Some((_, got)) => got.push(sid),
+            None => wrong.push(format!(
+                "end {connection}: unknown connection alerted {sid}"
+            )),
+        }
+    }
+    for ((n, want), (_, got)) in ends.iter().zip(ended.iter_mut()) {
+        got.sort_unstable();
+        if got != want {
+            wrong.push(format!("end {n}: got {got:?}, Suricata {want:?}"));
         }
     }
     assert!(

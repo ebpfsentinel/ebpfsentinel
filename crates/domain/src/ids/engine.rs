@@ -11,11 +11,12 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
-use super::flow::{FlowTable, Packet, Wire};
+use super::flow::{Ended, FlowTable, Packet, Seen, Wire};
 use super::packet::{IpPacket, L4};
 use super::prefilter::{Entry, Prefilter, needle};
 
-use super::sig::inspect::Program;
+use super::sig::inspect::{Inspect, Program};
+use super::stream::Segment;
 use crate::common::entity::Protocol;
 use crate::dns::entity::DomainPattern;
 
@@ -119,10 +120,10 @@ impl IdsEngine {
         self.compiled_domain_patterns.push(domain_compiled);
         self.inspections.push(inspection);
         self.prefilter = OnceLock::new();
-        self.flows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .forget_filters();
+        let streams = self.reads_streams();
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        flows.forget_filters();
+        flows.keep_streams(streams);
         Ok(())
     }
 
@@ -138,10 +139,10 @@ impl IdsEngine {
         self.compiled_domain_patterns.remove(pos);
         self.inspections.remove(pos);
         self.prefilter = OnceLock::new();
-        self.flows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .forget_filters();
+        let streams = self.reads_streams();
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        flows.forget_filters();
+        flows.keep_streams(streams);
         Ok(())
     }
 
@@ -182,15 +183,25 @@ impl IdsEngine {
         self.compiled_domain_patterns = domain_compiled;
         self.inspections = inspections;
         self.prefilter = OnceLock::new();
-        self.flows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .forget_filters();
+        let streams = self.reads_streams();
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        flows.forget_filters();
+        flows.keep_streams(streams);
+        drop(flows);
         self.threshold_tracker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         Ok(())
+    }
+
+    /// Whether a loaded rule reads a TCP connection's streams: one whose
+    /// matches run on them, or one reading `stream_size`.
+    fn reads_streams(&self) -> bool {
+        self.inspections
+            .iter()
+            .flatten()
+            .any(|p| p.inspect() != Inspect::Packet || p.reads_stream_size())
     }
 
     /// Read-only access to the loaded rules.
@@ -316,8 +327,9 @@ impl IdsEngine {
         // A content rule is decided on the payload, which this event does not
         // carry: the kernel classifier keys on port and protocol alone. Firing
         // here would alert on every packet to the port and make the pattern
-        // decorative. The captured payload reaches the rule through
-        // `evaluate_payload_with_context` instead.
+        // decorative. The payload reaches the rule through
+        // `evaluate_payload_with_context`, or `evaluate_packet` for a rule
+        // imported from Suricata.
         if self.compiled_patterns.get(idx).is_some_and(Option::is_some)
             || self.inspections.get(idx).is_some_and(Option::is_some)
         {
@@ -376,11 +388,9 @@ impl IdsEngine {
                 let rule = self.rules.get(idx)?;
                 let applies = rule.enabled
                     && match rule.imported.as_ref() {
-                        Some(imported) if imported.scope.is_some() => {
-                            imported.scope.as_ref().is_some_and(|s| !s.on_packet)
-                                && imported
-                                    .header_matches(event, Some((event.src_port, event.dst_port)))
-                        }
+                        // A rule imported from Suricata is decided on the
+                        // packet, and on its connection's streams.
+                        Some(imported) if imported.scope.is_some() => false,
                         imported => {
                             matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
                                 && (rule.dst_port == Some(event.dst_port)
@@ -409,6 +419,13 @@ impl IdsEngine {
     /// `event` is the packet's summary, which keys the sampling decision and
     /// the flow state; `bytes` is the packet from its IP header. A packet
     /// that does not decode matches nothing.
+    ///
+    /// A TCP connection whose SYN was seen keeps its two byte streams, as
+    /// Suricata does: a rule Suricata reads on the stream is decided on the
+    /// windows this packet has inspected, a rule it reads on the packet on
+    /// the packet, and some rules on both, so one rule may alert twice. On
+    /// a connection met midstream, or off TCP, every rule is read on the
+    /// packet.
     pub fn evaluate_packet(
         &self,
         event: &PacketEvent,
@@ -427,38 +444,124 @@ impl IdsEngine {
         let ports = packet.ports();
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
         let payload = packet.payload().unwrap_or_default();
+        let (tcp_flags, segment) = match packet.l4 {
+            L4::Tcp(t) => (
+                Some(t.flags),
+                Some(Segment {
+                    seq: t.seq,
+                    ack: t.ack,
+                    flags: t.flags,
+                    data: t.payload,
+                }),
+            ),
+            _ => (None, None),
+        };
         let wire = Wire {
-            tcp_flags: match packet.l4 {
-                L4::Tcp(t) => Some(t.flags),
-                _ => None,
-            },
+            tcp_flags,
             payload: packet.payload_len().unwrap_or(0) > 0,
             frame_len: u64::from(event.pkt_len),
+            segment,
         };
-        let seen = self
+        let (seen, blocks) = self
             .flows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .observe(&Packet::of(event), wire);
-        let matched = self
+            .observe(&Packet::of(event), event, wire);
+        let streamed = seen.stream_size.is_some();
+        let mut matched: Vec<(usize, &IdsRule)> = self
             .prefilter()
             .candidates(&keys, payload)
             .into_iter()
             .filter_map(|idx| {
-                let rule = self.rules.get(idx)?;
-                let imported = rule
-                    .imported
-                    .as_ref()
-                    .filter(|i| i.scope.as_ref().is_some_and(|s| s.on_packet))?;
-                if !rule.enabled || !imported.header_matches(event, ports) {
-                    return None;
-                }
-                let program = self.inspections.get(idx)?.as_ref()?;
-                (program.matches_session(&seen) && program.matches_packet(&packet))
-                    .then_some((idx, rule))
+                let (rule, program) = self.imported(idx, event, ports, &seen)?;
+                let on_packet = !streamed || program.inspect() != Inspect::Stream;
+                (on_packet && program.matches_packet(&packet)).then_some((idx, rule))
             })
             .collect();
+        for block in &blocks {
+            matched.extend(self.stream_matches(event, ports, &seen, block));
+        }
         self.run_state(event, matched)
+    }
+
+    /// Inspect what the flows idle past their timeout still hold, as
+    /// Suricata does when it ends a flow, at most once a second of packet
+    /// time. Each alert travels on the last packet the inspected side sent.
+    pub fn flush_idle(&self, now_ns: u64) -> Vec<(PacketEvent, usize, &IdsRule)> {
+        let ended = self
+            .flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain_idle(now_ns);
+        self.ended(ended)
+    }
+
+    /// Inspect what every flow still holds, as Suricata does when a capture
+    /// ends.
+    pub fn flush_all(&self) -> Vec<(PacketEvent, usize, &IdsRule)> {
+        let ended = self
+            .flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain_all();
+        self.ended(ended)
+    }
+
+    fn ended(&self, ended: Vec<Ended>) -> Vec<(PacketEvent, usize, &IdsRule)> {
+        let mut out = Vec::new();
+        for end in ended {
+            let ports = Some((end.event.src_port, end.event.dst_port));
+            let mut matched = Vec::new();
+            for block in &end.blocks {
+                matched.extend(self.stream_matches(&end.event, ports, &end.seen, block));
+            }
+            out.extend(
+                self.run_state(&end.event, matched)
+                    .into_iter()
+                    .map(|(idx, rule)| (end.event, idx, rule)),
+            );
+        }
+        out
+    }
+
+    /// An enabled rule imported from Suricata whose header and session hold
+    /// for the packet, with its program.
+    fn imported(
+        &self,
+        idx: usize,
+        event: &PacketEvent,
+        ports: Option<(u16, u16)>,
+        seen: &Seen,
+    ) -> Option<(&IdsRule, &Program)> {
+        let rule = self.rules.get(idx)?;
+        let imported = rule.imported.as_ref().filter(|i| i.scope.is_some())?;
+        if !rule.enabled || !imported.header_matches(event, ports) {
+            return None;
+        }
+        let program = self.inspections.get(idx)?.as_ref()?;
+        program
+            .matches_session(seen)
+            .then_some((rule, program.as_ref()))
+    }
+
+    /// The rules matching a window of the stream the packet's sender sent.
+    fn stream_matches(
+        &self,
+        event: &PacketEvent,
+        ports: Option<(u16, u16)>,
+        seen: &Seen,
+        block: &[u8],
+    ) -> Vec<(usize, &IdsRule)> {
+        let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
+        self.prefilter()
+            .candidates(&keys, block)
+            .into_iter()
+            .filter_map(|idx| {
+                let (rule, program) = self.imported(idx, event, ports, seen)?;
+                (program.inspect() != Inspect::Packet && program.matches_stream(block))
+                    .then_some((idx, rule))
+            })
+            .collect()
     }
 
     /// The candidate index, built on first use from the rules' ports and

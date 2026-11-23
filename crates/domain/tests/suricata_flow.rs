@@ -56,6 +56,22 @@ fn event(fields: &[&str]) -> PacketEvent {
     }
 }
 
+/// The segment Suricata read: PSH ACK, met midstream since the capture
+/// holds no handshake, so every rule is read on the packet.
+fn segment(event: &PacketEvent, payload: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(40 + payload.len()).expect("a payload fits one packet");
+    let mut bytes = vec![0x45, 0];
+    bytes.extend_from_slice(&total.to_be_bytes());
+    bytes.extend_from_slice(&[0, 1, 0, 0, 64, 6, 0, 0]);
+    bytes.extend_from_slice(&event.src_addr[0].to_be_bytes());
+    bytes.extend_from_slice(&event.dst_addr[0].to_be_bytes());
+    bytes.extend_from_slice(&event.src_port.to_be_bytes());
+    bytes.extend_from_slice(&event.dst_port.to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 3, 232, 0, 0, 0, 1, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
 #[test]
 fn the_flow_table_remembers_what_suricata_remembers() {
     let mut rules = String::new();
@@ -94,7 +110,7 @@ fn the_flow_table_remembers_what_suricata_remembers() {
     let mut wrong = Vec::new();
     for (event, payload, expected) in &packets {
         let mut sids: Vec<u32> = engine
-            .evaluate_payload_with_context(event, payload, None)
+            .evaluate_packet(event, &segment(event, payload), None)
             .iter()
             .filter_map(|(_, rule)| rule.imported.as_ref().map(|i| i.sid))
             .collect();

@@ -1054,11 +1054,27 @@ impl EventDispatcher {
     }
 
     /// Evaluate a packet the kernel handed up whole against the rules decided
-    /// on each packet, reporting each match as the payload path does.
+    /// on each packet and on its connection's streams, reporting each match
+    /// as the payload path does, then what the connections that went idle
+    /// still held.
     fn process_ids_packet(&self, header: &PacketEvent, bytes: &[u8]) {
         let svc = self.ids_service.load();
         let src_country = svc.resolve_country(header.src_addr, header.is_ipv6());
         let matches = svc.evaluate_packet(header, bytes, src_country.as_deref());
+        self.report_ids_packet_matches(&svc, header, src_country.as_deref(), matches);
+        for (last, idx, rule) in svc.flush_idle(header.timestamp_ns) {
+            let country = svc.resolve_country(last.src_addr, last.is_ipv6());
+            self.report_ids_packet_matches(&svc, &last, country.as_deref(), vec![(idx, rule)]);
+        }
+    }
+
+    fn report_ids_packet_matches(
+        &self,
+        svc: &IdsAppService,
+        header: &PacketEvent,
+        src_country: Option<&str>,
+        matches: Vec<(usize, &domain::ids::entity::IdsRule)>,
+    ) {
         for (nth, (idx, rule)) in matches.into_iter().enumerate() {
             // The capture's `rule_id` holds the bytes copied and its type says
             // packet; the alert travels on an event naming the IDS rule.
@@ -1069,15 +1085,7 @@ impl EventDispatcher {
             };
             self.metrics
                 .record_packet("ids", action_label(event.action));
-            self.report_ids_match(
-                &event,
-                &svc,
-                idx,
-                rule,
-                None,
-                src_country.as_deref(),
-                nth == 0,
-            );
+            self.report_ids_match(&event, svc, idx, rule, None, src_country, nth == 0);
         }
     }
 

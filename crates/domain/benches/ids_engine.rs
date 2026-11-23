@@ -149,13 +149,14 @@ fn bench_reload(c: &mut Criterion) {
 
 /// An imported ruleset of `n` content rules, all on one port so that every
 /// rule is a candidate for every segment: the worst case of the payload scan.
+/// The segments are met midstream, so every rule is read on the packet.
 fn imported_engine(n: usize) -> IdsEngine {
     let mut text = String::new();
     for i in 0..n {
         writeln!(
             text,
             "alert tcp any any -> any 80 (msg:\"rule {i}\"; \
-             flow:to_server,established; content:\"needle-{i:05}\"; nocase; \
+             flow:to_server; content:\"needle-{i:05}\"; nocase; \
              content:\"/admin\"; distance:0; sid:{};)",
             i + 1
         )
@@ -168,6 +169,21 @@ fn imported_engine(n: usize) -> IdsEngine {
     engine
 }
 
+/// An IPv4 TCP segment between the event's ends, PSH ACK, carrying `payload`.
+fn segment(event: &PacketEvent, payload: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(40 + payload.len()).unwrap();
+    let mut bytes = vec![0x45, 0];
+    bytes.extend_from_slice(&total.to_be_bytes());
+    bytes.extend_from_slice(&[0, 1, 0, 0, 64, 6, 0, 0]);
+    bytes.extend_from_slice(&event.src_addr[0].to_be_bytes());
+    bytes.extend_from_slice(&event.dst_addr[0].to_be_bytes());
+    bytes.extend_from_slice(&event.src_port.to_be_bytes());
+    bytes.extend_from_slice(&event.dst_port.to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 3, 232, 0, 0, 0, 1, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
 fn bench_imported_payload(c: &mut Criterion) {
     let mut group = c.benchmark_group("ids_imported_payload");
     let mut event = make_event(0);
@@ -177,14 +193,15 @@ fn bench_imported_payload(c: &mut Criterion) {
 
     // A request carrying one rule's fast pattern runs that rule in full.
     let hit = b"GET /needle-00042/admin HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    let (miss, hit) = (segment(&event, miss), segment(&event, hit));
 
     for &n in &[100, 1_000, 5_000, 50_000] {
         let engine = imported_engine(n);
         group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
-            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, miss, None)));
+            b.iter(|| black_box(engine.evaluate_packet(&event, &miss, None)));
         });
         group.bench_with_input(BenchmarkId::new("hit", n), &n, |b, _| {
-            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, hit, None)));
+            b.iter(|| black_box(engine.evaluate_packet(&event, &hit, None)));
         });
     }
 
@@ -207,7 +224,7 @@ fn bench_imported_payload(c: &mut Criterion) {
         let mut engine = IdsEngine::new();
         engine.reload(compiled.rules).unwrap();
         group.bench_with_input(BenchmarkId::new("et_open_miss", loaded), &loaded, |b, _| {
-            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, miss, None)));
+            b.iter(|| black_box(engine.evaluate_packet(&event, &miss, None)));
         });
     }
 

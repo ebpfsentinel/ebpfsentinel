@@ -16,15 +16,82 @@ use pcre2::bytes::{Regex as Pcre2, RegexBuilder};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
+use super::buffers::sticky;
 use super::int::{IntMatch, IntOp};
 use super::model::{
     Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
-    FlowCounter, HeaderField, Match, MathOp, NumBase, Pcre, Signature, TcpFlags, TcpFlagsMode,
-    Transform, Value,
+    FlowCounter, HeaderField, Match, MathOp, NumBase, Pcre, RuleProto, Signature, StreamSide,
+    TcpFlags, TcpFlagsMode, Transform, Value,
 };
 use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
+
+/// A rule kept to the stream, by `tcp-stream` or `flow:only_stream`, may
+/// not read what only a packet has: a header field, a header buffer, a flow
+/// counter or `flow:no_stream`. Suricata refuses such a rule as it loads.
+fn stream_alone(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    session: &Session,
+) -> Compiled<()> {
+    let flow = &signature.flow;
+    let alone = flow.only_stream || signature.header.proto == RuleProto::TcpStream;
+    let header_buffer = lists.iter().any(|l| {
+        matches!(l.source, Source::Sticky(name) if sticky(name).is_some_and(|b| b.proto == "packet"))
+    });
+    if alone
+        && (flow.no_stream || !headers.is_empty() || !session.counters.is_empty() || header_buffer)
+    {
+        return Err(Refused::new(
+            if flow.only_stream {
+                "only_stream"
+            } else {
+                "tcp-stream"
+            },
+            "reads the stream alone, so a packet keyword beside it is refused as Suricata refuses it",
+        ));
+    }
+    Ok(())
+}
+
+/// Where Suricata runs a signature's payload matches on a TCP connection
+/// whose streams it keeps, read off what the signature asks.
+fn inspect(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    session: &Session,
+) -> Inspect {
+    let flow = &signature.flow;
+    let stream_proto = signature.header.proto == RuleProto::TcpStream;
+    let on_payload = !lists.is_empty()
+        && lists
+            .iter()
+            .all(|l| matches!(l.source, Source::Payload | Source::Decoded));
+    if !matches!(
+        signature.header.proto,
+        RuleProto::Tcp | RuleProto::TcpStream
+    ) || flow.no_stream
+        || !headers.is_empty()
+        || !session.counters.is_empty()
+        || !on_payload
+    {
+        return Inspect::Packet;
+    }
+    if flow.only_stream || stream_proto {
+        return Inspect::Stream;
+    }
+    let anchored = lists.iter().flat_map(|l| &l.ops).any(|op| {
+        matches!(op, Op::Content(c) if !c.relative() && (c.offset.is_some() || c.depth.is_some() || c.startswith))
+    });
+    if anchored || !session.stream_size.is_empty() {
+        Inspect::Both
+    } else {
+        Inspect::Stream
+    }
+}
 
 /// How many times one inspection may return to an earlier match to try its
 /// next occurrence, Suricata's default `inspection-recursion-limit`.
@@ -39,14 +106,34 @@ pub struct Program {
     fast: Option<Needle>,
     state: Option<State>,
     session: Session,
+    inspect: Inspect,
 }
 
-/// What the rule asks of the flow's session: `flow` and its counters.
+/// Where a rule's payload matches run on a TCP connection whose streams are
+/// kept, as Suricata decides it. A packet of a connection without streams,
+/// midstream or not TCP, is always inspected on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inspect {
+    /// On each packet's payload: a rule on `tcp-pkt` or off TCP, one with
+    /// `flow:no_stream`, a header check, a flow counter or a header buffer,
+    /// and one with no payload match.
+    Packet,
+    /// On the stream as it is inspected: a TCP rule otherwise, its payload
+    /// positions counted from the start of each inspected window.
+    Stream,
+    /// On both: a content placed from the start of the buffer by `offset`,
+    /// `depth` or `startswith`, or a rule that also reads `stream_size`.
+    Both,
+}
+
+/// What the rule asks of the flow's session: `flow`, its counters and the
+/// streams' sizes.
 #[derive(Debug, Default)]
 struct Session {
     established: Option<bool>,
     to_server: Option<bool>,
     counters: Vec<(FlowCounter, IntMatch)>,
+    stream_size: Vec<(StreamSide, IntMatch)>,
 }
 
 impl Session {
@@ -75,6 +162,14 @@ impl Session {
                     _ => None,
                 })
                 .collect(),
+            stream_size: signature
+                .checks
+                .iter()
+                .filter_map(|check| match check {
+                    Check::StreamSize { side, value } => Some((*side, *value)),
+                    _ => None,
+                })
+                .collect(),
         }
     }
 
@@ -91,6 +186,15 @@ impl Session {
                 FlowCounter::BytesToServer => m.matches(seen.bytes[0]),
                 FlowCounter::BytesToClient => m.matches(seen.bytes[1]),
             })
+            && (self.stream_size.is_empty()
+                || seen.stream_size.is_some_and(|[client, server]| {
+                    self.stream_size.iter().all(|&(side, m)| match side {
+                        StreamSide::Client => m.matches(client),
+                        StreamSide::Server => m.matches(server),
+                        StreamSide::Both => m.matches(client) && m.matches(server),
+                        StreamSide::Either => m.matches(client) || m.matches(server),
+                    })
+                }))
     }
 }
 
@@ -249,17 +353,6 @@ enum Xform {
 fn refused(keyword: impl Into<String>, reason: impl Into<String>) -> Refused {
     Refused::new(keyword, reason)
 }
-
-/// The buffers that are a packet header rather than something decoded from
-/// the payload.
-const HEADER_BUFFERS: [&str; 6] = [
-    "ipv4.hdr",
-    "ipv6.hdr",
-    "tcp.hdr",
-    "udp.hdr",
-    "icmpv4.hdr",
-    "icmpv6.hdr",
-];
 
 /// One condition on the packet headers.
 #[derive(Debug, Clone, Copy)]
@@ -438,14 +531,40 @@ impl Program {
             .iter()
             .filter_map(|check| HeaderCheck::compile(check).transpose())
             .collect::<Compiled<Vec<_>>>()?;
+        let session = Session::compile(signature);
+        stream_alone(signature, &lists, &headers, &session)?;
+        let inspect = inspect(signature, &lists, &headers, &session);
         Ok(Self {
             lists,
             headers,
             slots: names.len(),
             fast: fast_pattern(signature),
             state: State::compile(signature)?,
-            session: Session::compile(signature),
+            session,
+            inspect,
         })
+    }
+
+    /// Where the rule's payload matches run on a connection whose streams
+    /// are kept.
+    #[must_use]
+    pub const fn inspect(&self) -> Inspect {
+        self.inspect
+    }
+
+    /// Whether the rule reads `stream_size`, which only a connection's
+    /// streams tell.
+    #[must_use]
+    pub fn reads_stream_size(&self) -> bool {
+        !self.session.stream_size.is_empty()
+    }
+
+    /// Whether the signature's matches hold on a window of a stream: its
+    /// payload matches run over the window's bytes, positions counted from
+    /// its first byte.
+    #[must_use]
+    pub fn matches_stream(&self, bytes: &[u8]) -> bool {
+        self.run(bytes, &|_| None)
     }
 
     /// Whether the flow's session, as it stands with the packet counted,
@@ -453,13 +572,6 @@ impl Program {
     #[must_use]
     pub fn matches_session(&self, seen: &Seen) -> bool {
         self.session.matches(seen)
-    }
-
-    /// Whether the rule asks of the session what only every packet of the
-    /// flow tells: a connection not yet up, or a counter.
-    #[must_use]
-    pub fn reads_session(&self) -> bool {
-        self.session.established == Some(false) || !self.session.counters.is_empty()
     }
 
     /// What the rule reads and writes outside the packet, `None` when it
@@ -516,28 +628,6 @@ impl Program {
         let packet = *packet;
         let sticky = move |name: &str| packet.header_buffer(name);
         self.run(packet.payload().unwrap_or_default(), &sticky)
-    }
-
-    /// Whether the program checks the payload size, which only the IP header
-    /// knows once the kernel has cut a long packet short.
-    #[must_use]
-    pub fn checks_size(&self) -> bool {
-        self.headers
-            .iter()
-            .any(|h| matches!(h, HeaderCheck::Int(HeaderField::Dsize, _)))
-    }
-
-    /// Whether the program checks anything in the packet headers beyond the
-    /// payload size, so that a payload alone cannot decide it.
-    #[must_use]
-    pub fn reads_headers(&self) -> bool {
-        self.headers
-            .iter()
-            .any(|h| !matches!(h, HeaderCheck::Int(HeaderField::Dsize, _)))
-            || self
-                .lists
-                .iter()
-                .any(|l| matches!(l.source, Source::Sticky(name) if HEADER_BUFFERS.contains(&name)))
     }
 
     fn run<'a>(&self, payload: &'a [u8], sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>) -> bool {

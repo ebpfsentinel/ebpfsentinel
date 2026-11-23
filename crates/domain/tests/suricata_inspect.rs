@@ -176,11 +176,10 @@ fn the_prefilter_loses_no_match() {
             if bytes.is_empty() {
                 continue;
             }
-            // A rule read on the packet is handed the segment whole, its
-            // headers in front of the same payload.
+            // Suricata read each payload as one segment met midstream, so
+            // every rule is read on the packet.
             let packet = tcp_segment(bytes);
-            let mut hits = engine.evaluate_payload_with_context(&event, bytes, None);
-            hits.extend(engine.evaluate_packet(&event, &packet, None));
+            let hits = engine.evaluate_packet(&event, &packet, None);
             let hit = hits.iter().any(|(_, rule)| {
                 rule.imported
                     .as_ref()

@@ -115,7 +115,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "flow",
         support: Support::Compiled,
-        note: "`established`, `not_established`, `stateless` and the four direction words. A rule read on every packet asks the session the agent keeps from them: the client sent the first packet, TCP is established after its handshake, another protocol once answered. A TCP rule read on the payload is captured only on an established connection, its direction the header's port side. `only_stream`, `no_stream`, `only_frag` and `no_frag` are refused.",
+        note: "`established`, `not_established`, `stateless` and the four direction words. A rule read on every packet asks the session the agent keeps from them: the client sent the first packet, TCP is established after its handshake, another protocol once answered. On a TCP connection whose SYN was seen, a rule is read on each packet, on the stream as Suricata inspects it, or on both, as Suricata decides; `only_stream` keeps it to the stream, and a packet keyword beside it is refused as Suricata refuses it; `no_stream` keeps it to the packet. `only_frag` and `no_frag` are refused.",
     },
     KeywordSupport {
         keyword: "content",
@@ -339,13 +339,13 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "stream_size",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until TCP is reassembled by sequence number.",
+        support: Support::Compiled,
+        note: "Each side's bytes as Suricata counts them: its SYN, every byte up to the highest sequence number sent, and its FIN from the packet after it. Read on every packet of a connection whose SYN was seen; never matches midstream.",
     },
     KeywordSupport {
         keyword: "tcp.session",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until TCP is reassembled by sequence number.",
+        note: "Parsed and checked; a rule carrying it is refused until the session phases it names are compared with Suricata.",
     },
     KeywordSupport {
         keyword: "dataset",
@@ -2585,14 +2585,8 @@ fn compile_parts(
     pattern: &str,
     inspection: Inspection,
 ) -> Compiled<Vec<IdsRule>> {
-    let mut scope = packet_scope(&signature.header)?;
+    let scope = packet_scope(&signature.header)?;
     let body = compile_options(options)?;
-    scope.on_packet = !matches!(scope.proto, PacketProto::Tcp)
-        || inspection.0.reads_headers()
-        || inspection.0.checks_size()
-        || inspection.0.reads_session()
-        || pattern.is_empty()
-        || scope.index_ports(MAX_PORTS_PER_RULE).is_none();
     let protocol = match scope.proto {
         PacketProto::Ip => Protocol::Any,
         PacketProto::Tcp | PacketProto::TcpPkt => Protocol::Tcp,
@@ -2694,17 +2688,11 @@ fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
     }
     let proto = match &header.proto {
         RuleProto::Ip => PacketProto::Ip,
-        RuleProto::Tcp => PacketProto::Tcp,
+        RuleProto::Tcp | RuleProto::TcpStream => PacketProto::Tcp,
         RuleProto::TcpPkt => PacketProto::TcpPkt,
         RuleProto::Udp => PacketProto::Udp,
         RuleProto::Icmp => PacketProto::Icmp,
         RuleProto::Icmpv6 => PacketProto::Icmpv6,
-        RuleProto::TcpStream => {
-            return Err(Refused::new(
-                "tcp-stream",
-                "inspects the reassembled stream alone, which the agent does not keep",
-            ));
-        }
         RuleProto::Ipv4 | RuleProto::Ipv6 | RuleProto::Icmpv4 | RuleProto::Sctp => {
             return Err(Refused::new(
                 "protocol",
@@ -2733,7 +2721,6 @@ fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
         src_ports: header.src_ports.clone(),
         dst_ports: header.dst_ports.clone(),
         both_ways,
-        on_packet: false,
     })
 }
 
@@ -3066,7 +3053,7 @@ fn check_flow(value: &str) -> Compiled<()> {
     for word in value.split(',').map(str::trim) {
         match word {
             "established" | "not_established" | "stateless" | "to_server" | "from_client"
-            | "to_client" | "from_server" => {}
+            | "to_client" | "from_server" | "only_stream" | "no_stream" => {}
             other => {
                 return Err(Refused::new(
                     "flow",
@@ -3304,6 +3291,63 @@ mod tests {
         }
     }
 
+    /// Play a whole TCP conversation between the event's ends: the
+    /// handshake from the client, `payload` from the sender acknowledged by
+    /// the other end, then the sender's FIN. Each conversation starts past
+    /// the last one's flow timeout, so it opens a flow of its own. Returns
+    /// whether any rule alerted on it.
+    fn converse(engine: &IdsEngine, sender: &PacketEvent, payload: &[u8], by_client: bool) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        let start = CLOCK.fetch_add(10_000_000_000_000, Ordering::Relaxed);
+        let me = (sender.src_addr[0].to_be_bytes(), sender.src_port);
+        let you = (sender.dst_addr[0].to_be_bytes(), sender.dst_port);
+        let (client, server) = if by_client { (me, you) } else { (you, me) };
+        let (c, sv) = (1000u32, 5000u32);
+        let len = u32::try_from(payload.len()).expect("a short payload");
+        let (mine, theirs) = if by_client { (c, sv) } else { (sv, c) };
+        let steps: [(_, _, u32, u32, u8, &[u8]); 6] = [
+            (client, server, c, 0, 0x02, b""),
+            (server, client, sv, c + 1, 0x12, b""),
+            (client, server, c + 1, sv + 1, 0x10, b""),
+            (me, you, mine + 1, theirs + 1, 0x18, payload),
+            (you, me, theirs + 1, mine + 1 + len, 0x10, b""),
+            (me, you, mine + 1 + len, theirs + 1, 0x11, b""),
+        ];
+        let mut alerted = false;
+        for (n, ((src, sport), (dst, dport), seq, ack, flags, data)) in
+            steps.into_iter().enumerate()
+        {
+            let total = u16::try_from(40 + data.len()).expect("a short packet");
+            let mut bytes = vec![0x45, 0];
+            bytes.extend_from_slice(&total.to_be_bytes());
+            bytes.extend_from_slice(&[0, 1, 0x40, 0, 64, 6, 0, 0]);
+            bytes.extend_from_slice(&src);
+            bytes.extend_from_slice(&dst);
+            bytes.extend_from_slice(&sport.to_be_bytes());
+            bytes.extend_from_slice(&dport.to_be_bytes());
+            bytes.extend_from_slice(&seq.to_be_bytes());
+            bytes.extend_from_slice(&ack.to_be_bytes());
+            bytes.extend_from_slice(&[0x50, flags, 0xff, 0xff, 0, 0, 0, 0]);
+            bytes.extend_from_slice(data);
+            let mut header = event(src, sport, dst, dport);
+            header.timestamp_ns = start + n as u64;
+            header.pkt_len = u32::from(total) + 14;
+            alerted |= !engine.evaluate_packet(&header, &bytes, None).is_empty();
+        }
+        alerted | !engine.flush_all().is_empty()
+    }
+
+    /// Whether the client saying `payload` raises an alert.
+    fn said(engine: &IdsEngine, sender: &PacketEvent, payload: &[u8]) -> bool {
+        converse(engine, sender, payload, true)
+    }
+
+    /// Whether the server saying `payload` raises an alert.
+    fn answered(engine: &IdsEngine, sender: &PacketEvent, payload: &[u8]) -> bool {
+        converse(engine, sender, payload, false)
+    }
+
     const OUTSIDE: [u8; 4] = [203, 0, 113, 9];
     const INSIDE: [u8; 4] = [10, 1, 2, 3];
 
@@ -3331,24 +3375,12 @@ mod tests {
 
         let engine = engine(rules);
         let from_outside = event(OUTSIDE, 40000, INSIDE, 25);
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&from_outside, b"EXPN   root\r\n", None)
-                .is_empty()
-        );
+        assert!(said(&engine, &from_outside, b"EXPN   root\r\n"));
         // The pcre is anchored to the start of a line, so the words alone do not match.
-        assert!(
-            engine
-                .evaluate_payload_with_context(&from_outside, b"HELO root expn\r\n", None)
-                .is_empty()
-        );
+        assert!(!said(&engine, &from_outside, b"HELO root expn\r\n"));
         // The source must be outside the home networks.
         let from_inside = event([10, 9, 9, 9], 40000, INSIDE, 25);
-        assert!(
-            engine
-                .evaluate_payload_with_context(&from_inside, b"expn root\r\n", None)
-                .is_empty()
-        );
+        assert!(!said(&engine, &from_inside, b"expn root\r\n"));
     }
 
     #[test]
@@ -3361,17 +3393,9 @@ mod tests {
 
         let engine = engine(rules);
         let reply = event(INSIDE, 5632, OUTSIDE, 50000);
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&reply, b"\x00\x00Invalid login\r\n", None)
-                .is_empty()
-        );
+        assert!(answered(&engine, &reply, b"\x00\x00Invalid login\r\n"));
         // depth 16 from offset 0: the content must start within the first 3 bytes.
-        assert!(
-            engine
-                .evaluate_payload_with_context(&reply, b"0123456789Invalid login", None)
-                .is_empty()
-        );
+        assert!(!answered(&engine, &reply, b"0123456789Invalid login"));
     }
 
     #[test]
@@ -3379,24 +3403,12 @@ mod tests {
         let engine = engine(compile(ET_SMB_POWERSHELL));
         let to_smb = event(OUTSIDE, 50000, INSIDE, 445);
         let near = b"\x00\x00\x00\x00\xffSMBxx PowerShell.exe -w   Hidden";
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&to_smb, near, None)
-                .is_empty()
-        );
+        assert!(said(&engine, &to_smb, near));
         let far = b"\x00\x00\x00\x00\xffSMBxx PowerShell.exe -w                     hidden";
-        assert!(
-            engine
-                .evaluate_payload_with_context(&to_smb, far, None)
-                .is_empty()
-        );
+        assert!(!said(&engine, &to_smb, far));
         // SMB past depth 8 does not anchor the chain.
         let late = b"0123456789SMB powershell -w hidden";
-        assert!(
-            engine
-                .evaluate_payload_with_context(&to_smb, late, None)
-                .is_empty()
-        );
+        assert!(!said(&engine, &to_smb, late));
     }
 
     #[test]
@@ -3412,17 +3424,9 @@ mod tests {
         let engine = engine(rules);
         let to_rdp = event(OUTSIDE, 50000, INSIDE, 3389);
         let hit = b"\x03\x00\x00\x2b\x26\xe0\x00\x00\x00\x00\x00COOKIE: MSTSHASH=EDC\r\n";
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&to_rdp, hit, None)
-                .is_empty()
-        );
+        assert!(said(&engine, &to_rdp, hit));
         let wrong_gap = b"\x03\x00\x00\x2b\x26\x26\xe0\x00\x00\x00\x00\x00Cookie: mstshash=edc\r\n";
-        assert!(
-            engine
-                .evaluate_payload_with_context(&to_rdp, wrong_gap, None)
-                .is_empty()
-        );
+        assert!(!said(&engine, &to_rdp, wrong_gap));
     }
 
     #[test]
@@ -3444,11 +3448,7 @@ mod tests {
     fn runs_a_pcre_from_the_cursor_and_a_back_reference() {
         let fokirtor = engine(compile(ET_FOKIRTOR));
         let to_ssh = event(OUTSIDE, 50000, INSIDE, 22);
-        let hit = |engine: &IdsEngine, e: &PacketEvent, payload: &[u8]| {
-            !engine
-                .evaluate_payload_with_context(e, payload, None)
-                .is_empty()
-        };
+        let hit = |engine: &IdsEngine, e: &PacketEvent, payload: &[u8]| said(engine, e, payload);
         assert!(hit(&fokirtor, &to_ssh, b"xx:!;.aGVsbG8="));
         // The pcre is anchored at the cursor the content left.
         assert!(!hit(&fokirtor, &to_ssh, b"xx:!;. aGVsbG8="));
@@ -3481,7 +3481,6 @@ mod tests {
         let cases = [
             ("drop tcp any any -> any 80", "drop"),
             ("pass tcp any any -> any 80", "pass"),
-            ("alert tcp-stream any any -> any 80", "tcp-stream"),
             ("alert sctp any any -> any 80", "protocol"),
             ("alert http any any -> any 80", "http"),
             ("alert tcp any any => any 80", "=>"),
@@ -3496,46 +3495,82 @@ mod tests {
     }
 
     #[test]
-    fn compiles_headers_on_every_protocol_port_set_and_direction() {
-        let base = "(msg:\"x\"; content:\"abc\"; sid:1;)";
-        let on_packet = |text: &str| {
+    fn reads_a_rule_on_the_packet_or_the_stream_as_suricata_does() {
+        use crate::ids::sig::inspect::Inspect;
+        let inspect = |text: &str| {
             let rules = compile(text);
             assert_eq!(rules.len(), 1, "{text}");
             rules[0]
                 .imported
                 .as_ref()
-                .and_then(|i| i.scope.as_ref())
-                .is_some_and(|s| s.on_packet)
+                .and_then(|i| i.inspection.as_ref())
+                .map(|i| i.0.inspect())
+                .expect("an imported rule carries its program")
         };
-        // Decided on the whole packet the kernel hands up.
+        let rule = |header: &str, options: &str| {
+            inspect(&format!("{header} (msg:\"x\"; {options} sid:1;)"))
+        };
+        let tcp = "alert tcp any any -> any 80";
         for header in [
             "alert udp any any -> any 53",
             "alert icmp any any -> any any",
-            "alert icmpv6 any any -> any any",
             "alert ip any any -> any any",
             "alert tcp-pkt any any -> any any",
-            "alert tcp-pkt any 1:16 -> any any",
-            "alert tcp any any -> any !80",
-            "alert tcp any any -> any 1:1024",
-            "alert tcp any any -> any $SHELLCODE_PORTS",
         ] {
-            assert!(on_packet(&format!("{header} {base}")), "{header}");
+            assert_eq!(
+                rule(header, "content:\"abc\";"),
+                Inspect::Packet,
+                "{header}"
+            );
         }
-        // Decided on the TCP payload of the ports the rule lists.
-        for header in ["alert tcp any 80 -> any 80", "alert tcp any any <> any 80"] {
-            assert!(!on_packet(&format!("{header} {base}")), "{header}");
+        for options in [
+            "flags:S; content:\"abc\";",
+            "dsize:>10; content:\"abc\";",
+            "flow:established;",
+            "flow:no_stream; content:\"abc\";",
+            "flow.pkts_toserver:>1; content:\"abc\";",
+            "tcp.hdr; content:\"abc\";",
+        ] {
+            assert_eq!(rule(tcp, options), Inspect::Packet, "{options}");
         }
-        // A rule on the header alone, or one reading a header field, is read
-        // on the packet whatever its protocol.
-        assert!(on_packet(
-            "alert ip any any -> any any (msg:\"x\"; ttl:1; sid:2;)"
-        ));
-        assert!(on_packet(
-            "alert tcp any any -> any 80 (msg:\"x\"; flags:S; content:\"abc\"; sid:3;)"
-        ));
-        assert!(on_packet(
-            "alert tcp any any -> any 80 (msg:\"x\"; flow:established; sid:4;)"
-        ));
+        for options in [
+            "content:\"abc\";",
+            "content:\"abc\"; content:\"def\"; distance:0;",
+            "pcre:\"/^abc/\";",
+            "content:\"abc\"; depth:3; flow:only_stream;",
+        ] {
+            assert_eq!(rule(tcp, options), Inspect::Stream, "{options}");
+        }
+        for options in [
+            "content:\"abc\"; depth:3;",
+            "content:\"abc\"; offset:2;",
+            "content:\"abc\"; startswith;",
+            "stream_size:client,>,10; content:\"abc\";",
+        ] {
+            assert_eq!(rule(tcp, options), Inspect::Both, "{options}");
+        }
+        let stream = "alert tcp-stream any any -> any 80";
+        assert_eq!(rule(stream, "content:\"abc\"; depth:3;"), Inspect::Stream);
+        assert_eq!(rule(stream, "stream_size:client,>,10;"), Inspect::Packet);
+        for (header, options) in [
+            (stream, "ttl:64; content:\"abc\";"),
+            (stream, "content:\"abc\"; flow:no_stream;"),
+            (stream, "flow.age:<5; content:\"abc\";"),
+            (stream, "tcp.hdr; content:\"abc\";"),
+            (tcp, "flags:S; content:\"abc\"; flow:only_stream;"),
+        ] {
+            let text = format!("{header} (msg:\"x\"; {options} sid:1;)");
+            assert!(
+                compile_rule_admitting(&text, &SuricataVars::default(), true).is_err(),
+                "{header} {options}"
+            );
+        }
+        for options in [
+            "flowbits:isset,a; content:\"abc\";",
+            "pkt_data; content:\"abc\";",
+        ] {
+            assert_eq!(rule(stream, options), Inspect::Stream, "{options}");
+        }
     }
 
     #[test]
@@ -3549,7 +3584,6 @@ mod tests {
                 "content:\"abc\"; threshold: type limit, track by_rule, count 1, seconds 5;",
                 "threshold",
             ),
-            ("content:\"abc\"; flow:only_stream;", "flow"),
             ("content:\"abc\"; gid:3;", "gid"),
         ];
         for (options, keyword) in cases {
@@ -3566,21 +3600,9 @@ mod tests {
         );
         let engine = engine(rules);
         let e = event(OUTSIDE, 1, INSIDE, 80);
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&e, b"GET /now!", None)
-                .is_empty()
-        );
-        assert!(
-            engine
-                .evaluate_payload_with_context(&e, b" GET /now!", None)
-                .is_empty()
-        );
-        assert!(
-            engine
-                .evaluate_payload_with_context(&e, b"GET /now!.", None)
-                .is_empty()
-        );
+        assert!(said(&engine, &e, b"GET /now!"));
+        assert!(!said(&engine, &e, b" GET /now!"));
+        assert!(!said(&engine, &e, b"GET /now!."));
     }
 
     #[test]
@@ -3589,16 +3611,8 @@ mod tests {
             "alert tcp any any -> any 80 (msg:\"x\"; content:\"alpha\"; content:\"beta\"; sid:10;)",
         ));
         let e = event(OUTSIDE, 1, INSIDE, 80);
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&e, b"beta..alpha", None)
-                .is_empty()
-        );
-        assert!(
-            engine
-                .evaluate_payload_with_context(&e, b"alpha only", None)
-                .is_empty()
-        );
+        assert!(said(&engine, &e, b"beta..alpha"));
+        assert!(!said(&engine, &e, b"alpha only"));
     }
 
     #[test]
@@ -3612,11 +3626,7 @@ mod tests {
         };
         let engine = engine(rules);
         let into_home = event(INSIDE, 1, [198, 51, 100, 7], 25);
-        assert!(
-            !engine
-                .evaluate_payload_with_context(&into_home, b"expn root", None)
-                .is_empty()
-        );
+        assert!(said(&engine, &into_home, b"expn root"));
     }
 
     #[test]

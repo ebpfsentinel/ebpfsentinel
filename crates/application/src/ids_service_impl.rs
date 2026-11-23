@@ -457,6 +457,13 @@ impl IdsAppService {
         self.engine.evaluate_packet(event, bytes, src_country)
     }
 
+    /// Inspect what the TCP connections idle past their timeout still hold,
+    /// at most once a second of packet time. Each match travels on the last
+    /// packet the inspected side sent.
+    pub fn flush_idle(&self, now_ns: u64) -> Vec<(PacketEvent, usize, &IdsRule)> {
+        self.engine.flush_idle(now_ns)
+    }
+
     /// Return `true` if any loaded rule carries a content pattern, so the
     /// L7 path can skip the payload scan when none do.
     #[must_use]
@@ -1094,11 +1101,11 @@ mod tests {
         svc.reload_rules(rules).unwrap();
 
         let capture = published.lock().unwrap().clone().unwrap();
-        // The payload rule on port 80 is fed by the TCP payload path, so it
-        // asks the kernel for nothing more.
+        // The payload rule on port 80 reads its connection's streams, so
+        // every segment on the port is handed up, handshake and FIN included.
         assert_eq!(
             capture.ports.into_iter().collect::<Vec<_>>(),
-            vec![(17, 53)]
+            vec![(6, 80), (17, 53)]
         );
         assert_eq!(capture.protos.into_iter().collect::<Vec<_>>(), vec![1, 58]);
 

@@ -36,12 +36,7 @@ impl CaptureSet {
     pub fn of(rules: &[IdsRule]) -> Self {
         let mut set = Self::default();
         for rule in rules.iter().filter(|r| r.enabled) {
-            let Some(scope) = rule
-                .imported
-                .as_ref()
-                .and_then(|i| i.scope.as_ref())
-                .filter(|s| s.on_packet)
-            else {
+            let Some(scope) = rule.imported.as_ref().and_then(|i| i.scope.as_ref()) else {
                 continue;
             };
             let protos: &[u8] = match scope.proto {
@@ -108,11 +103,12 @@ mod tests {
     }
 
     #[test]
-    fn a_tcp_content_rule_on_listed_ports_is_left_to_the_payload_capture() {
+    fn a_tcp_content_rule_captures_its_ports_whole() {
         let set = CaptureSet::of(&rules(&[
             r#"alert tcp any any -> any 80 (msg:"x"; content:"GET";)"#,
         ]));
-        assert!(set.is_empty());
+        assert!(set.protos.is_empty());
+        assert_eq!(set.ports.into_iter().collect::<Vec<_>>(), vec![(6, 80)]);
     }
 
     #[test]

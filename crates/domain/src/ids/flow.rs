@@ -37,6 +37,7 @@ use super::sig::model::{
     BitOp, BitScope, Bits, Check, Flowint, FlowintOp, Signature, Threshold, ThresholdKind, Track,
     Value,
 };
+use super::stream::{Segment, Streams};
 use super::suricata::{Compiled, Refused};
 
 const NS: u64 = 1_000_000_000;
@@ -166,24 +167,45 @@ impl Handshake {
 }
 
 /// What a flow handed over packet by packet knows of its session.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct Session {
     client: (Addr, u16),
     start_secs: u64,
     pkts: [u64; 2],
     bytes: [u64; 2],
     handshake: Handshake,
+    /// The connection's byte streams, kept from its SYN on when rules read
+    /// them.
+    streams: Option<Box<Streams>>,
+    /// The last packet each side sent, which the alerts raised when the
+    /// flow ends are reported on.
+    last: [Option<PacketEvent>; 2],
+}
+
+impl Session {
+    fn seen(&self, side: usize, now: u64, established: bool) -> Seen {
+        Seen {
+            to_server: side == 0,
+            established,
+            age_secs: (now / NS).saturating_sub(self.start_secs),
+            pkts: self.pkts,
+            bytes: self.bytes,
+            stream_size: self.streams.as_ref().map(|s| s.sizes()),
+        }
+    }
 }
 
 /// What the packet itself tells its session.
 #[derive(Debug, Clone, Copy)]
-pub struct Wire {
+pub struct Wire<'a> {
     /// The TCP flags, `None` for another protocol.
     pub tcp_flags: Option<u8>,
     /// Whether the packet carries a payload.
     pub payload: bool,
     /// The packet's length from the link layer.
     pub frame_len: u64,
+    /// The TCP segment, for the connection's streams.
+    pub segment: Option<Segment<'a>>,
 }
 
 /// What the session says of one packet, the packet counted.
@@ -198,6 +220,19 @@ pub struct Seen {
     pub pkts: [u64; 2],
     /// Bytes towards the server, then towards the client.
     pub bytes: [u64; 2],
+    /// Each side's `stream_size`, client first, when the connection's
+    /// streams are kept: a TCP connection whose SYN was seen.
+    pub stream_size: Option<[u64; 2]>,
+}
+
+/// A side's bytes left when its flow ended, and what to report them on.
+#[derive(Debug)]
+pub struct Ended {
+    /// The last packet the side sent.
+    pub event: PacketEvent,
+    /// The session as it stood, in the side's direction.
+    pub seen: Seen,
+    pub blocks: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -215,6 +250,20 @@ pub struct FlowTable {
     hosts: HashMap<HostKey, HashMap<String, u64>>,
     /// By rule index and what the rule tracks.
     filters: HashMap<(usize, Tracked), Window>,
+    /// Whether TCP connections keep their streams.
+    streams: bool,
+    /// The stream bytes every flow holds.
+    held: u64,
+    /// The second of the last sweep for ended flows.
+    swept: u64,
+}
+
+/// The stream bytes a flow holds.
+fn held(flow: &Flow) -> u64 {
+    flow.session
+        .as_ref()
+        .and_then(|s| s.streams.as_ref())
+        .map_or(0, |s| s.held())
 }
 
 impl FlowTable {
@@ -222,25 +271,47 @@ impl FlowTable {
     pub fn touch(&mut self, packet: &Packet) {
         if let Some(flow) = self.flows.get_mut(&packet.flow) {
             if packet.now.saturating_sub(flow.last) > packet.timeout {
+                self.held = self.held.saturating_sub(held(flow));
                 *flow = Flow::default();
             }
             flow.last = flow.last.max(packet.now);
         }
     }
 
+    /// Keep the streams of TCP connections opened from now on, or not.
+    pub fn keep_streams(&mut self, on: bool) {
+        self.streams = on;
+    }
+
     /// Count a packet handed over whole in its flow's session and say what
-    /// the session knows of it.
-    pub fn observe(&mut self, packet: &Packet, wire: Wire) -> Seen {
-        let flow = self.flow(packet);
-        let session = flow.session.get_or_insert(Session {
-            client: (packet.src, packet.sport),
-            start_secs: packet.now / NS,
-            pkts: [0; 2],
-            bytes: [0; 2],
-            handshake: match wire.tcp_flags {
-                Some(flags) if flags & (SYN | ACK) == SYN => Handshake::SynSent,
-                _ => Handshake::Midstream,
-            },
+    /// the session knows of it, with the bytes of the sender's stream the
+    /// packet has inspected.
+    pub fn observe(
+        &mut self,
+        packet: &Packet,
+        event: &PacketEvent,
+        wire: Wire<'_>,
+    ) -> (Seen, Vec<Vec<u8>>) {
+        let streams = self.streams;
+        self.flow(packet);
+        // The flow is in the table now; reach it through the field alone so
+        // the memory the streams hold can be counted beside it.
+        let flow = self.flows.entry(packet.flow).or_default();
+        let session = flow.session.get_or_insert_with(|| {
+            let opening = matches!(wire.tcp_flags, Some(flags) if flags & (SYN | ACK) == SYN);
+            Session {
+                client: (packet.src, packet.sport),
+                start_secs: packet.now / NS,
+                pkts: [0; 2],
+                bytes: [0; 2],
+                handshake: if opening {
+                    Handshake::SynSent
+                } else {
+                    Handshake::Midstream
+                },
+                streams: (opening && streams).then(Box::default),
+                last: [None; 2],
+            }
         });
         let side = usize::from((packet.src, packet.sport) != session.client);
         session.pkts[side] = session.pkts[side].saturating_add(1);
@@ -253,13 +324,71 @@ impl FlowTable {
                 before || (session.handshake == Handshake::Established && wire.payload)
             }
         };
-        Seen {
-            to_server: side == 0,
-            established,
-            age_secs: (packet.now / NS).saturating_sub(session.start_secs),
-            pkts: session.pkts,
-            bytes: session.bytes,
+        let mut blocks = Vec::new();
+        let mut sizes = None;
+        if let (Some(streams), Some(segment)) = (session.streams.as_mut(), wire.segment) {
+            let observed = streams.observe(side, segment, &mut self.held);
+            sizes = Some(observed.sizes);
+            blocks = observed.blocks;
+            session.last[side] = Some(*event);
         }
+        let mut seen = session.seen(side, packet.now, established);
+        if sizes.is_some() {
+            seen.stream_size = sizes;
+        }
+        (seen, blocks)
+    }
+
+    /// Hand over the stream bytes of the flows idle past their timeout, at
+    /// most once a second of packet time: the flows end, as Suricata ends
+    /// them, and what they held is inspected.
+    pub fn drain_idle(&mut self, now: u64) -> Vec<Ended> {
+        if now / NS == self.swept {
+            return Vec::new();
+        }
+        self.swept = now / NS;
+        let timeout = |proto: u8| {
+            if proto == 6 {
+                TCP_TIMEOUT_NS
+            } else {
+                OTHER_TIMEOUT_NS
+            }
+        };
+        self.drain(|key, flow| now.saturating_sub(flow.last) > timeout(key.proto))
+    }
+
+    /// Hand over the stream bytes every flow holds, as when the capture
+    /// ends.
+    pub fn drain_all(&mut self) -> Vec<Ended> {
+        self.drain(|_, _| true)
+    }
+
+    fn drain(&mut self, ends: impl Fn(&FlowKey, &Flow) -> bool) -> Vec<Ended> {
+        let mut ended = Vec::new();
+        for (key, flow) in &mut self.flows {
+            if !ends(key, flow) {
+                continue;
+            }
+            let Some(session) = flow.session.as_mut() else {
+                continue;
+            };
+            let Some(streams) = session.streams.as_mut().filter(|s| s.pending()) else {
+                continue;
+            };
+            let drained = streams.drain(&mut self.held);
+            let established = session.handshake == Handshake::Established;
+            for (side, blocks) in drained.into_iter().enumerate() {
+                let Some(event) = session.last[side].filter(|_| !blocks.is_empty()) else {
+                    continue;
+                };
+                ended.push(Ended {
+                    event,
+                    seen: session.seen(side, flow.last, established),
+                    blocks,
+                });
+            }
+        }
+        ended
     }
 
     /// Forget the filters' counters, whose rule indices no longer hold.
@@ -270,18 +399,32 @@ impl FlowTable {
     fn flow(&mut self, packet: &Packet) -> &mut Flow {
         if !self.flows.contains_key(&packet.flow) && self.flows.len() >= MAX_ENTRIES {
             let now = packet.now;
-            self.flows
-                .retain(|_, f| now.saturating_sub(f.last) <= packet.timeout);
+            let mut freed = 0;
+            self.flows.retain(|_, f| {
+                let keep = now.saturating_sub(f.last) <= packet.timeout;
+                if !keep {
+                    freed += held(f);
+                }
+                keep
+            });
             if self.flows.len() >= MAX_ENTRIES {
                 let mut ages: Vec<u64> = self.flows.values().map(|f| f.last).collect();
                 let middle = ages.len() / 2;
                 let (_, cut, _) = ages.select_nth_unstable(middle);
                 let cut = *cut;
-                self.flows.retain(|_, f| f.last > cut);
+                self.flows.retain(|_, f| {
+                    let keep = f.last > cut;
+                    if !keep {
+                        freed += held(f);
+                    }
+                    keep
+                });
             }
+            self.held = self.held.saturating_sub(freed);
         }
         let flow = self.flows.entry(packet.flow).or_default();
         if packet.now.saturating_sub(flow.last) > packet.timeout {
+            self.held = self.held.saturating_sub(held(flow));
             *flow = Flow::default();
         }
         flow.last = flow.last.max(packet.now);
