@@ -1,0 +1,68 @@
+# Commands the warden answers that the scan of
+# `scripts/audit-warden-commands.py` does not settle. `[unfenced]`: a command
+# in no policy family, answered on every host, with why. `[untested]`: a
+# command no warden test sends.
+gap_ceiling = 0
+
+[unfenced.Hello]
+reason = "the version handshake, carrying the version and nothing else"
+
+[unfenced.Delegate]
+reason = "the bpffs delegation every agent loads its datapath with, handed once per agent process by the ledger"
+
+[unfenced.PcapOpen]
+reason = "a capture socket from the pool opened at start, handed up to the per-process ceiling of the ledger"
+
+[unfenced.ConntrackDump]
+reason = "the conntrack table read by flow attribution on every host"
+
+[unfenced.ConntrackDelete]
+reason = "the IPS flow kill and a deny rule's teardown of an established flow, on any host"
+
+[unfenced.ConntrackFlush]
+reason = "a deny rule's retroactive teardown, on any host; fencing it would refuse what a correct agent does"
+
+[unfenced.AttachCgroup]
+reason = "attaches the agent's own program, received as a descriptor, to a cgroup: the datapath's attach the agent's namespace cannot make"
+
+[unfenced.TcxChain]
+reason = "read-only: the program ids on one interface's TCX hook, which the agent's namespace cannot query"
+
+[unfenced.AttachTcxInNetns]
+reason = "attaches the agent's own program in a pod's network namespace; the handler refuses the host's namespace, the warden's own and a pid outside a pod"
+
+[unfenced.ReadExecutable]
+reason = "read-only: the executable behind a pid, named on every alert that carries a process"
+
+[unfenced.OpenExecutable]
+reason = "read-only: the file behind a pid, opened read-only so the agent digests the binary a rule may name by digest"
+
+[unfenced.ReadProcessFacts]
+reason = "read-only: two link targets the process detection weighs"
+
+[unfenced.ReadServedPeer]
+reason = "read-only: the client a file-service process serves, for attribution of a write over a share"
+
+[unfenced.ReadShareWriters]
+reason = "read-only: the processes connected to a file-service port of the named servers, capped by MAX_SHARE_SERVERS"
+
+[unfenced.OpenerReadings]
+reason = "read-only: what a thread blocked on a permission event is opening; answers nothing unless a permission event is pending"
+
+[unfenced.Identity]
+reason = "read-only: the warden's own thread group and pid namespace, so the agent's links can name it"
+
+[unfenced.NamespaceIds]
+reason = "read-only: the id of each network namespace and one process in it"
+
+[unfenced.PinLink]
+reason = "pins the agent's own link, received as a descriptor, under a checked name in the warden's own pin directory"
+
+[unfenced.PinnedLinks]
+reason = "read-only: the names in the warden's own pin directory"
+
+[unfenced.OpenPinnedLink]
+reason = "hands a restarted agent the link it pinned, by a checked name in the warden's own pin directory"
+
+[unfenced.UnpinLinks]
+reason = "removes pins from the warden's own pin directory only, by checked names; the uninstall and a datapath swap use it"

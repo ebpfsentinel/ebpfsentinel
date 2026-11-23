@@ -505,6 +505,13 @@ coverage:
     notes: "Posts a signed stop document to the agent and keeps it stopped. Only a tamper-protected agent demands the signature, so the suite lives in the enterprise repository: 62 runs the agent under a unit, stops it with the console's document and reads the stop status off the journal"
 
   - kind: cli_subcommand
+    feature: wardenpolicy
+    suites: ["57"]
+    topology: none
+    kernel_min: "6.12"
+    profile: datapath
+    notes: "Writes the warden's policy from the agent's configuration before the warden starts; every rootless start in the suites runs it, 57 through the token loader's start"
+  - kind: cli_subcommand
     feature: uninstall
     suites: ["140"]
     topology: none

@@ -1168,6 +1168,7 @@ mod tests {
     /// every other family off.
     fn test_policy() -> WardenPolicy {
         WardenPolicy {
+            package_inventory: true,
             extensions: vec!["echo".into(), "boom".into(), "mystery".into()],
             ..WardenPolicy::default()
         }
@@ -1175,6 +1176,15 @@ mod tests {
 
     /// Drive `handle_conn` on the server end of a socket pair on its own thread.
     fn run_server(server: UnixStream, ext: Option<Arc<dyn ExtHandler>>) -> JoinHandle<()> {
+        run_server_at(server, ext, Path::new("/proc").to_path_buf())
+    }
+
+    /// `run_server` reading processes under `proc_root`.
+    fn run_server_at(
+        server: UnixStream,
+        ext: Option<Arc<dyn ExtHandler>>,
+        proc_root: std::path::PathBuf,
+    ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let host = NullHost;
             let slots = PcapSlots::new(Vec::new(), false);
@@ -1185,7 +1195,7 @@ mod tests {
                     pcap: &slots,
                     host: &host,
                     ext: ext.as_deref(),
-                    proc_root: Path::new("/proc"),
+                    proc_root: &proc_root,
                     policy: &test_policy(),
                     handed: &crate::handed::Ledger::new(),
                 },
@@ -1231,6 +1241,96 @@ mod tests {
         resp
     }
 
+    /// Every command the other tests leave out, sent over the wire to a warden
+    /// reading an empty process tree: each is answered with its own response
+    /// or an error naming what it could not do, and the connection stays
+    /// open for the next. Nothing here touches the host: the readers find no
+    /// process, the link pin names are refused before a path is built, and the
+    /// cgroup attach arrives without its program.
+    #[test]
+    fn the_commands_no_other_test_sends_are_answered_over_the_wire() {
+        let procs = tempfile::tempdir().unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server_at(server, None, procs.path().to_path_buf());
+        hello(&mut client);
+        let ask = |client: &mut UnixStream, cmd: &Command| -> Response {
+            write_frame(client, cmd).unwrap();
+            read_frame(client).unwrap()
+        };
+        let tuple = ConntrackTuple {
+            proto: 6,
+            src_ip: "192.0.2.1".into(),
+            dst_ip: "192.0.2.2".into(),
+            src_port: 1,
+            dst_port: 2,
+        };
+        // The fake host answers every conntrack call `unused`: the command
+        // reached it.
+        assert_eq!(
+            ask(&mut client, &Command::ConntrackDelete { tuple }),
+            Response::Error {
+                message: "unused".into()
+            }
+        );
+        for cmd in [
+            Command::ReadRootedFile {
+                pid: 1,
+                file: ebpfsentinel_warden_proto::RootedFile::DpkgStatus,
+                offset: 0,
+                len: 16,
+            },
+            Command::OpenerReadings { tids: vec![1] },
+            Command::ReadProcessFacts { pid: 1 },
+            Command::ReadServedPeer { pid: 1 },
+            Command::ReadShareWriters {
+                servers: vec![std::net::IpAddr::from([192, 0, 2, 20])],
+            },
+        ] {
+            let resp = ask(&mut client, &cmd);
+            assert!(
+                !matches!(
+                    resp,
+                    Response::Error { .. } | Response::Refused { .. } | Response::Unimplemented
+                ),
+                "{}: {resp:?}",
+                cmd.name()
+            );
+        }
+        for cmd in [
+            Command::OpenExecutable { pid: 1 },
+            Command::OpenPinnedLink {
+                name: "../x".into(),
+            },
+            Command::UnpinLinks {
+                names: vec!["../x".into()],
+            },
+        ] {
+            let resp = ask(&mut client, &cmd);
+            assert!(
+                matches!(resp, Response::Error { .. }),
+                "{}: {resp:?}",
+                cmd.name()
+            );
+        }
+        write_frame(
+            &mut client,
+            &Command::AttachCgroup {
+                cgroup_path: "/sys/fs/cgroup".into(),
+                attach_type: 0,
+            },
+        )
+        .unwrap();
+        // The byte that would carry the program descriptor, without it.
+        std::io::Write::write_all(&mut client, b"x").unwrap();
+        let resp: Response = read_frame(&mut client).unwrap();
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no program fd")),
+            "{resp:?}"
+        );
+        drop(client);
+        handle.join().unwrap();
+    }
+
     #[test]
     fn a_full_house_waits_for_a_connection_to_close() {
         let seats = super::Seats::new(1);
@@ -1240,7 +1340,10 @@ mod tests {
             std::thread::spawn(move || drop(seats.take()))
         };
         std::thread::sleep(Duration::from_millis(50));
-        assert!(!waiting.is_finished(), "the second waits while the first is served");
+        assert!(
+            !waiting.is_finished(),
+            "the second waits while the first is served"
+        );
         drop(first);
         waiting.join().unwrap();
     }

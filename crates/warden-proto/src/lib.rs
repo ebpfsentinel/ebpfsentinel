@@ -1660,8 +1660,8 @@ impl Command {
     }
 
     /// One command of every variant. The warden reads each one's wire tag off
-    /// it to bound a frame before reading the body, and the tests and the fuzz
-    /// corpus start from it.
+    /// it to bound a frame before reading the body, and the tests start from
+    /// it. The parameters are placeholders, never a path on a host.
     // One literal per variant, in declaration order: splitting it would only
     // make a missing one harder to see.
     #[allow(clippy::too_many_lines)]
@@ -1701,12 +1701,12 @@ impl Command {
                 filter: "tcp port 443".into(),
             },
             Self::AttachUprobe {
-                path: "/usr/lib/x86_64-linux-gnu/libssl.so.3".into(),
+                path: "libssl.so.3".into(),
                 offset: 4096,
                 is_ret: false,
             },
             Self::AttachCgroup {
-                cgroup_path: "/sys/fs/cgroup".into(),
+                cgroup_path: "cgroup".into(),
                 attach_type: 0,
             },
             Self::DlpScan,
@@ -1728,15 +1728,15 @@ impl Command {
             Self::NetworkPrograms,
             Self::Identity,
             Self::FimOpen {
-                paths: vec!["/etc".into()],
+                paths: vec!["etc".into()],
             },
             Self::FimRead { max_wait_ms: 100 },
             Self::FimFacts {
-                paths: vec!["/etc/passwd".into()],
+                paths: vec!["passwd".into()],
                 max_hash_bytes: 1024,
             },
             Self::FimCanaries {
-                paths: vec!["/srv/0000-archive.docx".into()],
+                paths: vec!["archive.docx".into()],
             },
             Self::HiddenPorts { ports: vec![22] },
             Self::HiddenProcesses { rate: 100 },
@@ -1790,7 +1790,7 @@ impl Command {
             },
             Self::ReadPodmanRecord {
                 uid: None,
-                store: "/var/lib/containers/storage".into(),
+                store: "storage".into(),
                 id: "0123456789abcdef".into(),
             },
         ]
