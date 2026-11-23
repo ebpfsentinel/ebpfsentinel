@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 use ebpf_common::event::PacketEvent;
 
+use super::applayer::{AppLayer, AppView};
 use super::sig::model::{
     BitOp, BitScope, Bits, Check, Flowint, FlowintOp, Signature, Threshold, ThresholdKind, Track,
     Value,
@@ -137,6 +138,7 @@ struct Flow {
     session: Option<Session>,
 }
 
+const FIN: u8 = 0x01;
 const SYN: u8 = 0x02;
 const RST: u8 = 0x04;
 const ACK: u8 = 0x10;
@@ -177,6 +179,9 @@ struct Session {
     /// The connection's byte streams, kept from its SYN on when rules read
     /// them.
     streams: Option<Box<Streams>>,
+    /// The flow's application layer, kept beside the streams of a TCP
+    /// connection or for a UDP flow when rules read it.
+    app: Option<Box<AppLayer>>,
     /// The last packet each side sent, which the alerts raised when the
     /// flow ends are reported on.
     last: [Option<PacketEvent>; 2],
@@ -191,6 +196,10 @@ impl Session {
             pkts: self.pkts,
             bytes: self.bytes,
             stream_size: self.streams.as_ref().map(|s| s.sizes()),
+            app: self
+                .app
+                .as_ref()
+                .map_or_else(AppView::default, |a| a.view(false)),
         }
     }
 }
@@ -206,6 +215,8 @@ pub struct Wire<'a> {
     pub frame_len: u64,
     /// The TCP segment, for the connection's streams.
     pub segment: Option<Segment<'a>>,
+    /// The UDP payload, for the flow's application layer.
+    pub datagram: Option<&'a [u8]>,
 }
 
 /// What the session says of one packet, the packet counted.
@@ -223,6 +234,8 @@ pub struct Seen {
     /// Each side's `stream_size`, client first, when the connection's
     /// streams are kept: a TCP connection whose SYN was seen.
     pub stream_size: Option<[u64; 2]>,
+    /// The flow's application protocol as the packet leaves it.
+    pub app: AppView,
 }
 
 /// A side's bytes left when its flow ended, and what to report them on.
@@ -252,6 +265,8 @@ pub struct FlowTable {
     filters: HashMap<(usize, Tracked), Window>,
     /// Whether TCP connections keep their streams.
     streams: bool,
+    /// Whether flows find their application protocol.
+    app_layer: bool,
     /// The stream bytes every flow holds.
     held: u64,
     /// The second of the last sweep for ended flows.
@@ -283,6 +298,12 @@ impl FlowTable {
         self.streams = on;
     }
 
+    /// Find the application protocol of flows opened from now on, or not.
+    /// A TCP connection needs its streams kept for it.
+    pub fn keep_app_layer(&mut self, on: bool) {
+        self.app_layer = on;
+    }
+
     /// Count a packet handed over whole in its flow's session and say what
     /// the session knows of it, with the bytes of the sender's stream the
     /// packet has inspected.
@@ -293,6 +314,7 @@ impl FlowTable {
         wire: Wire<'_>,
     ) -> (Seen, Vec<Vec<u8>>) {
         let streams = self.streams;
+        let app_layer = self.app_layer;
         self.flow(packet);
         // The flow is in the table now; reach it through the field alone so
         // the memory the streams hold can be counted beside it.
@@ -310,6 +332,11 @@ impl FlowTable {
                     Handshake::Midstream
                 },
                 streams: (opening && streams).then(Box::default),
+                app: match wire.tcp_flags {
+                    Some(_) => opening && streams && app_layer,
+                    None => event.protocol == 17 && app_layer,
+                }
+                .then(|| Box::new(AppLayer::new(wire.tcp_flags.is_none(), event.dst_port))),
                 last: [None; 2],
             }
         });
@@ -326,16 +353,31 @@ impl FlowTable {
         };
         let mut blocks = Vec::new();
         let mut sizes = None;
+        let mut announced = session.app.as_mut().is_some_and(|app| app.begin(side));
         if let (Some(streams), Some(segment)) = (session.streams.as_mut(), wire.segment) {
             let observed = streams.observe(side, segment, &mut self.held);
             sizes = Some(observed.sizes);
             blocks = observed.blocks;
             session.last[side] = Some(*event);
+            if let Some(app) = session.app.as_mut() {
+                let other = 1 - side;
+                let fed = app.feed(other, &observed.acked, side);
+                announced |= fed.announced;
+                if fed.inspect {
+                    streams.inspect_next(other);
+                }
+                if segment.flags & (FIN | RST) != 0 {
+                    announced |= app.close(side);
+                }
+            }
+        } else if let (Some(app), Some(data)) = (session.app.as_mut(), wire.datagram) {
+            announced |= app.feed(side, data, side).announced;
         }
         let mut seen = session.seen(side, packet.now, established);
         if sizes.is_some() {
             seen.stream_size = sizes;
         }
+        seen.app.announced = announced;
         (seen, blocks)
     }
 

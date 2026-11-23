@@ -12,7 +12,12 @@
 //! - once the side closed with a FIN, or the connection was reset by the
 //!   other side, up to what was acknowledged;
 //! - on a RST the side sends, everything it sent, acknowledged or not;
-//! - when the flow ends, everything left.
+//! - when the flow ends, everything left;
+//! - when the application layer asks for it, on the side's next packet, up
+//!   to what was acknowledged.
+//!
+//! Bytes the other side acknowledged are also handed, in order, to the
+//! application layer.
 //!
 //! Each window is inspected on a packet the side itself sends, as Suricata
 //! does. A hole in the sequence space splits a window into blocks that are
@@ -71,6 +76,11 @@ struct Side {
     fin: bool,
     /// Whether that FIN counts in the side's size, from the packet after it.
     fin_counted: bool,
+    /// One past the last byte handed to the application layer.
+    app: u64,
+    /// Whether the side's next packet inspects what was acknowledged, as
+    /// the application layer asked.
+    inspect: bool,
 }
 
 impl Side {
@@ -183,6 +193,27 @@ impl Side {
     fn held(&self) -> u64 {
         self.segments.values().map(|b| b.len() as u64).sum()
     }
+
+    /// The acknowledged bytes not yet handed to the application layer, in
+    /// order, a hole skipped.
+    fn acked_since(&mut self) -> Vec<u8> {
+        let from = self.app.max(self.inspected);
+        let mut out = Vec::new();
+        for (&start, bytes) in self.segments.range(..self.acked) {
+            let stop = start + bytes.len() as u64;
+            let lo = start.max(from);
+            let hi = stop.min(self.acked);
+            if lo < hi {
+                let skip = usize::try_from(lo - start).unwrap_or(usize::MAX);
+                let take = usize::try_from(hi - lo).unwrap_or(usize::MAX);
+                if let Some(slice) = bytes.get(skip..skip.saturating_add(take)) {
+                    out.extend_from_slice(slice);
+                }
+            }
+        }
+        self.app = from.max(self.acked);
+        out
+    }
 }
 
 /// Both streams of a TCP connection whose SYN was seen.
@@ -201,6 +232,9 @@ pub struct Observed {
     pub sizes: [u64; 2],
     /// The sending side's bytes this segment has inspected.
     pub blocks: Vec<Vec<u8>>,
+    /// The other side's bytes this segment newly acknowledged, for the
+    /// application layer.
+    pub acked: Vec<u8>,
 }
 
 impl Streams {
@@ -215,6 +249,7 @@ impl Streams {
             self.sides[side].anchor = Some((segment.seq.wrapping_add(1), 0));
         }
         let was_reset = self.reset;
+        let mut acked = Vec::new();
         if !was_reset {
             let me = &mut self.sides[side];
             if !segment.data.is_empty()
@@ -231,6 +266,7 @@ impl Streams {
                 if let Some(at) = peer.offset(segment.ack) {
                     peer.acked = peer.acked.max(at.min(peer.high));
                 }
+                acked = peer.acked_since();
             }
             if flags & RST != 0 {
                 self.reset = true;
@@ -241,9 +277,10 @@ impl Streams {
             self.sides[side].fin_counted = true;
         }
         let me = &mut self.sides[side];
+        let asked = std::mem::take(&mut me.inspect);
         let end = if !was_reset && flags & RST != 0 {
             Some(me.high)
-        } else if me.fin || self.reset || me.acked.saturating_sub(me.inspected) >= CHUNK {
+        } else if me.fin || self.reset || asked || me.acked.saturating_sub(me.inspected) >= CHUNK {
             Some(me.acked)
         } else {
             None
@@ -256,7 +293,17 @@ impl Streams {
             }
             None => Vec::new(),
         };
-        Observed { sizes, blocks }
+        Observed {
+            sizes,
+            blocks,
+            acked,
+        }
+    }
+
+    /// Have the side's next packet inspect what was acknowledged of it, as
+    /// an application parser asks once it holds a whole message.
+    pub fn inspect_next(&mut self, side: usize) {
+        self.sides[side].inspect = true;
     }
 
     /// Each side's `stream_size` as it stands.

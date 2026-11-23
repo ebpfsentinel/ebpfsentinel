@@ -121,9 +121,11 @@ impl IdsEngine {
         self.inspections.push(inspection);
         self.prefilter = OnceLock::new();
         let streams = self.reads_streams();
+        let app_layer = self.reads_app_layer();
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
         flows.forget_filters();
-        flows.keep_streams(streams);
+        flows.keep_streams(streams || app_layer);
+        flows.keep_app_layer(app_layer);
         Ok(())
     }
 
@@ -140,9 +142,11 @@ impl IdsEngine {
         self.inspections.remove(pos);
         self.prefilter = OnceLock::new();
         let streams = self.reads_streams();
+        let app_layer = self.reads_app_layer();
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
         flows.forget_filters();
-        flows.keep_streams(streams);
+        flows.keep_streams(streams || app_layer);
+        flows.keep_app_layer(app_layer);
         Ok(())
     }
 
@@ -184,9 +188,11 @@ impl IdsEngine {
         self.inspections = inspections;
         self.prefilter = OnceLock::new();
         let streams = self.reads_streams();
+        let app_layer = self.reads_app_layer();
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
         flows.forget_filters();
-        flows.keep_streams(streams);
+        flows.keep_streams(streams || app_layer);
+        flows.keep_app_layer(app_layer);
         drop(flows);
         self.threshold_tracker
             .lock()
@@ -202,6 +208,14 @@ impl IdsEngine {
             .iter()
             .flatten()
             .any(|p| p.inspect() != Inspect::Packet || p.reads_stream_size())
+    }
+
+    /// Whether a loaded rule reads a flow's application protocol.
+    fn reads_app_layer(&self) -> bool {
+        self.inspections
+            .iter()
+            .flatten()
+            .any(|p| p.reads_app_layer())
     }
 
     /// Read-only access to the loaded rules.
@@ -461,6 +475,10 @@ impl IdsEngine {
             payload: packet.payload_len().unwrap_or(0) > 0,
             frame_len: u64::from(event.pkt_len),
             segment,
+            datagram: match packet.l4 {
+                L4::Udp { payload, .. } => Some(payload),
+                _ => None,
+            },
         };
         let (seen, blocks) = self
             .flows

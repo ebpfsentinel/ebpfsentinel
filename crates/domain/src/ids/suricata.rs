@@ -524,8 +524,8 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "app-layer-protocol",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the application protocol is detected from the traffic.",
+        support: Support::Compiled,
+        note: "The protocol is found from the traffic for HTTP/1, TLS, SSH, SMTP, FTP and DNS, and `failed`, `unknown` and every mode are read as Suricata reads them; another protocol is refused.",
     },
     KeywordSupport {
         keyword: "app-layer-state",
@@ -2699,12 +2699,17 @@ fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
                 "is a header protocol not compared with Suricata yet",
             ));
         }
-        RuleProto::App(name) => {
-            return Err(Refused::new(
-                name.as_str(),
-                "is an application-layer protocol the agent does not parse",
-            ));
-        }
+        RuleProto::App(name) => match crate::ids::applayer::AppProto::named(name) {
+            // DNS runs over UDP and TCP; the others over TCP.
+            Some(crate::ids::applayer::AppProto::Dns) => PacketProto::Ip,
+            Some(_) => PacketProto::Tcp,
+            None => {
+                return Err(Refused::new(
+                    name.as_str(),
+                    "is an application protocol the agent does not detect yet",
+                ));
+            }
+        },
     };
     let both_ways = match header.direction {
         Direction::OneWay => false,
@@ -3482,7 +3487,7 @@ mod tests {
             ("drop tcp any any -> any 80", "drop"),
             ("pass tcp any any -> any 80", "pass"),
             ("alert sctp any any -> any 80", "protocol"),
-            ("alert http any any -> any 80", "http"),
+            ("alert http2 any any -> any 80", "http2"),
             ("alert tcp any any => any 80", "=>"),
             ("alert tcp !any any -> any 80", "!any"),
             ("alert tcp $NOPE any -> any 80", "$NOPE"),

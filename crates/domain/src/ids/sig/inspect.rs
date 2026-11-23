@@ -20,9 +20,10 @@ use super::buffers::sticky;
 use super::int::{IntMatch, IntOp};
 use super::model::{
     Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
-    FlowCounter, HeaderField, Match, MathOp, NumBase, Pcre, RuleProto, Signature, StreamSide,
-    TcpFlags, TcpFlagsMode, Transform, Value,
+    FlowCounter, FlowMatch, HeaderField, Match, MathOp, NumBase, Pcre, ProtoMode, RuleProto,
+    Signature, StreamSide, TcpFlags, TcpFlagsMode, Transform, Value,
 };
+use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
@@ -72,7 +73,7 @@ fn inspect(
             .all(|l| matches!(l.source, Source::Payload | Source::Decoded));
     if !matches!(
         signature.header.proto,
-        RuleProto::Tcp | RuleProto::TcpStream
+        RuleProto::Tcp | RuleProto::TcpStream | RuleProto::App(_)
     ) || flow.no_stream
         || !headers.is_empty()
         || !session.counters.is_empty()
@@ -126,20 +127,104 @@ pub enum Inspect {
     Both,
 }
 
-/// What the rule asks of the flow's session: `flow`, its counters and the
-/// streams' sizes.
+/// What the rule asks of the flow's session: `flow`, its counters, the
+/// streams' sizes and the application protocol.
 #[derive(Debug, Default)]
 struct Session {
     established: Option<bool>,
     to_server: Option<bool>,
     counters: Vec<(FlowCounter, IntMatch)>,
     stream_size: Vec<(StreamSide, IntMatch)>,
+    /// The protocol the header names, which the flow must have.
+    alproto: Option<AppProto>,
+    protocols: Vec<ProtoCheck>,
+    /// A rule of `app-layer-protocol` and nothing else matches only on the
+    /// packets announcing a detection, as Suricata runs it.
+    announced_only: bool,
+}
+
+/// One `app-layer-protocol`. `proto` is `None` for `unknown`.
+#[derive(Debug, Clone, Copy)]
+struct ProtoCheck {
+    negated: bool,
+    proto: Option<AppProto>,
+    mode: ProtoMode,
+}
+
+impl ProtoCheck {
+    fn matches(self, seen: &Seen) -> bool {
+        let app: &AppView = &seen.app;
+        let own = app.dirs[usize::from(!seen.to_server)];
+        let found: &[Option<AppProto>] = match self.mode {
+            ProtoMode::Direction => &[own],
+            ProtoMode::ToServer => &app.dirs[..1],
+            ProtoMode::ToClient => &app.dirs[1..],
+            ProtoMode::Either => &app.dirs,
+            ProtoMode::Final => std::slice::from_ref(&app.flow),
+            // Suricata records an original protocol only when a flow
+            // changes protocol, which the agent does not follow.
+            ProtoMode::Original => &[None],
+        };
+        found.iter().any(|&got| match (self.negated, self.proto) {
+            (false, want) => got == want,
+            // A negation holds only once a protocol is known, `failed` too.
+            (true, want) => got.is_some() && got != want,
+        })
+    }
+}
+
+/// The protocol an application name stands for, or why the agent does not
+/// import a rule naming it.
+fn app_proto(name: &str) -> Compiled<AppProto> {
+    AppProto::named(name)
+        .filter(|p| *p != AppProto::Failed)
+        .ok_or_else(|| {
+            refused(
+                name,
+                "is an application protocol the agent does not detect yet",
+            )
+        })
 }
 
 impl Session {
-    fn compile(signature: &Signature) -> Self {
+    fn compile(signature: &Signature, lists: &[List]) -> Compiled<Self> {
         let flow = &signature.flow;
-        Self {
+        let alproto = match &signature.header.proto {
+            RuleProto::App(name) => Some(app_proto(name)?),
+            _ => None,
+        };
+        let mut protocols = Vec::new();
+        for check in &signature.checks {
+            if let Check::AppLayerProtocol {
+                negated,
+                proto,
+                mode,
+            } = check
+            {
+                let proto = match proto.as_str() {
+                    "unknown" => None,
+                    "failed" => Some(AppProto::Failed),
+                    name => Some(app_proto(name)?),
+                };
+                protocols.push(ProtoCheck {
+                    negated: *negated,
+                    proto,
+                    mode: *mode,
+                });
+            }
+        }
+        let announced_only = !protocols.is_empty()
+            && lists.is_empty()
+            && alproto.is_none()
+            && *flow == FlowMatch::default()
+            && signature
+                .checks
+                .iter()
+                .all(|c| matches!(c, Check::AppLayerProtocol { .. }));
+        Ok(Self {
+            alproto,
+            protocols,
+            announced_only,
             established: if flow.established {
                 Some(true)
             } else if flow.not_established {
@@ -170,7 +255,7 @@ impl Session {
                     _ => None,
                 })
                 .collect(),
-        }
+        })
     }
 
     fn matches(&self, seen: &Seen) -> bool {
@@ -195,6 +280,9 @@ impl Session {
                         StreamSide::Either => m.matches(client) || m.matches(server),
                     })
                 }))
+            && self.alproto.is_none_or(|p| seen.app.flow == Some(p))
+            && (!self.announced_only || seen.app.announced)
+            && self.protocols.iter().all(|c| c.matches(seen))
     }
 }
 
@@ -531,7 +619,7 @@ impl Program {
             .iter()
             .filter_map(|check| HeaderCheck::compile(check).transpose())
             .collect::<Compiled<Vec<_>>>()?;
-        let session = Session::compile(signature);
+        let session = Session::compile(signature, &lists)?;
         stream_alone(signature, &lists, &headers, &session)?;
         let inspect = inspect(signature, &lists, &headers, &session);
         Ok(Self {
@@ -557,6 +645,12 @@ impl Program {
     #[must_use]
     pub fn reads_stream_size(&self) -> bool {
         !self.session.stream_size.is_empty()
+    }
+
+    /// Whether the rule reads the flow's application protocol.
+    #[must_use]
+    pub fn reads_app_layer(&self) -> bool {
+        self.session.alproto.is_some() || !self.session.protocols.is_empty()
     }
 
     /// Whether the signature's matches hold on a window of a stream: its

@@ -20,6 +20,7 @@ use crate::ids::suricata::SuricataVars;
 const VERDICTS: &str = include_str!("../../tests/fixtures/suricata/header-verdicts.txt");
 const SESSIONS: &str = include_str!("../../tests/fixtures/suricata/session-verdicts.txt");
 const STREAMS: &str = include_str!("../../tests/fixtures/suricata/stream-verdicts.txt");
+const APPLAYER: &str = include_str!("../../tests/fixtures/suricata/applayer-verdicts.txt");
 
 /// The Ethernet header Suricata counts in a flow's bytes, as `skb->len`
 /// does where tc-ids reads it.
@@ -229,6 +230,18 @@ fn session_rules_alert_on_the_packets_suricata_alerts_on() {
 
 #[test]
 fn stream_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(STREAMS, 100);
+}
+
+#[test]
+fn application_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(APPLAYER, 40);
+}
+
+/// Plays a fixture's conversations through the engine, packet by packet,
+/// then flushes every flow, and compares what alerted with what Suricata
+/// alerted on.
+fn replay(fixture: &str, at_least: usize) {
     let vars = SuricataVars::default();
     let mut rules: Vec<IdsRule> = Vec::new();
     let mut packets: Vec<(u64, Vec<u8>, Vec<u32>)> = Vec::new();
@@ -240,23 +253,30 @@ fn stream_rules_alert_on_the_packets_suricata_alerts_on() {
             text.split(',').map(|s| s.parse().expect("sid")).collect()
         }
     };
-    for line in STREAMS.lines() {
+    let mut wrong = Vec::new();
+    for line in fixture.lines() {
         let mut fields = line.splitn(3, ' ');
         let (Some(kind), Some(number), Some(rest)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
         match kind {
-            "rule" => {
+            "rule" | "refused" => {
                 let sid: u32 = number.parse().expect("sid");
-                let mut compiled = compile_rule_admitting(&with_sid(rest, sid), &vars, true)
-                    .unwrap_or_else(|refused| {
-                        panic!(
-                            "sid {sid} loads in Suricata, refused here: {} {}",
-                            refused.keyword, refused.reason
-                        )
-                    });
-                rules.append(&mut compiled);
+                match (
+                    kind,
+                    compile_rule_admitting(&with_sid(rest, sid), &vars, true),
+                ) {
+                    ("rule", Ok(mut compiled)) => rules.append(&mut compiled),
+                    ("rule", Err(refused)) => wrong.push(format!(
+                        "sid {sid} loads in Suricata, refused here: {} {}",
+                        refused.keyword, refused.reason
+                    )),
+                    (_, Ok(_)) => {
+                        wrong.push(format!("sid {sid} is refused by Suricata, compiled here"));
+                    }
+                    (_, Err(_)) => {}
+                }
             }
             "packet" => {
                 let (bytes, alerted) = rest.split_once(' ').expect("packet bytes then sids");
@@ -266,13 +286,15 @@ fn stream_rules_alert_on_the_packets_suricata_alerts_on() {
             _ => {}
         }
     }
-    assert!(packets.len() > 100, "the fixture holds the conversations");
+    assert!(
+        packets.len() > at_least,
+        "the fixture holds the conversations"
+    );
 
     let mut engine = IdsEngine::new();
     engine
         .reload(rules)
         .expect("the engine loads the compiled rules");
-    let mut wrong = Vec::new();
     for (n, (ns, bytes, want)) in packets.iter().enumerate() {
         let decoded = IpPacket::decode(bytes).expect("the packet decodes");
         let mut header = event(&decoded);
@@ -285,7 +307,9 @@ fn stream_rules_alert_on_the_packets_suricata_alerts_on() {
             .collect();
         got.sort_unstable();
         if &got != want {
-            wrong.push(format!("packet {n}: got {got:?}, Suricata {want:?}"));
+            wrong.push(format!(
+                "packet {n} at {ns}: got {got:?}, Suricata {want:?}"
+            ));
         }
     }
     let mut ended: Vec<(u8, Vec<u32>)> = ends.iter().map(|(n, _)| (*n, Vec::new())).collect();

@@ -12,9 +12,9 @@ use super::model::{
     APP_PROTOCOLS, Action, Base64Decode, BitOp, BitScope, Bits, Buffer, BufferList, ByteExtract,
     ByteJump, ByteMath, ByteOp, ByteRead, ByteTest, Capture, Check, Content, DatasetMatch,
     Direction, Endian, Entropy, FastPattern, FloatMatch, FlowCounter, FlowMatch, Flowint,
-    FlowintOp, Header, HeaderField, IsDataAt, Match, MathOp, NumBase, Pcre, PortMatch, RuleProto,
-    Signature, StreamSide, Tag, TcpFlags, TcpFlagsMode, Threshold, ThresholdKind, Track, Transform,
-    Value,
+    FlowintOp, Header, HeaderField, IsDataAt, Match, MathOp, NumBase, Pcre, PortMatch, ProtoMode,
+    RuleProto, Signature, StreamSide, Tag, TcpFlags, TcpFlagsMode, Threshold, ThresholdKind, Track,
+    Transform, Value,
 };
 use crate::ids::suricata::{
     Compiled, MAX_VARIABLE_DEPTH, Refused, SuricataVars, decode_content, parse_addresses,
@@ -1330,16 +1330,30 @@ impl Builder {
                     Some(rest) => (true, rest),
                     None => (false, value),
                 };
-                let proto = proto
-                    .split(',')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase();
+                let mut parts = proto.split(',');
+                let proto = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
                 if !APP_PROTOCOLS.contains(&proto.as_str()) {
                     return Err(bad(k, format!("'{proto}' is not an application protocol")));
                 }
-                Check::AppLayerProtocol { negated, proto }
+                let mode = match parts.next().map(str::trim) {
+                    None | Some("direction") => ProtoMode::Direction,
+                    Some("to_server") => ProtoMode::ToServer,
+                    Some("to_client") => ProtoMode::ToClient,
+                    Some("either") => ProtoMode::Either,
+                    Some("final") => ProtoMode::Final,
+                    Some("original") => ProtoMode::Original,
+                    Some(other) => {
+                        return Err(bad(k, format!("'{other}' is not a protocol mode")));
+                    }
+                };
+                if parts.next().is_some() {
+                    return Err(bad(k, "takes a protocol and at most one mode"));
+                }
+                Check::AppLayerProtocol {
+                    negated,
+                    proto,
+                    mode,
+                }
             }
             "app-layer-state" | "ftpbounce" | "filename" | "fileext" | "filemd5" | "filesha1"
             | "filesha256" | "filesize" => Self::file_or_state(k, value)?,

@@ -597,6 +597,21 @@ pub enum FlowCounter {
     BytesToClient,
 }
 
+/// Which protocol `app-layer-protocol` compares: the one found in the
+/// packet's direction by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtoMode {
+    Direction,
+    ToServer,
+    ToClient,
+    Either,
+    /// The flow's protocol as it ends up.
+    Final,
+    /// The protocol a flow had before it changed protocol, as after a
+    /// STARTTLS.
+    Original,
+}
+
 /// A condition on the packet or the flow, outside any buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Check {
@@ -624,6 +639,7 @@ pub enum Check {
     AppLayerProtocol {
         negated: bool,
         proto: String,
+        mode: ProtoMode,
     },
     Event {
         keyword: &'static str,
