@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 
 use super::int::{IntMatch, IntOp};
 use super::model::{
-    Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FloatMatch, HeaderField, Match,
-    MathOp, NumBase, Pcre, Signature, Transform, Value,
+    Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
+    HeaderField, Match, MathOp, NumBase, Pcre, Signature, Transform, Value,
 };
 use crate::ids::suricata::{Compiled, Refused};
 
@@ -33,6 +33,16 @@ pub struct Program {
     lists: Vec<List>,
     dsize: Vec<IntMatch>,
     slots: usize,
+    fast: Option<Needle>,
+}
+
+/// Bytes every payload the program matches holds somewhere, so a payload
+/// without them is not worth running the program on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Needle {
+    pub bytes: Vec<u8>,
+    /// Whether ASCII letters match in either case.
+    pub nocase: bool,
 }
 
 #[derive(Debug)]
@@ -230,7 +240,17 @@ impl Program {
             lists,
             dsize,
             slots: names.len(),
+            fast: fast_pattern(signature),
         })
+    }
+
+    /// The bytes a payload must hold for the program to match it: the
+    /// content `fast_pattern` names, or the longest content, among those
+    /// read from the untransformed payload. `None` when no content is read
+    /// there, as for a rule of pcre alone.
+    #[must_use]
+    pub const fn fast_pattern(&self) -> Option<&Needle> {
+        self.fast.as_ref()
     }
 
     /// Whether the signature's matches hold on this payload. A list that
@@ -1009,6 +1029,38 @@ fn dollar_at_end(body: &str) -> String {
     out
 }
 
+fn fast_pattern(signature: &Signature) -> Option<Needle> {
+    let contents: Vec<&Content> = signature
+        .lists
+        .iter()
+        .filter(|l| l.buffer == Buffer::Payload && l.transforms.is_empty())
+        .flat_map(|l| l.matches.iter())
+        .filter_map(|m| match m {
+            Match::Content(c) if !c.negated && !c.bytes.is_empty() => Some(c),
+            _ => None,
+        })
+        .collect();
+    let chosen = contents
+        .iter()
+        .find(|c| c.fast_pattern.is_some())
+        .or_else(|| contents.iter().rev().max_by_key(|c| c.bytes.len()))?;
+    let bytes = match chosen.fast_pattern {
+        Some(FastPattern::Slice { offset, length }) => {
+            let start = usize::from(offset);
+            start
+                .checked_add(usize::from(length))
+                .and_then(|end| chosen.bytes.get(start..end))
+                .filter(|b| !b.is_empty())
+                .unwrap_or(&chosen.bytes)
+        }
+        _ => &chosen.bytes,
+    };
+    Some(Needle {
+        bytes: bytes.to_vec(),
+        nocase: chosen.nocase,
+    })
+}
+
 /// Whether PCRE2 compiles the expression with its flags.
 pub(crate) fn check_pcre(p: &Pcre) -> Compiled<()> {
     compile_pcre(p).map(drop)
@@ -1140,6 +1192,33 @@ fn compile_match(m: &Match, names: &mut HashMap<String, usize>) -> Compiled<Op> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn needle_of(options: &str) -> Option<Needle> {
+        let text = format!("alert tcp any any -> any 80 (msg:\"t\"; {options} sid:1;)");
+        let signature =
+            super::super::parse_signature(&text, &crate::ids::suricata::SuricataVars::default())
+                .expect("parses");
+        Program::compile(&signature)
+            .expect("compiles")
+            .fast_pattern()
+            .cloned()
+    }
+
+    #[test]
+    fn the_fast_pattern_is_the_one_named_else_the_longest_content_read_as_is() {
+        let n = needle_of(r#"content:"ab"; content:"long one"; content:"cd"; fast_pattern;"#)
+            .expect("a needle");
+        assert_eq!(n.bytes, b"cd");
+        let n = needle_of(r#"content:"abcdefgh"; fast_pattern:2,3;"#).expect("a needle");
+        assert_eq!(n.bytes, b"cde");
+        let n = needle_of(r#"content:"ab"; content:"LONGER"; nocase; content:"!x";"#)
+            .expect("a needle");
+        assert_eq!((n.bytes.as_slice(), n.nocase), (b"LONGER".as_slice(), true));
+        let n = needle_of(r#"content:!"a much longer one"; content:"ab";"#).expect("a needle");
+        assert_eq!(n.bytes, b"ab");
+        assert_eq!(needle_of(r#"pcre:"/ab+c/";"#), None);
+        assert_eq!(needle_of(r#"http.uri; content:"/admin";"#), None);
+    }
 
     fn xf(name: &str, arg: Option<&str>) -> Xform {
         compile_transform(&Transform {

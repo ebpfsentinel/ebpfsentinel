@@ -964,6 +964,7 @@ dependencies = [
 name = "ebpfsentinel-domain"
 version = "0.0.0-dev"
 dependencies = [
+ "aho-corasick",
  "criterion",
  "ebpf-common",
  "hmac",

@@ -3,9 +3,11 @@
 //! Suricata's verdict on it, must get the same verdict here, and a rule
 //! Suricata refuses to load must be refused here.
 
+use domain::ids::engine::IdsEngine;
 use domain::ids::sig::inspect::Program;
 use domain::ids::sig::parse_signature;
-use domain::ids::suricata::SuricataVars;
+use domain::ids::suricata::{SuricataVars, compile_ruleset};
+use ebpf_common::event::{EVENT_TYPE_IDS, PacketEvent};
 
 const VERDICTS: &str = include_str!("fixtures/suricata/inspect-verdicts.txt");
 
@@ -110,6 +112,82 @@ fn the_engine_decides_what_suricata_decides() {
                         "does not match"
                     },
                     if got { "matches" } else { "does not match" },
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} disagreements:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// Every case loaded into one engine, as a ruleset is: the fast-pattern
+/// prefilter in front of the programs drops no rule a payload matches.
+#[test]
+fn the_prefilter_loses_no_match() {
+    // A ruleset also refuses a rule that runs on the port alone and one
+    // reading `dsize`, which the program would run.
+    let rule = |c: &Case| {
+        format!(
+            "alert tcp any any -> any 80 (msg:\"case {}\"; {} sid:{};)\n",
+            c.sid, c.options, c.sid
+        )
+    };
+    let vars = SuricataVars::default();
+    let cases: Vec<Case> = cases()
+        .into_iter()
+        .filter(|c| !c.refused && !c.header)
+        .filter(|c| compile_ruleset(&rule(c), &vars).report.compiled == 1)
+        .collect();
+    assert!(cases.len() > 100, "the ruleset lost its cases");
+    let text: String = cases.iter().map(rule).collect();
+    let compiled = compile_ruleset(&text, &vars);
+    assert_eq!(compiled.report.compiled, cases.len());
+    let mut engine = IdsEngine::new();
+    engine.reload(compiled.rules).expect("the cases load");
+    let event = PacketEvent {
+        timestamp_ns: 1,
+        src_addr: [0x0A00_0001, 0, 0, 0],
+        dst_addr: [0x0A00_0002, 0, 0, 0],
+        src_port: 40000,
+        dst_port: 80,
+        protocol: 6,
+        event_type: EVENT_TYPE_IDS,
+        action: 0,
+        flags: 0,
+        rule_id: 0,
+        vlan_id: 0,
+        cpu_id: 0,
+        socket_cookie: 0,
+        cgroup_id: 0,
+        cgroup1_id: 0,
+        rss_hash: 0,
+        rss_hash_type: 0,
+        rx_hw_timestamp_ns: 0,
+        pkt_len: 0,
+        _pad: 0,
+    };
+    let mut wrong = Vec::new();
+    for case in &cases {
+        for (number, expected, bytes) in &case.buffers {
+            if bytes.is_empty() {
+                continue;
+            }
+            let hit = engine
+                .evaluate_payload_with_context(&event, bytes, None)
+                .iter()
+                .any(|(_, rule)| {
+                    rule.imported
+                        .as_ref()
+                        .is_some_and(|i| i.sid.to_string() == case.sid)
+                });
+            if hit != *expected {
+                wrong.push(format!(
+                    "{} payload {number}: expected {expected}",
+                    case.sid
                 ));
             }
         }

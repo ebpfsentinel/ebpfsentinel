@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use regex::Regex;
@@ -11,6 +11,7 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
+use super::prefilter::{Entry, Prefilter, needle};
 use super::sig::inspect::Program;
 use crate::common::entity::Protocol;
 use crate::dns::entity::DomainPattern;
@@ -56,6 +57,9 @@ pub struct IdsEngine {
     /// The matches an imported rule runs over the payload, in place of a
     /// pattern.
     inspections: Vec<Option<Arc<Program>>>,
+    /// Which rules a payload is worth running, built on first use after the
+    /// rules change.
+    prefilter: OnceLock<Arc<Prefilter>>,
     sampling: SamplingMode,
     threshold_tracker: Arc<Mutex<HashMap<(RuleId, u64), ThresholdState>>>,
 }
@@ -67,6 +71,7 @@ impl IdsEngine {
             compiled_patterns: Vec::new(),
             compiled_domain_patterns: Vec::new(),
             inspections: Vec::new(),
+            prefilter: OnceLock::new(),
             sampling: SamplingMode::default(),
             threshold_tracker: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -102,6 +107,7 @@ impl IdsEngine {
         self.compiled_patterns.push(compiled);
         self.compiled_domain_patterns.push(domain_compiled);
         self.inspections.push(inspection);
+        self.prefilter = OnceLock::new();
         Ok(())
     }
 
@@ -116,6 +122,7 @@ impl IdsEngine {
         self.compiled_patterns.remove(pos);
         self.compiled_domain_patterns.remove(pos);
         self.inspections.remove(pos);
+        self.prefilter = OnceLock::new();
         Ok(())
     }
 
@@ -129,8 +136,9 @@ impl IdsEngine {
         }
 
         // Check for duplicates
-        for (i, rule) in rules.iter().enumerate() {
-            if rules[i + 1..].iter().any(|r| r.id == rule.id) {
+        let mut ids = std::collections::HashSet::with_capacity(rules.len());
+        for rule in &rules {
+            if !ids.insert(&rule.id) {
                 return Err(IdsError::DuplicateRule {
                     id: rule.id.0.clone(),
                 }
@@ -154,6 +162,7 @@ impl IdsEngine {
         self.compiled_patterns = compiled;
         self.compiled_domain_patterns = domain_compiled;
         self.inspections = inspections;
+        self.prefilter = OnceLock::new();
         self.threshold_tracker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -335,28 +344,40 @@ impl IdsEngine {
             return Vec::new();
         }
 
-        self.rules
-            .iter()
-            .zip(self.compiled_patterns.iter())
-            .zip(self.inspections.iter())
-            .enumerate()
-            .filter(|(_, ((rule, pattern), inspection))| {
-                let decided = match (inspection, pattern) {
-                    (Some(program), _) => program.matches(payload),
-                    (None, Some(pattern)) => pattern.is_match(payload),
-                    (None, None) => return false,
-                };
-                rule.enabled
+        let prefilter = self.prefilter.get_or_init(|| {
+            Arc::new(Prefilter::build(
+                self.rules
+                    .iter()
+                    .zip(&self.inspections)
+                    .map(|(rule, program)| Entry {
+                        ports: [rule.dst_port, rule.src_port],
+                        needle: needle(program.as_ref()),
+                    }),
+            ))
+        });
+        prefilter
+            .candidates([event.dst_port, event.src_port], payload)
+            .into_iter()
+            .filter_map(|idx| {
+                let rule = self.rules.get(idx)?;
+                let applies = rule.enabled
                     && matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
                     && (rule.dst_port == Some(event.dst_port)
                         || rule.src_port == Some(event.src_port))
                     && rule
                         .imported
                         .as_ref()
-                        .is_none_or(|imported| imported.addresses_match(event))
-                    && decided
+                        .is_none_or(|imported| imported.addresses_match(event));
+                if !applies {
+                    return None;
+                }
+                let decided = match (self.inspections.get(idx)?, self.compiled_patterns.get(idx)?) {
+                    (Some(program), _) => program.matches(payload),
+                    (None, Some(pattern)) => pattern.is_match(payload),
+                    (None, None) => false,
+                };
+                decided.then_some((idx, rule))
             })
-            .map(|(idx, ((rule, _), _))| (idx, rule))
             .collect()
     }
 

@@ -146,6 +146,8 @@ regex = "1"
 # statically, PCRE2_SYS_STATIC being set in .cargo/config.toml.
 pcre2 = "0.2.11"
 memchr = "2"
+# The fast-pattern prefilter of imported rules (Unlicense OR MIT).
+aho-corasick = "1.1.5"
 
 # LRU cache
 lru = "0.18.3"

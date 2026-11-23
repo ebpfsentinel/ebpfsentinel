@@ -175,9 +175,38 @@ fn bench_imported_payload(c: &mut Criterion) {
     // A request no rule matches walks every candidate rule.
     let miss = b"GET /index.html HTTP/1.1\r\nHost: example.test\r\nUser-Agent: bench\r\n\r\n";
 
-    for &n in &[100, 1_000, 5_000] {
+    // A request carrying one rule's fast pattern runs that rule in full.
+    let hit = b"GET /needle-00042/admin HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+    for &n in &[100, 1_000, 5_000, 50_000] {
         let engine = imported_engine(n);
         group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
+            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, miss, None)));
+        });
+        group.bench_with_input(BenchmarkId::new("hit", n), &n, |b, _| {
+            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, hit, None)));
+        });
+    }
+
+    // The Emerging Threats Open ruleset, when a directory of its `.rules`
+    // files is named: the corpus is not redistributed with these sources.
+    if let Some(dir) = std::env::var_os("EBPFSENTINEL_ET_OPEN_RULES") {
+        let mut text = String::new();
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rules"))
+            .collect();
+        files.sort();
+        for file in files {
+            text.push_str(&std::fs::read_to_string(file).unwrap());
+            text.push('\n');
+        }
+        let compiled = compile_ruleset(&text, &SuricataVars::default());
+        let loaded = compiled.report.compiled;
+        let mut engine = IdsEngine::new();
+        engine.reload(compiled.rules).unwrap();
+        group.bench_with_input(BenchmarkId::new("et_open_miss", loaded), &loaded, |b, _| {
             b.iter(|| black_box(engine.evaluate_payload_with_context(&event, miss, None)));
         });
     }

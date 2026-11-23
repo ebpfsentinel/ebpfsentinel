@@ -157,8 +157,8 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "fast_pattern",
-        support: Support::Accepted,
-        note: "A prefilter hint; every pattern is matched in full.",
+        support: Support::Compiled,
+        note: "Names the content the prefilter looks for, `chop` naming a slice of it; without it the longest content of the payload is the one. A payload without that content runs no more of the rule, and the rule is then matched in full.",
     },
     KeywordSupport {
         keyword: "rawbytes",
