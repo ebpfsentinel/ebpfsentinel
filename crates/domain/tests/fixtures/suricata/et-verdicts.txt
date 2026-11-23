@@ -1,0 +1,643 @@
+# This is Suricata version 8.0.8 RELEASE, run by make-et-verdicts.py; do not edit by hand.
+# ET Open for Suricata 8.0, 53073 enabled rules, sha256 1b3d87248f5d17a675f19535b71118134b870faf9eccf159630c80fa39c6d187 over them.
+# The rules below are Emerging Threats Open rules, sids 2000000 to 2799999,
+# under the licence the ruleset ships as BSD-License.txt:
+#*************************************************************
+#  Copyright (c) 2003-2026, Emerging Threats
+#  All rights reserved.
+#
+#  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+#  following conditions are met:
+#
+#  * Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+#    disclaimer.
+#  * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
+#    following disclaimer in the documentation and/or other materials provided with the distribution.
+#  * Neither the name of the nor the names of its contributors may be used to endorse or promote products derived
+#    from this software without specific prior written permission.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS AS IS AND ANY EXPRESS OR IMPLIED WARRANTIES,
+#  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+#  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+#  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+#  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+#*************************************************************
+#
+# 'conversation N WHAT' names each conversation, then 'rule SID RULE' the
+# rules that alerted and the rules writing the flowbits they read, then
+# 'packet NS HEX SIDS' and 'end N SIDS' as in the other verdict fixtures.
+conversation 1 http benign browsing
+conversation 2 dns benign lookup
+conversation 3 tls benign handshake
+conversation 4 tcp benign ssh
+conversation 5 http sqlmap
+conversation 6 http nikto
+conversation 7 http nmap nse
+conversation 8 http masscan
+conversation 9 http zgrab
+conversation 10 http etc passwd
+conversation 11 http union select
+conversation 12 http script in uri
+conversation 13 http log4j user agent
+conversation 14 http shellshock
+conversation 15 http wordpress login
+conversation 16 http dotenv
+conversation 17 http phpmyadmin
+conversation 18 http cmd exe
+conversation 19 http wget in uri
+conversation 20 http id answers root
+conversation 21 http ipify
+conversation 22 http ifconfig me
+conversation 23 http icanhazip
+conversation 24 http pastebin powershell
+conversation 25 http bits exe from address
+conversation 26 http dyndns checkip
+conversation 27 http ipinfo go
+conversation 28 http exe download
+conversation 29 dns ipify
+conversation 30 dns ifconfig me
+conversation 31 dns ngrok
+conversation 32 dns pastebin
+conversation 33 dns duckdns
+conversation 34 dns transfer sh
+conversation 35 dns onion
+conversation 36 dns trycloudflare
+conversation 37 dns discord
+conversation 38 dns anydesk
+conversation 39 tls ipify
+conversation 40 tls ngrok
+conversation 41 tls pastebin
+conversation 42 tls trycloudflare
+conversation 43 tls transfer sh
+conversation 44 tls discord cdn
+conversation 45 tcp libssh in
+conversation 46 tcp ftp root
+conversation 47 tcp telnet root
+conversation 48 tcp smtp vrfy
+conversation 49 tcp nmap syn window 1024
+conversation 50 icmp linux and windows pings
+conversation 51 udp snmp public, ssdp, sipvicious
+conversation 52 tcp six ssh connection attempts
+conversation 53 http six nikto requests
+rule 2001219 alert tcp $EXTERNAL_NET any -> $HOME_NET 22 (msg:"ET SCAN Potential SSH Scan"; flow:to_server; flags:S,12; threshold: type both, track by_src, count 5, seconds 120; reference:url,en.wikipedia.org/wiki/Brute_force_attack; classtype:attempted-recon; sid:2001219; rev:20; metadata:created_at 2010_07_30, confidence Medium, signature_severity Informational, updated_at 2019_07_26;)
+rule 2002677 alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET SCAN Nikto Web App Scan in Progress"; flow:established,to_server; threshold: type both, count 5, seconds 60, track by_src; http.user_agent; content:"(Nikto"; reference:url,www.cirt.net/code/nikto.shtml; classtype:web-application-attack; sid:2002677; rev:15; metadata:created_at 2010_07_30, confidence Medium, signature_severity Informational, updated_at 2024_03_06;)
+rule 2008538 alert http $EXTERNAL_NET any -> $HTTP_SERVERS any (msg:"ET SCAN Sqlmap SQL Injection Scan"; flow:established,to_server; threshold: type limit, count 2, seconds 40, track by_src; http.user_agent; content:"sqlmap"; startswith; reference:url,sqlmap.sourceforge.net; classtype:attempted-recon; sid:2008538; rev:10; metadata:affected_product Web_Server_Applications, attack_target Web_Server, created_at 2010_07_30, deployment Datacenter, confidence Medium, signature_severity Major, tag SQL_Injection, updated_at 2024_04_13, mitre_tactic_id TA0001, mitre_tactic_name Initial_Access, mitre_technique_id T1190, mitre_technique_name Exploit_Public_Facing_Application;)
+rule 2008578 alert udp $EXTERNAL_NET any -> $HOME_NET 5060 (msg:"ET SCAN Sipvicious Scan"; content:"From|3A 20 22|sipvicious"; threshold: type limit, count 1, seconds 10, track by_src; reference:url,blog.sipvicious.org; classtype:attempted-recon; sid:2008578; rev:4; metadata:created_at 2010_07_30, confidence Medium, signature_severity Informational, updated_at 2019_07_26;)
+rule 2009358 alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET SCAN Nmap Scripting Engine User-Agent Detected (Nmap Scripting Engine)"; flow:established,to_server; http.user_agent; content:"Mozilla/5.0 (compatible|3b| Nmap Scripting Engine"; nocase; startswith; classtype:web-application-attack; sid:2009358; rev:8; metadata:created_at 2010_07_30, confidence High, signature_severity Informational, updated_at 2024_04_13;)
+rule 2009361 alert http $EXTERNAL_NET any -> $HTTP_SERVERS any (msg:"ET WEB_SERVER cmd.exe In URI - Possible Command Execution Attempt"; flow:established,to_server; http.uri; content:"/cmd.exe"; nocase; classtype:attempted-recon; sid:2009361; rev:9; metadata:created_at 2010_07_30, confidence Medium, signature_severity Major, updated_at 2024_03_06;)
+rule 2009714 alert http $EXTERNAL_NET any -> $HTTP_SERVERS any (msg:"ET WEB_SERVER Script tag in URI Possible Cross Site Scripting Attempt"; flow:established,to_server; http.uri; content:"</script>"; nocase; reference:url,ha.ckers.org/xss.html; classtype:web-application-attack; sid:2009714; rev:9; metadata:affected_product Web_Server_Applications, attack_target Web_Server, created_at 2010_07_30, deployment Datacenter, confidence Medium, signature_severity Major, tag XSS, tag Cross_Site_Scripting, updated_at 2024_03_06;)
+rule 2010920 alert http $EXTERNAL_NET any -> $HTTP_SERVERS any (msg:"ET WEB_SERVER Exploit Suspected PHP Injection Attack (cmd=)"; flow:established,to_server; http.method; content:"GET"; nocase; http.uri; content:".php?"; nocase; content:"cmd="; fast_pattern; nocase; pcre:"/[&?]cmd=[^\x26\x28]*(?:cd|\;|echo|cat|perl|curl|wget|id|uname|t?ftp)/i"; reference:cve,2002-0953; classtype:web-application-attack; sid:2010920; rev:10; metadata:created_at 2010_07_30, cve CVE_2002_0953, confidence Medium, signature_severity Major, updated_at 2024_01_03;)
+rule 2011716 alert udp $EXTERNAL_NET any -> $HOME_NET 5060 (msg:"ET SCAN Sipvicious User-Agent Detected (friendly-scanner)"; content:"|0d 0a|User-Agent|3A| friendly-scanner"; threshold: type limit, track by_src, count 5, seconds 120; reference:url,code.google.com/p/sipvicious/; reference:url,blog.sipvicious.org/; classtype:attempted-recon; sid:2011716; rev:3; metadata:created_at 2010_07_30, confidence High, signature_severity Informational, updated_at 2019_07_26;)
+rule 2014939 alert dns $HOME_NET any -> any any (msg:"ET INFO DNS Query for TOR Hidden Domain .onion Accessible Via TOR"; dns.query; content:".onion"; fast_pattern; endswith; reference:url,en.wikipedia.org/wiki/.onion; classtype:policy-violation; sid:2014939; rev:5; metadata:created_at 2012_06_22, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2020_09_17;)
+rule 2016141 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Executable Download from dotted-quad Host"; flow:established,to_server; http.uri; content:".exe"; fast_pattern; endswith; nocase; http.host; content:"."; offset:1; depth:3; content:"."; within:4; content:"."; within:4; pcre:"/^(?:\d{1,3}\.){3}\d{1,3}$/"; classtype:bad-unknown; sid:2016141; rev:9; metadata:attack_target Client_and_Server, created_at 2013_01_03, deployment Perimeter, performance_impact Significant, confidence High, signature_severity Informational, updated_at 2024_04_08;)
+rule 2017398 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO IP Check Domain (icanhazip. com in HTTP Host)"; flow:established,to_server; http.host; content:"icanhazip.com"; pcre:"/^(?:\x3a\d{1,5})?$/R"; classtype:attempted-recon; sid:2017398; rev:6; metadata:created_at 2013_08_30, confidence High, signature_severity Informational, updated_at 2020_08_25;)
+rule 2017616 alert http any any -> $HOME_NET any (msg:"ET SCAN NETWORK Incoming Masscan detected"; flow:established,to_server; http.user_agent; content:"masscan/"; startswith; reference:url,blog.erratasec.com/2013/10/that-dlink-bug-masscan.html; reference:url,blog.erratasec.com/2013/09/masscan-entire-internet-in-3-minutes.html; classtype:network-scan; sid:2017616; rev:7; metadata:created_at 2013_10_18, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_04_12;)
+rule 2018581 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET MALWARE Single char EXE direct download likely trojan (multiple families)"; flow:established,to_server; http.uri; content:".exe"; nocase; fast_pattern; pcre:"/\/[a-z0-9A-Z]\.exe$/i"; classtype:trojan-activity; sid:2018581; rev:4; metadata:created_at 2014_06_18, confidence Medium, signature_severity Major, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2020_08_17;)
+rule 2019232 alert http any any -> $HTTP_SERVERS any (msg:"ET WEB_SERVER Possible CVE-2014-6271 Attempt in Headers"; flow:established,to_server; http.header; content:"|28 29 20 7b|"; fast_pattern; content:"bash|20 2d|c"; reference:url,blogs.akamai.com/2014/09/environment-bashing.html; classtype:attempted-admin; sid:2019232; rev:7; metadata:created_at 2014_09_25, cve CVE_2014_6271, confidence Medium, signature_severity Major, tag CISA_KEV, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2021_11_03, reviewed_at 2024_03_06;)
+rule 2019284 alert tcp $HTTP_SERVERS any -> $EXTERNAL_NET any (msg:"ET ATTACK_RESPONSE Output of id command from HTTP server"; flow:established; content:"uid="; pcre:"/^\d+[^\r\n\s]+/R"; content:" gid="; within:5; pcre:"/^\d+[^\r\n\s]+/R"; content:" groups="; within:8; classtype:bad-unknown; sid:2019284; rev:3; metadata:created_at 2014_09_26, confidence Medium, signature_severity Major, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2019_07_26;)
+rule 2019714 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET MALWARE Terse alphanumeric executable downloader high likelihood of being hostile"; flow:established,to_server; http.uri; content:"/"; content:".exe"; distance:1; within:8; fast_pattern; endswith; pcre:"/\/[A-Z]?[a-z]{1,3}[0-9]?\.exe$/"; http.header; content:!"koggames"; http.host; content:!"download.bitdefender.com"; endswith; content:!".appspot.com"; endswith; content:!"kaspersky.com"; endswith; content:!".sophosxl.net"; endswith; http.header_names; to_lowercase; content:!"|0d 0a|referer|0d 0a|"; nocase; classtype:bad-unknown; sid:2019714; rev:13; metadata:created_at 2014_11_15, performance_impact Significant, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_04_21;)
+rule 2020716 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO External IP Lookup ipinfo.io"; flow:established,to_server; http.host; content:"ipinfo.io"; startswith; endswith; fast_pattern; http.header_names; to_lowercase; content:!"|0d 0a|referer|0d 0a|"; classtype:external-ip-check; sid:2020716; rev:10; metadata:attack_target Client_Endpoint, created_at 2015_03_20, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, updated_at 2024_11_26, reviewed_at 2024_03_27, mitre_tactic_id TA0007, mitre_tactic_name Discovery, mitre_technique_id T1614, mitre_technique_name System_Location_Discovery;)
+rule 2021378 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO External IP Lookup - checkip.dyndns.org"; flow:established,to_server; http.host; content:"checkip.dyndns.org"; fast_pattern; startswith; endswith; classtype:external-ip-check; sid:2021378; rev:8; metadata:attack_target Client_Endpoint, created_at 2015_07_02, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, updated_at 2024_11_26, mitre_tactic_id TA0007, mitre_tactic_name Discovery, mitre_technique_id T1614, mitre_technique_name System_Location_Discovery;)
+rule 2021997 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO External IP Lookup api.ipify.org"; flow:established,to_server; urilen:1; http.method; content:"GET"; http.host; content:"api.ipify.org"; fast_pattern; reference:md5,79809fd3e05a852581b897cc4b06aa32; classtype:external-ip-check; sid:2021997; rev:6; metadata:attack_target Client_Endpoint, created_at 2015_10_23, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, updated_at 2024_11_26, mitre_tactic_id TA0007, mitre_tactic_name Discovery, mitre_technique_id T1614, mitre_technique_name System_Location_Discovery;)
+rule 2022028 alert tcp any any -> $HTTP_SERVERS $HTTP_PORTS (msg:"ET WEB_SERVER Possible CVE-2014-6271 Attempt"; flow:established,to_server; content:" HTTP/1."; pcre:"/^[^\r\n]*?HTTP\/1(?:(?!\r?\n\r?\n)[\x20-\x7e\s]){1,500}\n[\x20-\x7e]{1,100}\x3a[\x20-\x7e]{0,500}\x28\x29\x20\x7b/s"; content:"|28 29 20 7b|"; fast_pattern; reference:url,blogs.akamai.com/2014/09/environment-bashing.html; classtype:attempted-admin; sid:2022028; rev:2; metadata:created_at 2015_11_04, cve CVE_2014_6271, confidence Medium, signature_severity Major, tag CISA_KEV, updated_at 2019_10_08;)
+rule 2022642 alert dns $HOME_NET any -> any any (msg:"ET INFO DNS Query to a *.ngrok domain (ngrok.io)"; dns.query; content:".ngrok.io"; fast_pattern; endswith; nocase; classtype:misc-activity; sid:2022642; rev:7; metadata:created_at 2016_03_23, deployment Perimeter, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2023_04_28;)
+rule 2022858 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET HUNTING Suspicious BITS EXE DL From Dotted Quad"; flow:established,to_server; http.uri; content:".exe"; nocase; content:!".gvt1.com/"; http.user_agent; content:"Microsoft BITS/"; startswith; fast_pattern; http.host; content:!"download.windowsupdate.com"; content:!"download.adobe.com"; pcre:"/^(?:\d{1,3}\.){3}\d{1,3}(?:\x3a\d{1,5})?$/"; classtype:misc-activity; sid:2022858; rev:7; metadata:created_at 2016_06_03, confidence Medium, signature_severity Informational, updated_at 2024_04_13;)
+rule 2022918 alert dns $HOME_NET any -> any any (msg:"ET DYN_DNS DYNAMIC_DNS Query to *.duckdns. Domain"; dns.query; content:".duckdns."; nocase; classtype:misc-activity; sid:2022918; rev:5; metadata:created_at 2016_06_27, former_category INFO, confidence Medium, signature_severity Informational, updated_at 2024_06_11, reviewed_at 2024_04_16;)
+rule 2024897 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET USER_AGENTS Go HTTP Client User-Agent"; flow:established,to_server; http.user_agent; content:"Go-http-client"; nocase; fast_pattern; classtype:misc-activity; sid:2024897; rev:3; metadata:attack_target Client_Endpoint, created_at 2017_10_23, deployment Perimeter, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_06_13;)
+rule 2026718 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO External IP Lookup Domain (ifconfig .me)"; flow:established,to_server; http.method; content:"GET"; http.host; content:"ifconfig.me"; startswith; endswith; fast_pattern; reference:md5,52ba2e1f51d16394bf109b42c1166b74; classtype:external-ip-check; sid:2026718; rev:7; metadata:affected_product Windows_XP_Vista_7_8_10_Server_32_64_Bit, attack_target Client_Endpoint, created_at 2018_12_10, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag IP_address_lookup_website, updated_at 2024_09_19, mitre_tactic_id TA0007, mitre_tactic_name Discovery, mitre_technique_id T1614, mitre_technique_name System_Location_Discovery;)
+rule 2029054 alert http $EXTERNAL_NET any -> any any (msg:"ET SCAN Zmap User-Agent (Inbound)"; flow:established,to_server; http.user_agent; content:"Mozilla/5.0 zgrab/0.x"; startswith; endswith; classtype:network-scan; sid:2029054; rev:3; metadata:created_at 2019_11_26, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_04_13;)
+rule 2031502 alert http any any -> $HOME_NET any (msg:"ET INFO Request to Hidden Environment File - Inbound"; flow:established,to_server; http.uri; content:"/.env"; endswith; classtype:misc-activity; sid:2031502; rev:3; metadata:attack_target Web_Server, created_at 2021_01_08, deployment Perimeter, deployment SSLDecrypt, confidence Low, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2023_04_28;)
+rule 2033355 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Windows Powershell User-Agent Usage"; flow:established,to_server; http.user_agent; content:"Mozilla/"; startswith; content:") WindowsPowerShell/"; distance:0; fast_pattern; classtype:not-suspicious; sid:2033355; rev:1; metadata:attack_target Client_Endpoint, created_at 2021_07_16, deployment Perimeter, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2021_07_16;)
+rule 2034316 alert dns $HOME_NET any -> any any (msg:"ET INFO Observed DNS Query to File Transfer Service Domain (transfer .sh)"; dns.query; bsize:11; content:"transfer.sh"; nocase; classtype:bad-unknown; sid:2034316; rev:2; metadata:attack_target Client_Endpoint, created_at 2021_11_01, deployment Perimeter, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_03_26;)
+rule 2034552 alert dns $HOME_NET any -> any any (msg:"ET INFO Observed DNS Query to Commonly Abused Cloudflare Domain (trycloudflare .com)"; dns.query; dotprefix; content:".trycloudflare.com"; nocase; endswith; classtype:bad-unknown; sid:2034552; rev:1; metadata:attack_target Client_Endpoint, created_at 2021_11_29, deployment Perimeter, confidence High, signature_severity Major, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2021_11_29;)
+rule 2034647 alert http any any -> [$HOME_NET,$HTTP_SERVERS] any (msg:"ET EXPLOIT Apache log4j RCE Attempt (http ldap) (CVE-2021-44228)"; flow:established,to_server; content:"|24 7b|jndi|3a|ldap|3a 2f 2f|"; nocase; fast_pattern; reference:url,lunasec.io/docs/blog/log4j-zero-day/; reference:cve,2021-44228; classtype:attempted-admin; sid:2034647; rev:1; metadata:attack_target Server, created_at 2021_12_10, cve CVE_2021_44228, deployment Perimeter, deployment Internal, confidence High, signature_severity Major, tag Exploit, tag CISA_KEV, updated_at 2021_12_10, mitre_tactic_id TA0001, mitre_tactic_name Initial_Access, mitre_technique_id T1190, mitre_technique_name Exploit_Public_Facing_Application;)
+rule 2034649 alert tcp any any -> [$HOME_NET,$HTTP_SERVERS] any (msg:"ET EXPLOIT Apache log4j RCE Attempt (tcp ldap) (CVE-2021-44228)"; flow:established,to_server; content:"|24 7b|jndi|3a|ldap|3a 2f 2f|"; nocase; fast_pattern; reference:url,lunasec.io/docs/blog/log4j-zero-day/; reference:cve,2021-44228; classtype:attempted-admin; sid:2034649; rev:1; metadata:attack_target Server, created_at 2021_12_10, cve CVE_2021_44228, deployment Perimeter, deployment Internal, confidence High, signature_severity Major, tag Exploit, tag CISA_KEV, updated_at 2021_12_10, mitre_tactic_id TA0001, mitre_tactic_name Initial_Access, mitre_technique_id T1190, mitre_technique_name Exploit_Public_Facing_Application;)
+rule 2034661 alert tcp any any -> [$HOME_NET,$HTTP_SERVERS] any (msg:"ET HUNTING Possible Apache log4j RCE Attempt - Any Protocol TCP (CVE-2021-44228)"; flow:established,to_server; content:"|24 7b|jndi|3a|"; nocase; fast_pattern; content:"|3a 2f 2f|"; within:20; reference:cve,2021-44228; classtype:misc-activity; sid:2034661; rev:2; metadata:created_at 2021_12_11, cve CVE_2021_44228, confidence Medium, signature_severity Major, tag CISA_KEV, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_03_08;)
+rule 2034700 alert tcp any any -> [$HOME_NET,$HTTP_SERVERS] any (msg:"ET EXPLOIT Apache log4j RCE Attempt - lower/upper TCP Bypass M2 (CVE-2021-44228)"; flow:established,to_server; content:"|24 7b|jndi|3a|"; nocase; fast_pattern; pcre:"/^(l|r|d|\x24\x7b(lower|upper)\x3a(l|r|d)\x7d)(d|n|m|\x24\x7b(lower|upper)\x3a(d|n|m)\x7d)(a|i|s|\x24\x7b(lower|upper)\x3a(a|i|s)\x7d)(p|\x24\x7b(lower|upper)\x3a(p)\x7d)/Ri"; content:"|3a 2f 2f|"; distance:0; reference:cve,2021-44228; classtype:attempted-admin; sid:2034700; rev:1; metadata:attack_target Server, created_at 2021_12_14, cve CVE_2021_44228, deployment Perimeter, deployment Internal, confidence High, signature_severity Major, tag Exploit, tag CISA_KEV, updated_at 2021_12_14, mitre_tactic_id TA0001, mitre_tactic_name Initial_Access, mitre_technique_id T1190, mitre_technique_name Exploit_Public_Facing_Application;)
+rule 2035145 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET FILE_SHARING Commonly Abused File Sharing Site Domain Observed (transfer .sh in TLS SNI)"; flow:established,to_server; tls.sni; bsize:11; content:"transfer.sh"; fast_pattern; reference:url,www.ic3.gov/Media/News/2022/220204.pdf; classtype:misc-activity; sid:2035145; rev:3; metadata:created_at 2022_02_08, former_category INFO, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_06_12;)
+rule 2035464 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Observed Discord Domain (discordapp .com in TLS SNI)"; flow:established,to_server; tls.sni; dotprefix; content:".discordapp.com"; endswith; reference:md5,03f93498e1006ffa3a1f9fcb6170525a; classtype:misc-activity; sid:2035464; rev:3; metadata:created_at 2022_03_15, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2022_11_30;)
+rule 2035465 alert dns $HOME_NET any -> any any (msg:"ET INFO Observed Discord Domain in DNS Lookup (discord .com)"; dns.query; dotprefix; content:".discord.com"; endswith; reference:md5,03f93498e1006ffa3a1f9fcb6170525a; classtype:misc-activity; sid:2035465; rev:4; metadata:created_at 2022_03_15, confidence High, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2022_11_30;)
+rule 2037753 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET HUNTING GET Request to Pastebin .com with PowerShell User-Agent"; flow:established,to_server; http.method; content:"GET"; http.host; content:"pastebin.com"; endswith; http.user_agent; content:"WindowsPowerShell/5"; fast_pattern; classtype:bad-unknown; sid:2037753; rev:1; metadata:affected_product Windows_XP_Vista_7_8_10_Server_32_64_Bit, attack_target Client_Endpoint, created_at 2022_07_13, deployment Perimeter, deployment SSLDecrypt, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2022_07_13;)
+rule 2042936 alert dns $HOME_NET any -> any any (msg:"ET DYN_DNS DYNAMIC_DNS Query to a *.duckdns .org Domain"; dns.query; content:".duckdns.org"; fast_pattern; nocase; endswith; reference:url,changeip.com; classtype:bad-unknown; sid:2042936; rev:3; metadata:attack_target Client_and_Server, created_at 2022_12_15, deployment Perimeter, former_category INFO, performance_impact Low, confidence High, signature_severity Informational, updated_at 2024_06_11, mitre_tactic_id TA0011, mitre_tactic_name Command_And_Control, mitre_technique_id T1568, mitre_technique_name Dynamic_Resolution;)
+rule 2047702 alert dns $HOME_NET any -> any any (msg:"ET INFO External IP Lookup Domain (ipify .org) in DNS Lookup"; dns.query; dotprefix; content:".ipify.org"; nocase; endswith; classtype:misc-activity; sid:2047702; rev:1; metadata:affected_product Any, attack_target Client_Endpoint, created_at 2023_08_22, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag External_IP_Lookup, updated_at 2023_08_22, reviewed_at 2023_10_06, mitre_tactic_id TA0007, mitre_tactic_name Discovery, mitre_technique_id T1614, mitre_technique_name System_Location_Discovery;)
+rule 2047703 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO External IP Address Lookup Domain (ipify .org) in TLS SNI"; flow:established,to_server; tls.sni; dotprefix; content:".ipify.org"; endswith; fast_pattern; classtype:misc-activity; sid:2047703; rev:1; metadata:affected_product Any, attack_target Client_and_Server, created_at 2023_08_22, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag External_IP_Lookup, updated_at 2023_08_22, reviewed_at 2023_08_22;)
+rule 2049400 alert http $EXTERNAL_NET any -> $HTTP_SERVERS any (msg:"ET WEB_SERVER /etc/passwd Detected in URI"; flow:established,to_server; http.uri; content:"/etc/passwd"; nocase; classtype:attempted-recon; sid:2049400; rev:1; metadata:affected_product Linux, attack_target Web_Server, created_at 2023_11_29, deployment Perimeter, deployment SSLDecrypt, performance_impact Low, confidence High, signature_severity Informational, updated_at 2023_11_29;)
+rule 2058175 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET HUNTING TryCloudFlare Domain in TLS SNI"; flow:established,to_server; tls.sni; dotprefix; content:".trycloudflare.com"; endswith; reference:url,developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/; reference:url,www.proofpoint.com/uk/blog/threat-insight/threat-actor-abuses-cloudflare-tunnels-deliver-rats; classtype:misc-activity; sid:2058175; rev:1; metadata:attack_target Client_and_Server, created_at 2024_12_10, deployment Perimeter, performance_impact Low, confidence High, signature_severity Major, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2024_12_10;)
+rule 2060250 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Observed trycloudflare .com Domain in TLS SNI"; flow:established,to_server; tls.sni; dotprefix; content:".trycloudflare.com"; endswith; fast_pattern; reference:url,try.cloudflare.com/; reference:url,www.bleepingcomputer.com/news/security/hackers-abuse-free-trycloudflare-to-deliver-remote-access-malware/; classtype:misc-activity; sid:2060250; rev:1; metadata:affected_product Any, attack_target Client_and_Server, tls_state TLSEncrypt, created_at 2025_02_21, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, updated_at 2025_02_21, mitre_tactic_id TA0011, mitre_tactic_name Command_And_Control, mitre_technique_id T1665, mitre_technique_name Hide_Infrastructure;)
+rule 2060251 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Go-http-client User-Agent Observed Outbound"; flow:established,to_server; http.user_agent; content:"Go-http-client/"; nocase; fast_pattern; startswith; reference:url,go.dev/src/net/http/request.go#L545; classtype:misc-activity; sid:2060251; rev:1; metadata:affected_product Any, created_at 2025_02_21, signature_severity Unknown, updated_at 2025_02_21;)
+rule 2060503 alert dns $HOME_NET any -> any any (msg:"ET INFO Discord Chat Service Domain in DNS Lookup (discord .com)"; dns.query; bsize:11; content:"discord.com"; nocase; reference:url,discord.com/developers/docs/events/gateway; classtype:misc-activity; sid:2060503; rev:1; metadata:affected_product Any, attack_target Client_Endpoint, created_at 2025_02_28, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag Discord, tag Chat_Service, updated_at 2025_02_28, mitre_tactic_id TA0011, mitre_tactic_name Command_And_Control, mitre_technique_id T1573, mitre_technique_name Encrypted_Channel;)
+rule 2063062 alert dns $HOME_NET any -> any any (msg:"ET INFO External IP Lookup Domain (ifconfig .me) in DNS Lookup"; dns.query; dotprefix; content:".ifconfig.me"; nocase; endswith; reference:url,github.com/SigmaHQ/sigma/blob/master/rules/windows/dns_query/dns_query_win_susp_external_ip_lookup.yml; classtype:misc-activity; sid:2063062; rev:1; metadata:affected_product Any, attack_target Client_and_Server, created_at 2025_06_18, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, updated_at 2025_06_18;)
+rule 2066094 alert dns $HOME_NET any -> any any (msg:"ET INFO Network Tunneling Service in DNS Lookup (ngrok .io)"; dns.query; dotprefix; content:".ngrok.io"; nocase; endswith; reference:url,github.com/anderspitman/awesome-tunneling?tab=readme-ov-file; reference:url,github.com/BadSamuraiDev/bs-lists/blob/main/living-off-trusted-tunnels.txt; classtype:misc-activity; sid:2066094; rev:1; metadata:affected_product Any, attack_target Client_and_Server, created_at 2025_12_05, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag Network_Tunneling, updated_at 2025_12_05, mitre_tactic_id TA0011, mitre_tactic_name Command_And_Control, mitre_technique_id T1572, mitre_technique_name Protocol_Tunneling;)
+rule 2066135 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Observed Network Tunneling Service Domain (ngrok .io) in TLS SNI"; flow:established,to_server; tls.sni; dotprefix; content:".ngrok.io"; endswith; fast_pattern; reference:url,github.com/anderspitman/awesome-tunneling?tab=readme-ov-file; reference:url,github.com/BadSamuraiDev/bs-lists/blob/main/living-off-trusted-tunnels.txt; classtype:misc-activity; sid:2066135; rev:1; metadata:affected_product Any, attack_target Client_and_Server, created_at 2025_12_05, deployment Perimeter, performance_impact Low, confidence High, signature_severity Informational, tag Network_Tunneling, updated_at 2025_12_05, mitre_tactic_id TA0011, mitre_tactic_name Command_And_Control, mitre_technique_id T1572, mitre_technique_name Protocol_Tunneling;)
+rule 2071744 alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Observed WindowsPowerShell/5.1 User Agent Usage"; flow:established,to_server; http.user_agent; content:"windowspowershell/5.1"; nocase; fast_pattern; classtype:misc-activity; sid:2071744; rev:1; metadata:attack_target Client_Endpoint, tls_state TLSDecrypt, created_at 2026_08_22, deployment Perimeter, deployment SSLDecrypt, confidence High, signature_severity Informational, updated_at 2026_08_22;)
+rule 2100366 alert icmp $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL ICMP PING *NIX"; itype:8; content:"|10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F|"; depth:32; classtype:misc-activity; sid:2100366; rev:8; metadata:created_at 2010_09_23, confidence Medium, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2019_07_26;)
+rule 2100498 alert ip any any -> any any (msg:"GPL ATTACK_RESPONSE id check returned root"; content:"uid=0|28|root|29|"; classtype:bad-unknown; sid:2100498; rev:7; metadata:created_at 2010_09_23, confidence Medium, signature_severity Informational, updated_at 2019_07_26;)
+rule 2101411 alert udp $EXTERNAL_NET any -> $HOME_NET 161 (msg:"GPL SNMP public access udp"; content:"public"; fast_pattern; reference:bugtraq,2112; reference:bugtraq,4088; reference:bugtraq,4089; reference:cve,1999-0517; reference:cve,2002-0012; reference:cve,2002-0013; classtype:attempted-recon; sid:2101411; rev:13; metadata:created_at 2010_09_23, cve CVE_1999_0517, signature_severity Informational, tag Description_Generated_By_Proofpoint_Nexus, updated_at 2019_10_08;)
+rule 2101446 alert tcp $EXTERNAL_NET any -> $SMTP_SERVERS 25 (msg:"GPL SMTP vrfy root"; flow:established,to_server; content:"vrfy"; nocase; content:"root"; distance:1; nocase; pcre:"/^vrfy\s+root/smi"; classtype:attempted-recon; sid:2101446; rev:8; metadata:created_at 2010_09_23, signature_severity Unknown, updated_at 2024_03_08;)
+packet 10000000000000 4500002800010000400646910a090001c6336401a7f90050000003e8000000005002ffffcf720000 -
+packet 10000010000000 450000280001000040064691c63364010a0900010050a7f900001388000003e95012ffffbbd90000 -
+packet 10000020000000 4500002800010000400646910a090001c6336401a7f90050000003e9000013895010ffffbbda0000 -
+packet 10000100000000 450000d300010000400645e60a090001c6336401a7f90050000003e9000013895018ffff53230000474554202f20485454502f312e310d0a486f73743a206578616d706c652e636f6d0d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 10000110000000 450000280001000040064691c63364010a0900010050a7f900001389000004945010ffffbb2f0000 -
+packet 10000200000000 450000770001000040064642c63364010a0900010050a7f900001389000004945018ffffa9d50000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e68693c2f68746d6c3e -
+packet 10000210000000 4500002800010000400646910a090001c6336401a7f9005000000494000013d85010ffffbae00000 -
+packet 10000300000000 4500002800010000400646910a090001c6336401a7f9005000000494000013d85011ffffbadf0000 -
+packet 10000310000000 450000280001000040064691c63364010a0900010050a7f9000013d8000004955011ffffbade0000 -
+packet 10000320000000 4500002800010000400646910a090001c6336401a7f9005000000495000013d95010ffffbade0000 -
+packet 20000000000000 4500003900010000401146730a090002c6336402a7fa0035002543c4100201000001000000000000076578616d706c6503636f6d0000010001 -
+packet 20000010000000 450000490001000040114663c63364020a0900020035a7fa0035992c100281800001000100000000076578616d706c6503636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 30000000000000 45000028000100004006468d0a090003c6336403a7fb01bb000003e8000000005002ffffce010000 -
+packet 30000010000000 45000028000100004006468dc63364030a09000301bba7fb00001388000003e95012ffffba680000 -
+packet 30000020000000 45000028000100004006468d0a090003c6336403a7fb01bb000003e9000013895010ffffba690000 -
+packet 30000100000000 4500007200010000400646430a090003c6336403a7fb01bb000003e9000013895018ffff094c00001603010045010000410303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001400000010000e00000b6578616d706c652e636f6d -
+packet 30000110000000 45000028000100004006468dc63364030a09000301bba7fb00001389000004335010ffffba1f0000 -
+packet 30000200000000 45000059000100004006465cc63364030a09000301bba7fb00001389000004335018ffff46bc0000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 30000210000000 45000028000100004006468d0a090003c6336403a7fb01bb00000433000013ba5010ffffb9ee0000 -
+packet 30000300000000 45000028000100004006468d0a090003c6336403a7fb01bb00000433000013ba5011ffffb9ed0000 -
+packet 30000310000000 45000028000100004006468dc63364030a09000301bba7fb000013ba000004345011ffffb9ec0000 -
+packet 30000320000000 45000028000100004006468d0a090003c6336403a7fb01bb00000434000013bb5010ffffb9ec0000 -
+packet 40000000000000 45000028000100004006468b0a090004c6336404a7fc0016000003e8000000005002ffffcfa30000 -
+packet 40000010000000 45000028000100004006468bc63364040a0900040016a7fc00001388000003e95012ffffbc0a0000 -
+packet 40000020000000 45000028000100004006468b0a090004c6336404a7fc0016000003e9000013895010ffffbc0b0000 -
+packet 40000100000000 4500003d0001000040064676c63364040a0900040016a7fc00001389000003e95018fffff44500005353482d322e302d4f70656e5353485f392e360d0a -
+packet 40000110000000 45000028000100004006468b0a090004c6336404a7fc0016000003e90000139e5010ffffbbf60000 -
+packet 40000200000000 4500003d00010000400646760a090004c6336404a7fc0016000003e90000139e5018fffff43000005353482d322e302d4f70656e5353485f392e360d0a -
+packet 40000210000000 45000028000100004006468bc63364040a0900040016a7fc0000139e000003fe5010ffffbbe10000 -
+packet 40000300000000 45000028000100004006468b0a090004c6336404a7fc0016000003fe0000139e5011ffffbbe00000 -
+packet 40000310000000 45000028000100004006468bc63364040a0900040016a7fc0000139e000003ff5011ffffbbdf0000 -
+packet 40000320000000 45000028000100004006468b0a090004c6336404a7fc0016000003ff0000139f5010ffffbbdf0000 -
+packet 50000000000000 450000280001000040064688c63364050a0a0005a7fd0050000003e8000000005002ffffcf650000 -
+packet 50000010000000 4500002800010000400646880a0a0005c63364050050a7fd00001388000003e95012ffffbbcc0000 -
+packet 50000020000000 450000280001000040064688c63364050a0a0005a7fd0050000003e9000013895010ffffbbcd0000 -
+packet 50000100000000 4500008e0001000040064622c63364050a0a0005a7fd0050000003e9000013895018ffff51740000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a2073716c6d61702f312e372e3223737461626c65202868747470733a2f2f73716c6d61702e6f7267290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 50000110000000 4500002800010000400646880a0a0005c63364050050a7fd000013890000044f5010ffffbb670000 -
+packet 50000200000000 4500007700010000400646390a0a0005c63364050050a7fd000013890000044f5018ffffa4070000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 50000210000000 450000280001000040064688c63364050a0a0005a7fd00500000044f000013d85010ffffbb180000 2008538
+packet 50000300000000 450000280001000040064688c63364050a0a0005a7fd00500000044f000013d85011ffffbb170000 -
+packet 50000310000000 4500002800010000400646880a0a0005c63364050050a7fd000013d8000004505011ffffbb160000 -
+packet 50000320000000 450000280001000040064688c63364050a0a0005a7fd005000000450000013d95010ffffbb160000 -
+packet 60000000000000 450000280001000040064686c63364060a0a0006a7fe0050000003e8000000005002ffffcf620000 -
+packet 60000010000000 4500002800010000400646860a0a0006c63364060050a7fe00001388000003e95012ffffbbc90000 -
+packet 60000020000000 450000280001000040064686c63364060a0a0006a7fe0050000003e9000013895010ffffbbca0000 -
+packet 60000100000000 4500009e0001000040064610c63364060a0a0006a7fe0050000003e9000013895018ffff02eb0000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 60000110000000 4500002800010000400646860a0a0006c63364060050a7fe000013890000045f5010ffffbb540000 -
+packet 60000200000000 4500007700010000400646370a0a0006c63364060050a7fe000013890000045f5018ffffa3f40000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 60000210000000 450000280001000040064686c63364060a0a0006a7fe00500000045f000013d85010ffffbb050000 -
+packet 60000300000000 450000280001000040064686c63364060a0a0006a7fe00500000045f000013d85011ffffbb040000 -
+packet 60000310000000 4500002800010000400646860a0a0006c63364060050a7fe000013d8000004605011ffffbb030000 -
+packet 60000320000000 450000280001000040064686c63364060a0a0006a7fe005000000460000013d95010ffffbb030000 -
+packet 70000000000000 450000280001000040064684c63364070a0a0007a7ff0050000003e8000000005002ffffcf5f0000 -
+packet 70000010000000 4500002800010000400646840a0a0007c63364070050a7ff00001388000003e95012ffffbbc60000 -
+packet 70000020000000 450000280001000040064684c63364070a0a0007a7ff0050000003e9000013895010ffffbbc70000 -
+packet 70000100000000 450000b500010000400645f7c63364070a0a0007a7ff0050000003e9000013895018ffff88bd0000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e302028636f6d70617469626c653b204e6d617020536372697074696e6720456e67696e653b2068747470733a2f2f6e6d61702e6f72672f626f6f6b2f6e73652e68746d6c290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 70000110000000 4500002800010000400646840a0a0007c63364070050a7ff00001389000004765010ffffbb3a0000 -
+packet 70000200000000 4500007700010000400646350a0a0007c63364070050a7ff00001389000004765018ffffa3da0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 70000210000000 450000280001000040064684c63364070a0a0007a7ff005000000476000013d85010ffffbaeb0000 2009358
+packet 70000300000000 450000280001000040064684c63364070a0a0007a7ff005000000476000013d85011ffffbaea0000 -
+packet 70000310000000 4500002800010000400646840a0a0007c63364070050a7ff000013d8000004775011ffffbae90000 -
+packet 70000320000000 450000280001000040064684c63364070a0a0007a7ff005000000477000013d95010ffffbae90000 -
+packet 80000000000000 450000280001000040064682c63364080a0a0008a8000050000003e8000000005002ffffcf5c0000 -
+packet 80000010000000 4500002800010000400646820a0a0008c63364080050a80000001388000003e95012ffffbbc30000 -
+packet 80000020000000 450000280001000040064682c63364080a0a0008a8000050000003e9000013895010ffffbbc40000 -
+packet 80000100000000 450000a0000100004006460ac63364080a0a0008a8000050000003e9000013895018ffff080f0000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a206d61737363616e2f312e33202868747470733a2f2f6769746875622e636f6d2f726f62657274646176696467726168616d2f6d61737363616e290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 80000110000000 4500002800010000400646820a0a0008c63364080050a80000001389000004615010ffffbb4c0000 -
+packet 80000200000000 4500007700010000400646330a0a0008c63364080050a80000001389000004615018ffffa3ec0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 80000210000000 450000280001000040064682c63364080a0a0008a800005000000461000013d85010ffffbafd0000 2017616
+packet 80000300000000 450000280001000040064682c63364080a0a0008a800005000000461000013d85011ffffbafc0000 -
+packet 80000310000000 4500002800010000400646820a0a0008c63364080050a800000013d8000004625011ffffbafb0000 -
+packet 80000320000000 450000280001000040064682c63364080a0a0008a800005000000462000013d95010ffffbafb0000 -
+packet 90000000000000 450000280001000040064680c63364090a0a0009a8010050000003e8000000005002ffffcf590000 -
+packet 90000010000000 4500002800010000400646800a0a0009c63364090050a80100001388000003e95012ffffbbc00000 -
+packet 90000020000000 450000280001000040064680c63364090a0a0009a8010050000003e9000013895010ffffbbc10000 -
+packet 90000100000000 4500007b000100004006462dc63364090a0a0009a8010050000003e9000013895018ffff29660000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30207a677261622f302e780d0a4163636570743a202a2f2a0d0a0d0a -
+packet 90000110000000 4500002800010000400646800a0a0009c63364090050a801000013890000043c5010ffffbb6e0000 -
+packet 90000200000000 4500007700010000400646310a0a0009c63364090050a801000013890000043c5018ffffa40e0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 90000210000000 450000280001000040064680c63364090a0a0009a80100500000043c000013d85010ffffbb1f0000 2029054
+packet 90000300000000 450000280001000040064680c63364090a0a0009a80100500000043c000013d85011ffffbb1e0000 -
+packet 90000310000000 4500002800010000400646800a0a0009c63364090050a801000013d80000043d5011ffffbb1d0000 -
+packet 90000320000000 450000280001000040064680c63364090a0a0009a80100500000043d000013d95010ffffbb1d0000 -
+packet 100000000000000 45000028000100004006467ec633640a0a0a000aa8020050000003e8000000005002ffffcf560000 -
+packet 100000010000000 45000028000100004006467e0a0a000ac633640a0050a80200001388000003e95012ffffbbbd0000 -
+packet 100000020000000 45000028000100004006467ec633640a0a0a000aa8020050000003e9000013895010ffffbbbe0000 -
+packet 100000100000000 450000ef00010000400645b7c633640a0a0a000aa8020050000003e9000013895018ffffad450000474554202f6367692d62696e2f2e2e2f2e2e2f2e2e2f2e2e2f6574632f70617373776420485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 100000110000000 45000028000100004006467e0a0a000ac633640a0050a80200001389000004b05010ffffbaf70000 -
+packet 100000200000000 45000077000100004006462f0a0a000ac633640a0050a80200001389000004b05018ffffa3970000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 100000210000000 45000028000100004006467ec633640a0a0a000aa8020050000004b0000013d85010ffffbaa80000 2049400
+packet 100000300000000 45000028000100004006467ec633640a0a0a000aa8020050000004b0000013d85011ffffbaa70000 -
+packet 100000310000000 45000028000100004006467e0a0a000ac633640a0050a802000013d8000004b15011ffffbaa60000 -
+packet 100000320000000 45000028000100004006467ec633640a0a0a000aa8020050000004b1000013d95010ffffbaa60000 -
+packet 110000000000000 45000028000100004006467cc633640b0a0a000ba8030050000003e8000000005002ffffcf530000 -
+packet 110000010000000 45000028000100004006467c0a0a000bc633640b0050a80300001388000003e95012ffffbbba0000 -
+packet 110000020000000 45000028000100004006467cc633640b0a0a000ba8030050000003e9000013895010ffffbbbb0000 -
+packet 110000100000000 450000fa00010000400645aac633640b0a0a000ba8030050000003e9000013895018ffff35700000474554202f696e6465782e7068703f69643d31253230554e494f4e25323053454c454354253230312c322c332d2d20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 110000110000000 45000028000100004006467c0a0a000bc633640b0050a80300001389000004bb5010ffffbae90000 -
+packet 110000200000000 45000077000100004006462d0a0a000bc633640b0050a80300001389000004bb5018ffffa3890000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 110000210000000 45000028000100004006467cc633640b0a0a000ba8030050000004bb000013d85010ffffba9a0000 -
+packet 110000300000000 45000028000100004006467cc633640b0a0a000ba8030050000004bb000013d85011ffffba990000 -
+packet 110000310000000 45000028000100004006467c0a0a000bc633640b0050a803000013d8000004bc5011ffffba980000 -
+packet 110000320000000 45000028000100004006467cc633640b0a0a000ba8030050000004bc000013d95010ffffba980000 -
+packet 120000000000000 45000028000100004006467ac633640c0a0a000ca8040050000003e8000000005002ffffcf500000 -
+packet 120000010000000 45000028000100004006467a0a0a000cc633640c0050a80400001388000003e95012ffffbbb70000 -
+packet 120000020000000 45000028000100004006467ac633640c0a0a000ca8040050000003e9000013895010ffffbbb80000 -
+packet 120000100000000 4500010100010000400645a1c633640c0a0a000ca8040050000003e9000013895018ffff82200000474554202f7365617263683f713d3c7363726970743e616c65727428646f63756d656e742e636f6f6b6965293c2f7363726970743e20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 120000110000000 45000028000100004006467a0a0a000cc633640c0050a80400001389000004c25010ffffbadf0000 -
+packet 120000200000000 45000077000100004006462b0a0a000cc633640c0050a80400001389000004c25018ffffa37f0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 120000210000000 45000028000100004006467ac633640c0a0a000ca8040050000004c2000013d85010ffffba900000 2009714
+packet 120000300000000 45000028000100004006467ac633640c0a0a000ca8040050000004c2000013d85011ffffba8f0000 -
+packet 120000310000000 45000028000100004006467a0a0a000cc633640c0050a804000013d8000004c35011ffffba8e0000 -
+packet 120000320000000 45000028000100004006467ac633640c0a0a000ca8040050000004c3000013d95010ffffba8e0000 -
+packet 130000000000000 450000280001000040064678c633640d0a0a000da8050050000003e8000000005002ffffcf4d0000 -
+packet 130000010000000 4500002800010000400646780a0a000dc633640d0050a80500001388000003e95012ffffbbb40000 -
+packet 130000020000000 450000280001000040064678c633640d0a0a000da8050050000003e9000013895010ffffbbb50000 -
+packet 130000100000000 450000880001000040064618c633640d0a0a000da8050050000003e9000013895018ffff55c60000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a20247b6a6e64693a6c6461703a2f2f3139382e35312e3130302e373a313338392f617d0d0a4163636570743a202a2f2a0d0a0d0a -
+packet 130000110000000 4500002800010000400646780a0a000dc633640d0050a80500001389000004495010ffffbb550000 -
+packet 130000200000000 4500007700010000400646290a0a000dc633640d0050a80500001389000004495018ffffa3f50000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 130000210000000 450000280001000040064678c633640d0a0a000da805005000000449000013d85010ffffbb060000 2034647,2034649,2034661,2034700
+packet 130000300000000 450000280001000040064678c633640d0a0a000da805005000000449000013d85011ffffbb050000 -
+packet 130000310000000 4500002800010000400646780a0a000dc633640d0050a805000013d80000044a5011ffffbb040000 -
+packet 130000320000000 450000280001000040064678c633640d0a0a000da80500500000044a000013d95010ffffbb040000 -
+packet 140000000000000 450000280001000040064676c633640e0a0a000ea8060050000003e8000000005002ffffcf4a0000 -
+packet 140000010000000 4500002800010000400646760a0a000ec633640e0050a80600001388000003e95012ffffbbb10000 -
+packet 140000020000000 450000280001000040064676c633640e0a0a000ea8060050000003e9000013895010ffffbbb20000 -
+packet 140000100000000 45000092000100004006460cc633640e0a0a000ea8060050000003e9000013895018ffffa90c0000474554202f6367692d62696e2f746573742e63676920485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a202829207b203a3b207d3b202f62696e2f62617368202d6320276964270d0a4163636570743a202a2f2a0d0a0d0a -
+packet 140000110000000 4500002800010000400646760a0a000ec633640e0050a80600001389000004535010ffffbb480000 -
+packet 140000200000000 4500007700010000400646270a0a000ec633640e0050a80600001389000004535018ffffa3e80000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 140000210000000 450000280001000040064676c633640e0a0a000ea806005000000453000013d85010ffffbaf90000 2019232,2022028
+packet 140000300000000 450000280001000040064676c633640e0a0a000ea806005000000453000013d85011ffffbaf80000 -
+packet 140000310000000 4500002800010000400646760a0a000ec633640e0050a806000013d8000004545011ffffbaf70000 -
+packet 140000320000000 450000280001000040064676c633640e0a0a000ea806005000000454000013d95010ffffbaf70000 -
+packet 150000000000000 450000280001000040064674c633640f0a0a000fa8070050000003e8000000005002ffffcf470000 -
+packet 150000010000000 4500002800010000400646740a0a000fc633640f0050a80700001388000003e95012ffffbbae0000 -
+packet 150000020000000 450000280001000040064674c633640f0a0a000fa8070050000003e9000013895010ffffbbaf0000 -
+packet 150000100000000 450000dd00010000400645bfc633640f0a0a000fa8070050000003e9000013895018ffff3c0c0000474554202f77702d6c6f67696e2e70687020485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 150000110000000 4500002800010000400646740a0a000fc633640f0050a807000013890000049e5010ffffbafa0000 -
+packet 150000200000000 4500007700010000400646250a0a000fc633640f0050a807000013890000049e5018ffffa39a0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 150000210000000 450000280001000040064674c633640f0a0a000fa80700500000049e000013d85010ffffbaab0000 -
+packet 150000300000000 450000280001000040064674c633640f0a0a000fa80700500000049e000013d85011ffffbaaa0000 -
+packet 150000310000000 4500002800010000400646740a0a000fc633640f0050a807000013d80000049f5011ffffbaa90000 -
+packet 150000320000000 450000280001000040064674c633640f0a0a000fa80700500000049f000013d95010ffffbaa90000 -
+packet 160000000000000 450000280001000040064672c63364100a0a0010a8080050000003e8000000005002ffffcf440000 -
+packet 160000010000000 4500002800010000400646720a0a0010c63364100050a80800001388000003e95012ffffbbab0000 -
+packet 160000020000000 450000280001000040064672c63364100a0a0010a8080050000003e9000013895010ffffbbac0000 -
+packet 160000100000000 450000d500010000400645c5c63364100a0a0010a8080050000003e9000013895018fffff3880000474554202f2e656e7620485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 160000110000000 4500002800010000400646720a0a0010c63364100050a80800001389000004965010ffffbaff0000 -
+packet 160000200000000 4500007700010000400646230a0a0010c63364100050a80800001389000004965018ffffa39f0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 160000210000000 450000280001000040064672c63364100a0a0010a808005000000496000013d85010ffffbab00000 2031502
+packet 160000300000000 450000280001000040064672c63364100a0a0010a808005000000496000013d85011ffffbaaf0000 -
+packet 160000310000000 4500002800010000400646720a0a0010c63364100050a808000013d8000004975011ffffbaae0000 -
+packet 160000320000000 450000280001000040064672c63364100a0a0010a808005000000497000013d95010ffffbaae0000 -
+packet 170000000000000 450000280001000040064670c63364110a0a0011a8090050000003e8000000005002ffffcf410000 -
+packet 170000010000000 4500002800010000400646700a0a0011c63364110050a80900001388000003e95012ffffbba80000 -
+packet 170000020000000 450000280001000040064670c63364110a0a0011a8090050000003e9000013895010ffffbba90000 -
+packet 170000100000000 450000e500010000400645b3c63364110a0a0011a8090050000003e9000013895018ffff95500000474554202f7068706d7961646d696e2f696e6465782e70687020485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 170000110000000 4500002800010000400646700a0a0011c63364110050a80900001389000004a65010ffffbaec0000 -
+packet 170000200000000 4500007700010000400646210a0a0011c63364110050a80900001389000004a65018ffffa38c0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 170000210000000 450000280001000040064670c63364110a0a0011a8090050000004a6000013d85010ffffba9d0000 -
+packet 170000300000000 450000280001000040064670c63364110a0a0011a8090050000004a6000013d85011ffffba9c0000 -
+packet 170000310000000 4500002800010000400646700a0a0011c63364110050a809000013d8000004a75011ffffba9b0000 -
+packet 170000320000000 450000280001000040064670c63364110a0a0011a8090050000004a7000013d95010ffffba9b0000 -
+packet 180000000000000 45000028000100004006466ec63364120a0a0012a80a0050000003e8000000005002ffffcf3e0000 -
+packet 180000010000000 45000028000100004006466e0a0a0012c63364120050a80a00001388000003e95012ffffbba50000 -
+packet 180000020000000 45000028000100004006466ec63364120a0a0012a80a0050000003e9000013895010ffffbba60000 -
+packet 180000100000000 450000df00010000400645b7c63364120a0a0012a80a0050000003e9000013895018ffff41bf0000474554202f636d642e6578653f2f632b64697220485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 180000110000000 45000028000100004006466e0a0a0012c63364120050a80a00001389000004a05010ffffbaef0000 -
+packet 180000200000000 45000077000100004006461f0a0a0012c63364120050a80a00001389000004a05018ffffa38f0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 180000210000000 45000028000100004006466ec63364120a0a0012a80a0050000004a0000013d85010ffffbaa00000 2009361
+packet 180000300000000 45000028000100004006466ec63364120a0a0012a80a0050000004a0000013d85011ffffba9f0000 -
+packet 180000310000000 45000028000100004006466e0a0a0012c63364120050a80a000013d8000004a15011ffffba9e0000 -
+packet 180000320000000 45000028000100004006466ec63364120a0a0012a80a0050000004a1000013d95010ffffba9e0000 -
+packet 190000000000000 45000028000100004006466cc63364130a0a0013a80b0050000003e8000000005002ffffcf3b0000 -
+packet 190000010000000 45000028000100004006466c0a0a0013c63364130050a80b00001388000003e95012ffffbba20000 -
+packet 190000020000000 45000028000100004006466cc63364130a0a0013a80b0050000003e9000013895010ffffbba30000 -
+packet 190000100000000 450000fe0001000040064596c63364130a0a0013a80b0050000003e9000013895018ffffbb190000474554202f7368656c6c2e7068703f636d643d77676574253230687474703a2f2f3139382e35312e3130302e392f782e736820485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 190000110000000 45000028000100004006466c0a0a0013c63364130050a80b00001389000004bf5010ffffbacd0000 -
+packet 190000200000000 45000077000100004006461d0a0a0013c63364130050a80b00001389000004bf5018ffffa36d0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 190000210000000 45000028000100004006466cc63364130a0a0013a80b0050000004bf000013d85010ffffba7e0000 2010920
+packet 190000300000000 45000028000100004006466cc63364130a0a0013a80b0050000004bf000013d85011ffffba7d0000 -
+packet 190000310000000 45000028000100004006466c0a0a0013c63364130050a80b000013d8000004c05011ffffba7c0000 -
+packet 190000320000000 45000028000100004006466cc63364130a0a0013a80b0050000004c0000013d95010ffffba7c0000 -
+packet 200000000000000 45000028000100004006466ac63364140a0a0014a80c0050000003e8000000005002ffffcf380000 -
+packet 200000010000000 45000028000100004006466a0a0a0014c63364140050a80c00001388000003e95012ffffbb9f0000 -
+packet 200000020000000 45000028000100004006466ac63364140a0a0014a80c0050000003e9000013895010ffffbba00000 -
+packet 200000100000000 450000db00010000400645b7c63364140a0a0014a80c0050000003e9000013895018ffff3d0d0000474554202f6367692d62696e2f696420485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 200000110000000 45000028000100004006466a0a0a0014c63364140050a80c000013890000049c5010ffffbaed0000 -
+packet 200000200000000 4500009000010000400646020a0a0014c63364140050a80c000013890000049c5018fffff9350000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f706c61696e0d0a436f6e74656e742d4c656e6774683a2033390d0a0d0a7569643d3028726f6f7429206769643d3028726f6f74292067726f7570733d3028726f6f74290a -
+packet 200000210000000 45000028000100004006466ac63364140a0a0014a80c00500000049c000013f15010ffffba850000 -
+packet 200000300000000 45000028000100004006466ac63364140a0a0014a80c00500000049c000013f15011ffffba840000 -
+packet 200000310000000 45000028000100004006466a0a0a0014c63364140050a80c000013f10000049d5011ffffba830000 2019284,2100498
+packet 200000320000000 45000028000100004006466ac63364140a0a0014a80c00500000049d000013f25010ffffba830000 -
+packet 210000000000000 4500002800010000400646690a090015c6336415a80d0050000003e8000000005002ffffcf360000 -
+packet 210000010000000 450000280001000040064669c63364150a0900150050a80d00001388000003e95012ffffbb9d0000 -
+packet 210000020000000 4500002800010000400646690a090015c6336415a80d0050000003e9000013895010ffffbb9e0000 -
+packet 210000100000000 4500008000010000400646110a090015c6336415a80d0050000003e9000013895018ffff5dec0000474554202f20485454502f312e310d0a486f73743a206170692e69706966792e6f72670d0a557365722d4167656e743a20707974686f6e2d72657175657374732f322e33312e300d0a4163636570743a202a2f2a0d0a0d0a -
+packet 210000110000000 450000280001000040064669c63364150a0900150050a80d00001389000004415010ffffbb460000 -
+packet 210000200000000 45000073000100004006461ec63364150a0900150050a80d00001389000004415018ffff50960000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 210000210000000 4500002800010000400646690a090015c6336415a80d005000000441000013d45010ffffbafb0000 2021997
+packet 210000300000000 4500002800010000400646690a090015c6336415a80d005000000441000013d45011ffffbafa0000 -
+packet 210000310000000 450000280001000040064669c63364150a0900150050a80d000013d4000004425011ffffbaf90000 -
+packet 210000320000000 4500002800010000400646690a090015c6336415a80d005000000442000013d55010ffffbaf90000 -
+packet 220000000000000 4500002800010000400646670a090016c6336416a80e0050000003e8000000005002ffffcf330000 -
+packet 220000010000000 450000280001000040064667c63364160a0900160050a80e00001388000003e95012ffffbb9a0000 -
+packet 220000020000000 4500002800010000400646670a090016c6336416a80e0050000003e9000013895010ffffbb9b0000 -
+packet 220000100000000 45000074000100004006461b0a090016c6336416a80e0050000003e9000013895018fffff0060000474554202f697020485454502f312e310d0a486f73743a206966636f6e6669672e6d650d0a557365722d4167656e743a206375726c2f382e352e300d0a4163636570743a202a2f2a0d0a0d0a -
+packet 220000110000000 450000280001000040064667c63364160a0900160050a80e00001389000004355010ffffbb4f0000 -
+packet 220000200000000 45000073000100004006461cc63364160a0900160050a80e00001389000004355018ffff509f0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 220000210000000 4500002800010000400646670a090016c6336416a80e005000000435000013d45010ffffbb040000 2026718
+packet 220000300000000 4500002800010000400646670a090016c6336416a80e005000000435000013d45011ffffbb030000 -
+packet 220000310000000 450000280001000040064667c63364160a0900160050a80e000013d4000004365011ffffbb020000 -
+packet 220000320000000 4500002800010000400646670a090016c6336416a80e005000000436000013d55010ffffbb020000 -
+packet 230000000000000 4500002800010000400646650a090017c6336417a80f0050000003e8000000005002ffffcf300000 -
+packet 230000010000000 450000280001000040064665c63364170a0900170050a80f00001388000003e95012ffffbb970000 -
+packet 230000020000000 4500002800010000400646650a090017c6336417a80f0050000003e9000013895010ffffbb980000 -
+packet 230000100000000 4500007500010000400646180a090017c6336417a80f0050000003e9000013895018ffffa8380000474554202f20485454502f312e310d0a486f73743a206963616e68617a69702e636f6d0d0a557365722d4167656e743a20576765742f312e32312e340d0a4163636570743a202a2f2a0d0a0d0a -
+packet 230000110000000 450000280001000040064665c63364170a0900170050a80f00001389000004365010ffffbb4b0000 -
+packet 230000200000000 45000073000100004006461ac63364170a0900170050a80f00001389000004365018ffff509b0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 230000210000000 4500002800010000400646650a090017c6336417a80f005000000436000013d45010ffffbb000000 2017398
+packet 230000300000000 4500002800010000400646650a090017c6336417a80f005000000436000013d45011ffffbaff0000 -
+packet 230000310000000 450000280001000040064665c63364170a0900170050a80f000013d4000004375011ffffbafe0000 -
+packet 230000320000000 4500002800010000400646650a090017c6336417a80f005000000437000013d55010ffffbafe0000 -
+packet 240000000000000 4500002800010000400646630a090018c6336418a8100050000003e8000000005002ffffcf2d0000 -
+packet 240000010000000 450000280001000040064663c63364180a0900180050a81000001388000003e95012ffffbb940000 -
+packet 240000020000000 4500002800010000400646630a090018c6336418a8100050000003e9000013895010ffffbb950000 -
+packet 240000100000000 450000c600010000400645c50a090018c6336418a8100050000003e9000013895018ffffd2370000474554202f7261772f616263644546474820485454502f312e310d0a486f73743a20706173746562696e2e636f6d0d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e543b2057696e646f7773204e542031302e303b20656e2d5553292057696e646f7773506f7765725368656c6c2f352e312e31393034312e333033310d0a4163636570743a202a2f2a0d0a0d0a -
+packet 240000110000000 450000280001000040064663c63364180a0900180050a81000001389000004875010ffffbaf70000 -
+packet 240000200000000 450000730001000040064618c63364180a0900180050a81000001389000004875018ffff50470000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 240000210000000 4500002800010000400646630a090018c6336418a810005000000487000013d45010ffffbaac0000 2033355,2037753,2071744
+packet 240000300000000 4500002800010000400646630a090018c6336418a810005000000487000013d45011ffffbaab0000 -
+packet 240000310000000 450000280001000040064663c63364180a0900180050a810000013d4000004885011ffffbaaa0000 -
+packet 240000320000000 4500002800010000400646630a090018c6336418a810005000000488000013d55010ffffbaaa0000 -
+packet 250000000000000 4500002800010000400646610a090019c6336419a8110050000003e8000000005002ffffcf2a0000 -
+packet 250000010000000 450000280001000040064661c63364190a0900190050a81100001388000003e95012ffffbb910000 -
+packet 250000020000000 4500002800010000400646610a090019c6336419a8110050000003e9000013895010ffffbb920000 -
+packet 250000100000000 4500008100010000400646080a090019c6336419a8110050000003e9000013895018ffff24730000474554202f782e65786520485454502f312e310d0a486f73743a203139382e35312e3130302e34300d0a557365722d4167656e743a204d6963726f736f667420424954532f372e380d0a4163636570743a202a2f2a0d0a0d0a -
+packet 250000110000000 450000280001000040064661c63364190a0900190050a81100001389000004425010ffffbb390000 -
+packet 250000200000000 450000730001000040064616c63364190a0900190050a81100001389000004425018ffff50890000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 250000210000000 4500002800010000400646610a090019c6336419a811005000000442000013d45010ffffbaee0000 2016141,2018581,2019714,2022858
+packet 250000300000000 4500002800010000400646610a090019c6336419a811005000000442000013d45011ffffbaed0000 -
+packet 250000310000000 450000280001000040064661c63364190a0900190050a811000013d4000004435011ffffbaec0000 -
+packet 250000320000000 4500002800010000400646610a090019c6336419a811005000000443000013d55010ffffbaec0000 -
+packet 260000000000000 45000028000100004006465f0a09001ac633641aa8120050000003e8000000005002ffffcf270000 -
+packet 260000010000000 45000028000100004006465fc633641a0a09001a0050a81200001388000003e95012ffffbb8e0000 -
+packet 260000020000000 45000028000100004006465f0a09001ac633641aa8120050000003e9000013895010ffffbb8f0000 -
+packet 260000100000000 450000da00010000400645ad0a09001ac633641aa8120050000003e9000013895018fffff37b0000474554202f20485454502f312e310d0a486f73743a20636865636b69702e64796e646e732e6f72670d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 260000110000000 45000028000100004006465fc633641a0a09001a0050a812000013890000049b5010ffffbadd0000 -
+packet 260000200000000 450000730001000040064614c633641a0a09001a0050a812000013890000049b5018ffff502d0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 260000210000000 45000028000100004006465f0a09001ac633641aa81200500000049b000013d45010ffffba920000 2021378
+packet 260000300000000 45000028000100004006465f0a09001ac633641aa81200500000049b000013d45011ffffba910000 -
+packet 260000310000000 45000028000100004006465fc633641a0a09001a0050a812000013d40000049c5011ffffba900000 -
+packet 260000320000000 45000028000100004006465f0a09001ac633641aa81200500000049c000013d55010ffffba900000 -
+packet 270000000000000 45000028000100004006465d0a09001bc633641ba8130050000003e8000000005002ffffcf240000 -
+packet 270000010000000 45000028000100004006465dc633641b0a09001b0050a81300001388000003e95012ffffbb8b0000 -
+packet 270000020000000 45000028000100004006465d0a09001bc633641ba8130050000003e9000013895010ffffbb8c0000 -
+packet 270000100000000 4500007c00010000400646090a09001bc633641ba8130050000003e9000013895018ffff3d480000474554202f6a736f6e20485454502f312e310d0a486f73743a206970696e666f2e696f0d0a557365722d4167656e743a20476f2d687474702d636c69656e742f312e310d0a4163636570743a202a2f2a0d0a0d0a -
+packet 270000110000000 45000028000100004006465dc633641b0a09001b0050a813000013890000043d5010ffffbb380000 -
+packet 270000200000000 450000730001000040064612c633641b0a09001b0050a813000013890000043d5018ffff50880000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031310d0a0d0a3230332e302e3131332e35 -
+packet 270000210000000 45000028000100004006465d0a09001bc633641ba81300500000043d000013d45010ffffbaed0000 2020716,2024897,2060251
+packet 270000300000000 45000028000100004006465d0a09001bc633641ba81300500000043d000013d45011ffffbaec0000 -
+packet 270000310000000 45000028000100004006465dc633641b0a09001b0050a813000013d40000043e5011ffffbaeb0000 -
+packet 270000320000000 45000028000100004006465d0a09001bc633641ba81300500000043e000013d55010ffffbaeb0000 -
+packet 280000000000000 45000028000100004006465b0a09001cc633641ca8140050000003e8000000005002ffffcf210000 -
+packet 280000010000000 45000028000100004006465bc633641c0a09001c0050a81400001388000003e95012ffffbb880000 -
+packet 280000020000000 45000028000100004006465b0a09001cc633641ca8140050000003e9000013895010ffffbb890000 -
+packet 280000100000000 450000e000010000400645a30a09001cc633641ca8140050000003e9000013895018ffff3d4f0000474554202f7061796c6f61642e65786520485454502f312e310d0a486f73743a203139382e35312e3130302e34310d0a557365722d4167656e743a204d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3132302e30205361666172692f3533372e33360d0a4163636570743a202a2f2a0d0a0d0a -
+packet 280000110000000 45000028000100004006465bc633641c0a09001c0050a81400001389000004a15010ffffbad10000 -
+packet 280000200000000 450000df00010000400645a4c633641c0a09001c0050a81400001389000004a15018ffffc0c80000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a436f6e74656e742d4c656e6774683a203130330d0a0d0a4d5a90000300000004000000ffff0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080000000546869732070726f6772616d2063616e6e6f742062652072756e20696e20444f53206d6f64652e -
+packet 280000210000000 45000028000100004006465b0a09001cc633641ca8140050000004a1000014405010ffffba1a0000 2016141
+packet 280000300000000 45000028000100004006465b0a09001cc633641ca8140050000004a1000014405011ffffba190000 -
+packet 280000310000000 45000028000100004006465bc633641c0a09001c0050a81400001440000004a25011ffffba180000 -
+packet 280000320000000 45000028000100004006465b0a09001cc633641ca8140050000004a2000014415010ffffba180000 -
+packet 290000000000000 4500003b000100004011463b0a09001dc633641da8150035002749d4101d0100000100000000000003617069056970696679036f72670000010001 2047702
+packet 290000010000000 4500004b000100004011462bc633641d0a09001d0035a81500379f3c101d8180000100010000000003617069056970696679036f72670000010001c00c000100010000003c00045db8d822 -
+packet 300000000000000 45000039000100004011463b0a09001ec633641ea81600350025f6b4101e01000001000000000000086966636f6e666967026d650000010001 2063062
+packet 300000010000000 45000049000100004011462bc633641e0a09001e0035a81600354c1d101e81800001000100000000086966636f6e666967026d650000010001c00c000100010000003c00045db8d822 -
+packet 310000000000000 4500003b00010000401146370a09001fc633641fa817003500278fa6101f010000010000000000000461626364056e67726f6b02696f0000010001 2022642,2066094
+packet 310000010000000 4500004b0001000040114627c633641f0a09001f0035a8170037e50e101f818000010001000000000461626364056e67726f6b02696f0000010001c00c000100010000003c00045db8d822 -
+packet 320000000000000 4500003a00010000401146360a090020c6336420a81800350026928f10200100000100000000000008706173746562696e03636f6d0000010001 -
+packet 320000010000000 4500004a0001000040114626c63364200a0900200035a81800361bc410208180000100010000000008706173746562696e03636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 330000000000000 45000040000100004011462e0a090021c6336421a8190035002c388f102101000001000000000000066d79686f7374076475636b646e73036f72670000010001 2022918,2042936
+packet 330000010000000 45000050000100004011461ec63364210a0900210035a819003cc1c3102181800001000100000000066d79686f7374076475636b646e73036f72670000010001c00c000100010000003c00045db8d822 -
+packet 340000000000000 4500003900010000401146330a090022c6336422a81a00350025da97102201000001000000000000087472616e736665720273680000010001 2034316
+packet 340000010000000 450000490001000040114623c63364220a0900220035a81a00353000102281800001000100000000087472616e736665720273680000010001c00c000100010000003c00045db8d822 -
+packet 350000000000000 4500004400010000401146260a090023c6336423a81b003500306f6e102301000001000000000000106162636465666768696a6b6c6d6e6f70056f6e696f6e0000010001 2014939
+packet 350000010000000 450000540001000040114616c63364230a0900230035a81b0040f8a2102381800001000100000000106162636465666768696a6b6c6d6e6f70056f6e696f6e0000010001c00c000100010000003c00045db8d822 -
+packet 360000000000000 4500004100010000401146270a090024c6336424a81c0035002d055410240100000100000000000001780d747279636c6f7564666c61726503636f6d0000010001 2034552
+packet 360000010000000 450000510001000040114617c63364240a0900240035a81c003d5abc10248180000100010000000001780d747279636c6f7564666c61726503636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 370000000000000 45000039000100004011462d0a090025c6336425a81d00350025562910250100000100000000000007646973636f726403636f6d0000010001 2035465,2060503
+packet 370000010000000 45000049000100004011461dc63364250a0900250035a81d0035ab9110258180000100010000000007646973636f726403636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 380000000000000 45000039000100004011462b0a090026c6336426a81e003500254f2510260100000100000000000007616e796465736b03636f6d0000010001 -
+packet 380000010000000 45000049000100004011461bc63364260a0900260035a81e0035a48d10268180000100010000000007616e796465736b03636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 390000000000000 4500002800010000400646450a090027c6336427a81f01bb000003e8000000005002ffffcd950000 -
+packet 390000010000000 450000280001000040064645c63364270a09002701bba81f00001388000003e95012ffffb9fc0000 -
+packet 390000020000000 4500002800010000400646450a090027c6336427a81f01bb000003e9000013895010ffffb9fd0000 -
+packet 390000100000000 4500007400010000400645f90a090027c6336427a81f01bb000003e9000013895018ffffdc5700001603010047010000430303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001600000012001000000d6170692e69706966792e6f7267 -
+packet 390000110000000 450000280001000040064645c63364270a09002701bba81f00001389000004355010ffffb9b10000 -
+packet 390000200000000 450000590001000040064614c63364270a09002701bba81f00001389000004355018ffff464e0000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 390000210000000 4500002800010000400646450a090027c6336427a81f01bb00000435000013ba5010ffffb9800000 2047703
+packet 390000300000000 4500002800010000400646450a090027c6336427a81f01bb00000435000013ba5011ffffb97f0000 -
+packet 390000310000000 450000280001000040064645c63364270a09002701bba81f000013ba000004365011ffffb97e0000 -
+packet 390000320000000 4500002800010000400646450a090027c6336427a81f01bb00000436000013bb5010ffffb97e0000 -
+packet 400000000000000 4500002800010000400646430a090028c6336428a82001bb000003e8000000005002ffffcd920000 -
+packet 400000010000000 450000280001000040064643c63364280a09002801bba82000001388000003e95012ffffb9f90000 -
+packet 400000020000000 4500002800010000400646430a090028c6336428a82001bb000003e9000013895010ffffb9fa0000 -
+packet 400000100000000 4500007400010000400645f70a090028c6336428a82001bb000003e9000013895018ffff76da00001603010047010000430303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001600000012001000000d616263642e6e67726f6b2e696f -
+packet 400000110000000 450000280001000040064643c63364280a09002801bba82000001389000004355010ffffb9ae0000 -
+packet 400000200000000 450000590001000040064612c63364280a09002801bba82000001389000004355018ffff464b0000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 400000210000000 4500002800010000400646430a090028c6336428a82001bb00000435000013ba5010ffffb97d0000 2066135
+packet 400000300000000 4500002800010000400646430a090028c6336428a82001bb00000435000013ba5011ffffb97c0000 -
+packet 400000310000000 450000280001000040064643c63364280a09002801bba820000013ba000004365011ffffb97b0000 -
+packet 400000320000000 4500002800010000400646430a090028c6336428a82001bb00000436000013bb5010ffffb97b0000 -
+packet 410000000000000 4500002800010000400646410a090029c6336429a82101bb000003e8000000005002ffffcd8f0000 -
+packet 410000010000000 450000280001000040064641c63364290a09002901bba82100001388000003e95012ffffb9f60000 -
+packet 410000020000000 4500002800010000400646410a090029c6336429a82101bb000003e9000013895010ffffb9f70000 -
+packet 410000100000000 4500007300010000400645f60a090029c6336429a82101bb000003e9000013895018ffff7ef200001603010046010000420303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001500000011000f00000c706173746562696e2e636f6d -
+packet 410000110000000 450000280001000040064641c63364290a09002901bba82100001389000004345010ffffb9ac0000 -
+packet 410000200000000 450000590001000040064610c63364290a09002901bba82100001389000004345018ffff46490000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 410000210000000 4500002800010000400646410a090029c6336429a82101bb00000434000013ba5010ffffb97b0000 -
+packet 410000300000000 4500002800010000400646410a090029c6336429a82101bb00000434000013ba5011ffffb97a0000 -
+packet 410000310000000 450000280001000040064641c63364290a09002901bba821000013ba000004355011ffffb9790000 -
+packet 410000320000000 4500002800010000400646410a090029c6336429a82101bb00000435000013bb5010ffffb9790000 -
+packet 420000000000000 45000028000100004006463f0a09002ac633642aa82201bb000003e8000000005002ffffcd8c0000 -
+packet 420000010000000 45000028000100004006463fc633642a0a09002a01bba82200001388000003e95012ffffb9f30000 -
+packet 420000020000000 45000028000100004006463f0a09002ac633642aa82201bb000003e9000013895010ffffb9f40000 -
+packet 420000100000000 4500007a00010000400645ed0a09002ac633642aa82201bb000003e9000013895018ffff8bde0000160301004d010000490303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001c000000180016000013782e747279636c6f7564666c6172652e636f6d -
+packet 420000110000000 45000028000100004006463fc633642a0a09002a01bba822000013890000043b5010ffffb9a20000 -
+packet 420000200000000 45000059000100004006460ec633642a0a09002a01bba822000013890000043b5018ffff463f0000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 420000210000000 45000028000100004006463f0a09002ac633642aa82201bb0000043b000013ba5010ffffb9710000 2058175,2060250
+packet 420000300000000 45000028000100004006463f0a09002ac633642aa82201bb0000043b000013ba5011ffffb9700000 -
+packet 420000310000000 45000028000100004006463fc633642a0a09002a01bba822000013ba0000043c5011ffffb96f0000 -
+packet 420000320000000 45000028000100004006463f0a09002ac633642aa82201bb0000043c000013bb5010ffffb96f0000 -
+packet 430000000000000 45000028000100004006463d0a09002bc633642ba82301bb000003e8000000005002ffffcd890000 -
+packet 430000010000000 45000028000100004006463dc633642b0a09002b01bba82300001388000003e95012ffffb9f00000 -
+packet 430000020000000 45000028000100004006463d0a09002bc633642ba82301bb000003e9000013895010ffffb9f10000 -
+packet 430000100000000 4500007200010000400645f30a09002bc633642ba82301bb000003e9000013895018ffffcbfb00001603010045010000410303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001400000010000e00000b7472616e736665722e7368 -
+packet 430000110000000 45000028000100004006463dc633642b0a09002b01bba82300001389000004335010ffffb9a70000 -
+packet 430000200000000 45000059000100004006460cc633642b0a09002b01bba82300001389000004335018ffff46440000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 430000210000000 45000028000100004006463d0a09002bc633642ba82301bb00000433000013ba5010ffffb9760000 2035145
+packet 430000300000000 45000028000100004006463d0a09002bc633642ba82301bb00000433000013ba5011ffffb9750000 -
+packet 430000310000000 45000028000100004006463dc633642b0a09002b01bba823000013ba000004345011ffffb9740000 -
+packet 430000320000000 45000028000100004006463d0a09002bc633642ba82301bb00000434000013bb5010ffffb9740000 -
+packet 440000000000000 45000028000100004006463b0a09002cc633642ca82401bb000003e8000000005002ffffcd860000 -
+packet 440000010000000 45000028000100004006463bc633642c0a09002c01bba82400001388000003e95012ffffb9ed0000 -
+packet 440000020000000 45000028000100004006463b0a09002cc633642ca82401bb000003e9000013895010ffffb9ee0000 -
+packet 440000100000000 4500007900010000400645ea0a09002cc633642ca82401bb000003e9000013895018ffff6f960000160301004c010000480303000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000041301002f0100001b00000017001500001263646e2e646973636f72646170702e636f6d -
+packet 440000110000000 45000028000100004006463bc633642c0a09002c01bba824000013890000043a5010ffffb99d0000 -
+packet 440000200000000 45000059000100004006460ac633642c0a09002c01bba824000013890000043a5018ffff463a0000160303002c020000280303202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00002f000000 -
+packet 440000210000000 45000028000100004006463b0a09002cc633642ca82401bb0000043a000013ba5010ffffb96c0000 2035464
+packet 440000300000000 45000028000100004006463b0a09002cc633642ca82401bb0000043a000013ba5011ffffb96b0000 -
+packet 440000310000000 45000028000100004006463bc633642c0a09002c01bba824000013ba0000043b5011ffffb96a0000 -
+packet 440000320000000 45000028000100004006463b0a09002cc633642ca82401bb0000043b000013bb5010ffffb96a0000 -
+packet 450000000000000 450000280001000040064638c633642d0a0a002da8250016000003e8000000005002ffffcf270000 -
+packet 450000010000000 4500002800010000400646380a0a002dc633642d0016a82500001388000003e95012ffffbb8e0000 -
+packet 450000020000000 450000280001000040064638c633642d0a0a002da8250016000003e9000013895010ffffbb8f0000 -
+packet 450000100000000 4500003d00010000400646230a0a002dc633642d0016a82500001389000003e95018fffff3c900005353482d322e302d4f70656e5353485f392e360d0a -
+packet 450000110000000 450000280001000040064638c633642d0a0a002da8250016000003e90000139e5010ffffbb7a0000 -
+packet 450000200000000 4500003e0001000040064622c633642d0a0a002da8250016000003e90000139e5018ffffb29100005353482d322e302d6c69627373685f302e392e360d0a -
+packet 450000210000000 4500002800010000400646380a0a002dc633642d0016a8250000139e000003ff5010ffffbb640000 -
+packet 450000300000000 450000280001000040064638c633642d0a0a002da8250016000003ff0000139e5011ffffbb630000 -
+packet 450000310000000 4500002800010000400646380a0a002dc633642d0016a8250000139e000004005011ffffbb620000 -
+packet 450000320000000 450000280001000040064638c633642d0a0a002da8250016000004000000139f5010ffffbb620000 -
+packet 460000000000000 450000280001000040064636c633642e0a0a002ea8260015000003e8000000005002ffffcf250000 -
+packet 460000010000000 4500002800010000400646360a0a002ec633642e0015a82600001388000003e95012ffffbb8c0000 -
+packet 460000020000000 450000280001000040064636c633642e0a0a002ea8260015000003e9000013895010ffffbb8d0000 -
+packet 460000100000000 4500003700010000400646270a0a002ec633642e0015a82600001389000003e95018ffff6bd80000323230204654502072656164790d0a -
+packet 460000110000000 450000280001000040064636c633642e0a0a002ea8260015000003e9000013985010ffffbb7e0000 -
+packet 460000200000000 45000033000100004006462bc633642e0a0a002ea8260015000003e9000013985018ffff12d700005553455220726f6f740d0a -
+packet 460000210000000 4500002800010000400646360a0a002ec633642e0015a82600001398000003f45010ffffbb730000 -
+packet 460000300000000 4500003600010000400646280a0a002ec633642e0015a82600001398000003f45018ffff7c5700003333312070617373776f72640d0a -
+packet 460000310000000 450000280001000040064636c633642e0a0a002ea8260015000003f4000013a65010ffffbb650000 -
+packet 460000400000000 45000033000100004006462bc633642e0a0a002ea8260015000003f4000013a65018ffff09cf00005041535320726f6f740d0a -
+packet 460000410000000 4500002800010000400646360a0a002ec633642e0015a826000013a6000003ff5010ffffbb5a0000 -
+packet 460000500000000 45000030000100004006462e0a0a002ec633642e0015a826000013a6000003ff5018ffffda7d0000353330206e6f0d0a -
+packet 460000510000000 450000280001000040064636c633642e0a0a002ea8260015000003ff000013ae5010ffffbb520000 -
+packet 460000600000000 450000280001000040064636c633642e0a0a002ea8260015000003ff000013ae5011ffffbb510000 -
+packet 460000610000000 4500002800010000400646360a0a002ec633642e0015a826000013ae000004005011ffffbb500000 -
+packet 460000620000000 450000280001000040064636c633642e0a0a002ea826001500000400000013af5010ffffbb500000 -
+packet 470000000000000 450000280001000040064634c633642f0a0a002fa8270017000003e8000000005002ffffcf200000 -
+packet 470000010000000 4500002800010000400646340a0a002fc633642f0017a82700001388000003e95012ffffbb870000 -
+packet 470000020000000 450000280001000040064634c633642f0a0a002fa8270017000003e9000013895010ffffbb880000 -
+packet 470000100000000 4500002f000100004006462d0a0a002fc633642f0017a82700001389000003e95018ffff596600006c6f67696e3a20 -
+packet 470000110000000 450000280001000040064634c633642f0a0a002fa8270017000003e9000013905010ffffbb810000 -
+packet 470000200000000 4500002e000100004006462ec633642f0a0a002fa8270017000003e9000013905018ffffcc850000726f6f740d0a -
+packet 470000210000000 4500002800010000400646340a0a002fc633642f0017a82700001390000003ef5010ffffbb7b0000 -
+packet 470000300000000 450000280001000040064634c633642f0a0a002fa8270017000003ef000013905011ffffbb7a0000 -
+packet 470000310000000 4500002800010000400646340a0a002fc633642f0017a82700001390000003f05011ffffbb790000 -
+packet 470000320000000 450000280001000040064634c633642f0a0a002fa8270017000003f0000013915010ffffbb790000 -
+packet 480000000000000 450000280001000040064632c63364300a0a0030a8280019000003e8000000005002ffffcf1b0000 -
+packet 480000010000000 4500002800010000400646320a0a0030c63364300019a82800001388000003e95012ffffbb820000 -
+packet 480000020000000 450000280001000040064632c63364300a0a0030a8280019000003e9000013895010ffffbb830000 -
+packet 480000100000000 4500003800010000400646220a0a0030c63364300019a82800001389000003e95018ffffad5e0000323230206d61696c2045534d54500d0a -
+packet 480000110000000 450000280001000040064632c63364300a0a0030a8280019000003e9000013995010ffffbb730000 -
+packet 480000200000000 45000030000100004006462ac63364300a0a0030a8280019000003e9000013995018fffffc49000045484c4f20780d0a -
+packet 480000210000000 4500002800010000400646320a0a0030c63364300019a82800001399000003f15010ffffbb6b0000 -
+packet 480000300000000 45000030000100004006462a0a0a0030c63364300019a82800001399000003f15018ffffdc900000323530206f6b0d0a -
+packet 480000310000000 450000280001000040064632c63364300a0a0030a8280019000003f1000013a15010ffffbb630000 -
+packet 480000400000000 450000330001000040064627c63364300a0a0030a8280019000003f1000013a15018ffff10b600005652465920726f6f740d0a -
+packet 480000410000000 4500002800010000400646320a0a0030c63364300019a828000013a1000003fc5010ffffbb580000 -
+packet 480000500000000 45000030000100004006462a0a0a0030c63364300019a828000013a1000003fc5018ffffda7d0000323532206f6b0d0a -
+packet 480000510000000 450000280001000040064632c63364300a0a0030a8280019000003fc000013a95010ffffbb500000 2101446
+packet 480000600000000 450000280001000040064632c63364300a0a0030a8280019000003fc000013a95011ffffbb4f0000 -
+packet 480000610000000 4500002800010000400646320a0a0030c63364300019a828000013a9000003fd5011ffffbb4e0000 -
+packet 480000620000000 450000280001000040064632c63364300a0a0030a8280019000003fd000013aa5010ffffbb4e0000 -
+packet 490000000000000 450000280001000040064630c63364310a0a00319c400016000000000000000050020400daec0000 -
+packet 490000010000000 450000280001000040064630c63364310a0a00319c400017000000010000000050020400daea0000 -
+packet 490000020000000 450000280001000040064630c63364310a0a00319c400050000000020000000050020400dab00000 -
+packet 490000030000000 450000280001000040064630c63364310a0a00319c4001bb000000030000000050020400d9440000 -
+packet 490000040000000 450000280001000040064630c63364310a0a00319c4001bd000000040000000050020400d9410000 -
+packet 490000050000000 450000280001000040064630c63364310a0a00319c400d3d000000050000000050020400cdc00000 -
+packet 500000000000000 4500004c000100004001460fc63364320a0a00320800a2944242000000f1536500000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637 2100366
+packet 500000010000000 4500003c000100004001461fc63364320a0a003208000b19424200016162636465666768696a6b6c6d6e6f7071727374757677616263646566676869 -
+packet 510000000000000 450000480001000040114601c63364330a0a00339c4000a10034545d302902010104067075626c6963a01c0204000000010201000201003010300e060a2b06010201010100000500 2101411
+packet 510000010000000 4500007a00010000401145cfc63364330a0a00339c41076c0066db244d2d534541524348202a20485454502f312e310d0a484f53543a203233392e3235352e3235352e3235303a313930300d0a4d414e3a2022737364703a646973636f766572220d0a4d583a20310d0a53543a20737364703a616c6c0d0a0d0a -
+packet 510000020000000 450000a300010000401145a6c63364330a0a00339c4213c4008f0ba94f5054494f4e53207369703a3130304031302e31302e302e31205349502f322e300d0a5669613a205349502f322e302f554450203139382e35312e3130302e310d0a46726f6d3a2022736970766963696f7573223c7369703a31303040312e312e312e313e0d0a557365722d4167656e743a20667269656e646c792d7363616e6e65720d0a0d0a 2008578,2011716
+packet 520000000000000 45000028000100004006462ac63364340a0a0034a028001600000000000000005002ffffdafe0000 -
+packet 520000500000000 45000028000100004006462ac63364340a0a0034a029001600000001000000005002ffffdafc0000 -
+packet 520001000000000 45000028000100004006462ac63364340a0a0034a02a001600000002000000005002ffffdafa0000 -
+packet 520001500000000 45000028000100004006462ac63364340a0a0034a02b001600000003000000005002ffffdaf80000 -
+packet 520002000000000 45000028000100004006462ac63364340a0a0034a02c001600000004000000005002ffffdaf60000 2001219
+packet 520002500000000 45000028000100004006462ac63364340a0a0034a02d001600000005000000005002ffffdaf40000 -
+packet 530000000000000 450000280001000040064628c63364350a0a0035a82d0050000003e8000000005002ffffced50000 -
+packet 530000010000000 4500002800010000400646280a0a0035c63364350050a82d00001388000003e95012ffffbb3c0000 -
+packet 530000020000000 450000280001000040064628c63364350a0a0035a82d0050000003e9000013895010ffffbb3d0000 -
+packet 530000100000000 4500009e00010000400645b2c63364350a0a0035a82d0050000003e9000013895018ffff025e0000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530000110000000 4500002800010000400646280a0a0035c63364350050a82d000013890000045f5010ffffbac70000 -
+packet 530000200000000 4500007700010000400645d90a0a0035c63364350050a82d000013890000045f5018ffffa3670000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530000210000000 450000280001000040064628c63364350a0a0035a82d00500000045f000013d85010ffffba780000 -
+packet 530000300000000 4500009e00010000400645b2c63364350a0a0035a82d00500000045f000013d85018ffff01990000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530000310000000 4500002800010000400646280a0a0035c63364350050a82d000013d8000004d55010ffffba020000 -
+packet 530000400000000 4500007700010000400645d90a0a0035c63364350050a82d000013d8000004d55018ffffa2a20000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530000410000000 450000280001000040064628c63364350a0a0035a82d0050000004d5000014275010ffffb9b30000 -
+packet 530000500000000 4500009e00010000400645b2c63364350a0a0035a82d0050000004d5000014275018ffff00d40000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530000510000000 4500002800010000400646280a0a0035c63364350050a82d000014270000054b5010ffffb93d0000 -
+packet 530000600000000 4500007700010000400645d90a0a0035c63364350050a82d000014270000054b5018ffffa1dd0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530000610000000 450000280001000040064628c63364350a0a0035a82d00500000054b000014765010ffffb8ee0000 -
+packet 530000700000000 4500009e00010000400645b2c63364350a0a0035a82d00500000054b000014765018ffff000f0000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530000710000000 4500002800010000400646280a0a0035c63364350050a82d00001476000005c15010ffffb8780000 -
+packet 530000800000000 4500007700010000400645d90a0a0035c63364350050a82d00001476000005c15018ffffa1180000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530000810000000 450000280001000040064628c63364350a0a0035a82d0050000005c1000014c55010ffffb8290000 -
+packet 530000900000000 4500009e00010000400645b2c63364350a0a0035a82d0050000005c1000014c55018ffffff490000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530000910000000 4500002800010000400646280a0a0035c63364350050a82d000014c5000006375010ffffb7b30000 -
+packet 530001000000000 4500007700010000400645d90a0a0035c63364350050a82d000014c5000006375018ffffa0530000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530001010000000 450000280001000040064628c63364350a0a0035a82d005000000637000015145010ffffb7640000 2002677
+packet 530001100000000 4500009e00010000400645b2c63364350a0a0035a82d005000000637000015145018fffffe840000474554202f20485454502f312e310d0a486f73743a2031302e31302e302e310d0a557365722d4167656e743a204d6f7a696c6c612f352e303020284e696b746f2f322e312e3629202845766173696f6e733a4e6f6e65292028546573743a303030303031290d0a4163636570743a202a2f2a0d0a0d0a -
+packet 530001110000000 4500002800010000400646280a0a0035c63364350050a82d00001514000006ad5010ffffb6ee0000 -
+packet 530001200000000 4500007700010000400645d90a0a0035c63364350050a82d00001514000006ad5018ffff9f8e0000485454502f312e3120323030204f4b0d0a436f6e74656e742d547970653a20746578742f68746d6c0d0a436f6e74656e742d4c656e6774683a2031350d0a0d0a3c68746d6c3e6e6f3c2f68746d6c3e -
+packet 530001210000000 450000280001000040064628c63364350a0a0035a82d0050000006ad000015635010ffffb69f0000 -
+packet 530001300000000 450000280001000040064628c63364350a0a0035a82d0050000006ad000015635011ffffb69e0000 -
+packet 530001310000000 4500002800010000400646280a0a0035c63364350050a82d00001563000006ae5011ffffb69d0000 -
+packet 530001320000000 450000280001000040064628c63364350a0a0035a82d0050000006ae000015645010ffffb69d0000 -
+end 1 -
+end 2 -
+end 3 -
+end 4 -
+end 5 -
+end 6 -
+end 7 -
+end 8 -
+end 9 -
+end 10 -
+end 11 -
+end 12 -
+end 13 -
+end 14 -
+end 15 -
+end 16 -
+end 17 -
+end 18 -
+end 19 -
+end 20 -
+end 21 -
+end 22 -
+end 23 -
+end 24 -
+end 25 -
+end 26 -
+end 27 -
+end 28 -
+end 29 -
+end 30 -
+end 31 -
+end 32 -
+end 33 -
+end 34 -
+end 35 -
+end 36 -
+end 37 -
+end 38 -
+end 39 -
+end 40 -
+end 41 -
+end 42 -
+end 43 -
+end 44 -
+end 45 -
+end 46 -
+end 47 -
+end 48 -
+end 49 -
+end 50 -
+end 51 -
+end 52 -
+end 53 -

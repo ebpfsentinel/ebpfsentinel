@@ -25,6 +25,7 @@ const HTTP: &str = include_str!("../../tests/fixtures/suricata/http-verdicts.txt
 const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt");
 const DATASETS: &str = include_str!("../../tests/fixtures/suricata/dataset-verdicts.txt");
 const IPREP: &str = include_str!("../../tests/fixtures/suricata/iprep-verdicts.txt");
+const ET: &str = include_str!("../../tests/fixtures/suricata/et-verdicts.txt");
 const TLS: &str = include_str!("../../tests/fixtures/suricata/tls-verdicts.txt");
 const WINDOWS: &str = include_str!("../../tests/fixtures/suricata/windows-verdicts.txt");
 const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payload-verdicts.txt");
@@ -54,6 +55,9 @@ struct Packet {
 }
 
 fn with_sid(rule: &str, sid: u32) -> String {
+    if rule.contains(&format!("sid:{sid};")) {
+        return rule.to_string();
+    }
     let close = rule.rfind(')').expect("a rule ends with its option list");
     format!("{} sid:{sid};)", &rule[..close])
 }
@@ -289,6 +293,70 @@ fn iprep_rules_alert_on_the_packets_suricata_alerts_on() {
     replay(IPREP, 15);
 }
 
+/// Emerging Threats Open, run whole by Suricata over hostile and benign
+/// conversations: the rules that alerted, and those setting the flowbits
+/// they read, alert here on the same packets, and nothing else does.
+#[test]
+fn emerging_threats_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(ET, 300);
+}
+
+/// The whole of Emerging Threats Open as the directory `ET_OPEN_RULES` holds
+/// it: at least 99 rules in 100 compile, and over the conversations Suricata
+/// was run on with that same ruleset, in `ET_OPEN_VERDICTS` (the committed
+/// fixture without it), the rules alerting here are the rules that alerted
+/// there. The ruleset changes every day, so the job running this writes both
+/// from one download.
+#[test]
+#[ignore = "needs ET_OPEN_RULES, the rules directory of an Emerging Threats Open download"]
+fn the_whole_emerging_threats_ruleset_loads_and_alerts_as_in_suricata() {
+    let dir = std::env::var("ET_OPEN_RULES").expect("ET_OPEN_RULES names the rules directory");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("the rules directory reads")
+        .map(|entry| entry.expect("an entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "rules"))
+        .collect();
+    files.sort();
+    let texts: Vec<(String, String)> = files
+        .iter()
+        .map(|path| {
+            let text = std::fs::read(path).expect("a ruleset reads");
+            (
+                path.display().to_string(),
+                String::from_utf8_lossy(&text).into_owned(),
+            )
+        })
+        .collect();
+    let imported = crate::ids::suricata::compile_rulesets(
+        texts
+            .iter()
+            .map(|(name, text)| (name.clone(), text.as_str())),
+        &SuricataVars::default(),
+    );
+    let total: usize = imported.rulesets.iter().map(|r| r.report.total).sum();
+    let compiled: usize = imported.rulesets.iter().map(|r| r.report.compiled).sum();
+    let mut refused: Vec<String> = imported
+        .rulesets
+        .iter()
+        .flat_map(|r| r.report.refused.iter())
+        .map(|r| format!("{:?} {}: {}", r.sid, r.keyword, r.reason))
+        .collect();
+    refused.sort();
+    println!(
+        "{compiled} of {total} rules compiled; refused:\n{}",
+        refused.join("\n")
+    );
+    assert!(
+        compiled * 100 >= total * 99,
+        "{compiled} of {total} rules compiled, below 99 in 100"
+    );
+    let verdicts = std::env::var("ET_OPEN_VERDICTS").map_or_else(
+        |_| ET.to_string(),
+        |path| std::fs::read_to_string(path).expect("the verdicts read"),
+    );
+    replay_against(&verdicts, 300, Some(imported.rules));
+}
+
 #[test]
 fn smtp_files_alert_on_the_packets_suricata_alerts_on() {
     replay(SMTP, 80);
@@ -353,10 +421,24 @@ fn vars_for(fixture: &str) -> SuricataVars {
     vars
 }
 
+/// Whether a match alerts once the rule's threshold has counted it, as the
+/// packet pipeline asks before raising an alert.
+fn past_threshold(engine: &IdsEngine, rule: &IdsRule, event: &PacketEvent) -> bool {
+    rule.threshold.is_none()
+        || engine.check_threshold_with_country(rule, event.src_addr[0], event.dst_addr[0], None)
+}
+
 /// Plays a fixture's conversations through the engine, packet by packet,
 /// then flushes every flow, and compares what alerted with what Suricata
 /// alerted on.
 fn replay(fixture: &str, at_least: usize) {
+    replay_against(fixture, at_least, None);
+}
+
+/// As `replay`, with `corpus` the rules loaded in place of the fixture's own
+/// when it is given; the fixture's rules are still held to Suricata's
+/// verdict on loading them.
+fn replay_against(fixture: &str, at_least: usize, corpus: Option<Vec<IdsRule>>) {
     let vars = vars_for(fixture);
     let mut rules: Vec<IdsRule> = Vec::new();
     let mut packets: Vec<(u64, Vec<u8>, Vec<u32>)> = Vec::new();
@@ -409,7 +491,7 @@ fn replay(fixture: &str, at_least: usize) {
 
     let mut engine = IdsEngine::new();
     engine
-        .reload(rules)
+        .reload(corpus.unwrap_or(rules))
         .expect("the engine loads the compiled rules");
     for (n, (ns, bytes, want)) in packets.iter().enumerate() {
         let decoded = IpPacket::decode(bytes).expect("the packet decodes");
@@ -419,6 +501,7 @@ fn replay(fixture: &str, at_least: usize) {
         let mut got: Vec<u32> = engine
             .evaluate_packet(&header, bytes, None)
             .into_iter()
+            .filter(|(_, rule)| past_threshold(&engine, rule, &header))
             .filter_map(|(_, rule)| rule.imported.as_ref().map(|i| i.sid))
             .collect();
         got.sort_unstable();
@@ -430,6 +513,9 @@ fn replay(fixture: &str, at_least: usize) {
     }
     let mut ended: Vec<(u8, Vec<u32>)> = ends.iter().map(|(n, _)| (*n, Vec::new())).collect();
     for (event, _, rule) in engine.flush_all() {
+        if !past_threshold(&engine, rule, &event) {
+            continue;
+        }
         let connection = event.src_addr[0].to_be_bytes()[3];
         let sid = rule.imported.as_ref().map_or(0, |i| i.sid);
         match ended.iter_mut().find(|(n, _)| *n == connection) {

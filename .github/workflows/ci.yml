@@ -101,6 +101,34 @@ jobs:
       # build it for the BPF target, so the workspace command never reaches it.
       - run: cargo test --manifest-path crates/ebpf-helpers/Cargo.toml
 
+  # ── Emerging Threats Open against Suricata ────────────────────────
+  # The ruleset changes every day, so the rules and Suricata's verdicts on
+  # them come from one download: the whole ruleset must compile at 99 rules
+  # in 100 or better, and alert on the same packets as Suricata does.
+  suricata-differential:
+    name: Emerging Threats Open against Suricata
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust-build
+      - name: Download Emerging Threats Open for Suricata 8.0
+        run: |
+          mkdir -p "$RUNNER_TEMP/et"
+          curl -fsSL https://rules.emergingthreats.net/open/suricata-8.0/emerging.rules.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/et"
+      - name: Run Suricata over the conversations with the whole ruleset
+        run: |
+          python3 crates/domain/tests/fixtures/suricata/make-et-verdicts.py \
+            --rules "$RUNNER_TEMP/et/rules" --out "$RUNNER_TEMP/et-verdicts.txt"
+      - name: Compile the ruleset and replay the same conversations
+        env:
+          ET_OPEN_RULES: ${{ runner.temp }}/et/rules
+          ET_OPEN_VERDICTS: ${{ runner.temp }}/et-verdicts.txt
+        run: >-
+          cargo test -p ebpfsentinel-domain --lib
+          the_whole_emerging_threats_ruleset -- --ignored --nocapture
+
   # ── Minimum supported Rust version ────────────────────────────────
   # Every other job builds on `stable`, so the day the workspace leans on
   # something newer than its declared `rust-version`, nothing would say so.
