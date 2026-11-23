@@ -349,13 +349,13 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "dataset",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the datasets the configuration names are loaded.",
+        support: Support::Compiled,
+        note: "Over the sets the configuration names with their type and file, or a set a rule creates empty with its type; string, md5 and sha256 sets. A rule loading a file the configuration does not name, saving a set or naming a set of addresses is refused; a set a rule fills starts empty again on reload.",
     },
     KeywordSupport {
         keyword: "datarep",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the datasets the configuration names are loaded.",
+        support: Support::Compiled,
+        note: "Over the sets the configuration names, a value without a reputation counting 0; the operators '<', '>' and '==', as Suricata 8 accepts them.",
     },
     KeywordSupport {
         keyword: "iprep",
@@ -2214,6 +2214,10 @@ fn table_row(keyword: &str) -> Option<&'static KeywordSupport> {
 pub struct SuricataVars {
     pub addresses: BTreeMap<String, String>,
     pub ports: BTreeMap<String, String>,
+    /// The sets `dataset` and `datarep` look values up in, shared by the
+    /// rules compiled with these variables.
+    #[serde(skip)]
+    pub datasets: super::dataset::Datasets,
 }
 
 impl Default for SuricataVars {
@@ -2259,7 +2263,11 @@ impl Default for SuricataVars {
         .iter()
         .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
         .collect();
-        Self { addresses, ports }
+        Self {
+            addresses,
+            ports,
+            datasets: super::dataset::Datasets::default(),
+        }
     }
 }
 
@@ -2559,10 +2567,12 @@ pub(crate) fn compile_rule_admitting(
         .parse::<u32>()
         .map_err(|_| Refused::new("sid", format!("'{}' is not a number", sid.1.trim())))?;
 
-    let inspection = super::sig::inspect::Program::compile(&signature).map_err(|mut refused| {
-        refused.sid = Some(sid);
-        refused
-    })?;
+    let inspection = super::sig::inspect::Program::compile(&signature, &vars.datasets).map_err(
+        |mut refused| {
+            refused.sid = Some(sid);
+            refused
+        },
+    )?;
     let pattern = label(&signature);
     if !pending {
         // The header's own refusals first: they say what the rule is.

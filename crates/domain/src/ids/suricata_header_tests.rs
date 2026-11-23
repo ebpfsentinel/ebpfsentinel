@@ -23,6 +23,7 @@ const STREAMS: &str = include_str!("../../tests/fixtures/suricata/stream-verdict
 const APPLAYER: &str = include_str!("../../tests/fixtures/suricata/applayer-verdicts.txt");
 const HTTP: &str = include_str!("../../tests/fixtures/suricata/http-verdicts.txt");
 const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt");
+const DATASETS: &str = include_str!("../../tests/fixtures/suricata/dataset-verdicts.txt");
 const TLS: &str = include_str!("../../tests/fixtures/suricata/tls-verdicts.txt");
 const WINDOWS: &str = include_str!("../../tests/fixtures/suricata/windows-verdicts.txt");
 const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payload-verdicts.txt");
@@ -278,6 +279,11 @@ fn dcerpc_rules_alert_on_the_packets_suricata_alerts_on() {
 }
 
 #[test]
+fn dataset_and_datarep_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(DATASETS, 15);
+}
+
+#[test]
 fn smtp_files_alert_on_the_packets_suricata_alerts_on() {
     replay(SMTP, 80);
 }
@@ -295,6 +301,22 @@ fn ssh_rules_alert_on_the_packets_suricata_alerts_on() {
 #[test]
 fn http_buffers_beside_the_payload_alert_on_the_packets_suricata_alerts_on() {
     replay(HTTP_PAYLOAD, 100);
+}
+
+/// Names a set the way the agent's configuration does, from a fixture's
+/// `set NAME TYPE FILE` line.
+fn configure(vars: &SuricataVars, name: &str, rest: &str) {
+    let (kind, file) = rest.split_once(' ').expect("a type then a file");
+    let path = format!(
+        "{}/tests/fixtures/suricata/{file}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).expect("the set's file is beside");
+    vars.datasets.configure(
+        name,
+        crate::ids::dataset::SetKind::from_name(kind).expect("a set type"),
+        Ok(&text),
+    );
 }
 
 /// Plays a fixture's conversations through the engine, packet by packet,
@@ -320,6 +342,7 @@ fn replay(fixture: &str, at_least: usize) {
             continue;
         };
         match kind {
+            "set" => configure(&vars, number, rest),
             "rule" | "refused" => {
                 let sid: u32 = number.parse().expect("sid");
                 match (

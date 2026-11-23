@@ -27,6 +27,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGE = os.environ.get("SURICATA_IMAGE", "jasonish/suricata:8.0.8")
 FIRST_SID = 7000
 EPOCH = 1_700_000_000
+# Further command line settings, set by a script reusing `verdicts`.
+EXTRA_ARGS = []
 
 spec = util.spec_from_file_location("header", os.path.join(HERE, "make-header-verdicts.py"))
 header = util.module_from_spec(spec)
@@ -189,7 +191,7 @@ def verdicts(stem, script, first_sid, rules, packets):
             ["docker", "run", "--rm", "-v", f"{work}:/w", "--entrypoint", "suricata", IMAGE,
              "-r", "/w/case.pcap", "-S", "/w/case.rules", "-l", "/w/out", "-k", "none",
              "--runmode", "single", "--set", "packet-alert-max=255",
-             "--set", "stream.reassembly.randomize-chunk-size=no"],
+             "--set", "stream.reassembly.randomize-chunk-size=no", *EXTRA_ARGS],
             capture_output=True, text=True, check=False,
         )
         log = run.stdout + run.stderr

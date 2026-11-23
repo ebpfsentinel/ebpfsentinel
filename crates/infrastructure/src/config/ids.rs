@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use domain::common::entity::RuleId;
 use domain::firewall::workload::{KubernetesMatchers, LineageMatchers, WorkloadSelector};
+use domain::ids::dataset::SetKind;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
 use domain::ids::suricata::{ImportedRulesets, SuricataVars, compile_rulesets};
 use domain::netpol::LabelSelector;
@@ -281,6 +282,12 @@ const MAX_RULESET_BYTES: u64 = 128 * 1024 * 1024;
 /// The largest number of ruleset files one import names.
 const MAX_RULESETS: usize = 256;
 
+/// The largest set file read, in bytes.
+const MAX_SET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The largest number of sets one import names.
+const MAX_SETS: usize = 1024;
+
 fn default_max_refused_share() -> f64 {
     0.5
 }
@@ -303,6 +310,24 @@ pub struct SuricataImportConfig {
     /// the one already running stays in place.
     #[serde(default = "default_max_refused_share")]
     pub max_refused_share: f64,
+
+    /// The sets `dataset` and `datarep` rules look values up in, by name:
+    /// the only set files the agent reads. A rule naming a set whose file
+    /// cannot be read is refused.
+    #[serde(default)]
+    pub datasets: BTreeMap<String, DatasetConfig>,
+}
+
+/// A set, as Suricata's `datasets` section names one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetConfig {
+    /// `string`, `md5` or `sha256`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The file of values, one per line: base64 for a string, hex for a
+    /// digest, each optionally followed by `,` and its reputation.
+    pub path: String,
 }
 
 /// Variable overrides, by name without the `$`.
@@ -340,6 +365,37 @@ impl SuricataImportConfig {
                 });
             }
         }
+        if self.datasets.len() > MAX_SETS {
+            return Err(ConfigError::Validation {
+                field: "ids.suricata.datasets".to_string(),
+                message: format!("count {} exceeds maximum {MAX_SETS}", self.datasets.len()),
+            });
+        }
+        for (name, set) in &self.datasets {
+            let field = format!("ids.suricata.datasets.{name}");
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            {
+                return Err(ConfigError::Validation {
+                    field,
+                    message: "is not a set name".to_string(),
+                });
+            }
+            if SetKind::from_name(&set.kind).is_none() {
+                return Err(ConfigError::Validation {
+                    field: format!("{field}.type"),
+                    message: format!("'{}' is not string, md5 or sha256", set.kind),
+                });
+            }
+            if set.path.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: format!("{field}.path"),
+                    message: "is empty".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -351,6 +407,18 @@ impl SuricataImportConfig {
             texts.push(read_ruleset(idx, Path::new(path))?);
         }
         let vars = SuricataVars::with_overrides(&self.vars.addresses, &self.vars.ports);
+        for (name, set) in &self.datasets {
+            let Some(kind) = SetKind::from_name(&set.kind) else {
+                continue;
+            };
+            let text = read_set(Path::new(&set.path));
+            for warning in
+                vars.datasets
+                    .configure(name, kind, text.as_deref().map_err(Clone::clone))
+            {
+                tracing::warn!(set = %name, path = %set.path, "dataset file {warning}");
+            }
+        }
         let imported = compile_rulesets(
             self.rulesets
                 .iter()
@@ -403,6 +471,19 @@ fn read_ruleset(idx: usize, path: &Path) -> Result<String, ConfigError> {
     // A ruleset is text, but a stray byte in a comment should not cost the
     // whole file, so it is read lossily and the rule holding it is refused.
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A set file's text, or why it cannot be read.
+fn read_set(path: &Path) -> Result<String, String> {
+    let unreadable = |e: std::io::Error| format!("{} cannot be read: {e}", path.display());
+    let size = std::fs::metadata(path).map_err(unreadable)?.len();
+    if size > MAX_SET_BYTES {
+        return Err(format!(
+            "{} is {size} bytes, above the {MAX_SET_BYTES} a set file may be",
+            path.display()
+        ));
+    }
+    std::fs::read_to_string(path).map_err(unreadable)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -771,6 +852,95 @@ impl IdsRuleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file under the temporary directory, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str, text: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ebpfsentinel-dataset-{}-{name}",
+                std::process::id()
+            ));
+            std::fs::write(&path, text).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> String {
+            self.0.display().to_string()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn import_with_sets(rules: &str, sets: &[(&str, &str, String)]) -> ImportedRulesets {
+        let ruleset = Scratch::new("rules", rules);
+        let config = SuricataImportConfig {
+            rulesets: vec![ruleset.path()],
+            vars: SuricataVarsConfig::default(),
+            max_refused_share: 1.0,
+            datasets: sets
+                .iter()
+                .map(|(name, kind, path)| {
+                    (
+                        (*name).to_string(),
+                        DatasetConfig {
+                            kind: (*kind).to_string(),
+                            path: path.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        config.validate().unwrap();
+        config.import().unwrap()
+    }
+
+    const DATASET_RULE: &str =
+        r#"alert dns any any -> any any (msg:"listed"; dns.query; dataset:isset,listed; sid:1;)"#;
+
+    #[test]
+    fn a_set_the_configuration_names_is_loaded_and_a_missing_one_refuses_its_rules() {
+        let values = Scratch::new("values", "ZXhhbXBsZS5jb20=\n");
+        let imported = import_with_sets(DATASET_RULE, &[("listed", "string", values.path())]);
+        assert_eq!(imported.rules.len(), 1);
+
+        let missing = std::env::temp_dir()
+            .join("ebpfsentinel-no-such-set.lst")
+            .display()
+            .to_string();
+        let imported = import_with_sets(DATASET_RULE, &[("listed", "string", missing)]);
+        assert!(imported.rules.is_empty());
+        let refused = &imported.rulesets[0].report.refused[0];
+        assert_eq!(refused.keyword, "dataset");
+        assert!(
+            refused.reason.contains("cannot be read"),
+            "{}",
+            refused.reason
+        );
+    }
+
+    #[test]
+    fn a_set_names_a_type_the_agent_reads() {
+        let config = SuricataImportConfig {
+            rulesets: Vec::new(),
+            vars: SuricataVarsConfig::default(),
+            max_refused_share: 0.5,
+            datasets: [(
+                "addresses".to_string(),
+                DatasetConfig {
+                    kind: "ipv4".to_string(),
+                    path: "/x".to_string(),
+                },
+            )]
+            .into(),
+        };
+        assert!(config.validate().unwrap_err().to_string().contains("type"));
+    }
 
     /// The API reads a threshold back with the domain's own word, so every
     /// word it can emit has to be a word this loader accepts. Otherwise a

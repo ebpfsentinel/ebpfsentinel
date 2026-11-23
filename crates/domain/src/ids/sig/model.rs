@@ -683,7 +683,6 @@ pub enum Check {
         countries: Vec<String>,
         negated: bool,
     },
-    Datarep(DatasetMatch),
     Elephant(String),
     Requires(Vec<(String, String)>),
 }

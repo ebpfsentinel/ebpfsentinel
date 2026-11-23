@@ -1,0 +1,87 @@
+# This is Suricata version 8.0.8 RELEASE, run by make-dataset-verdicts.py; do not edit by hand.
+# 'set NAME TYPE FILE': a set the configuration names, its file beside.
+set names string datasets/names.lst
+set unsets string datasets/names.lst
+set reps string datasets/reputation.lst
+set plain string datasets/names.lst
+set mixed string datasets/mixed.lst
+set latemix string datasets/late-mix.lst
+set md5s md5 datasets/md5.lst
+set shas sha256 datasets/sha256.lst
+# 'rule SID RULE', or 'refused SID RULE' when Suricata does not load it,
+# then 'packet NS HEX SIDS': the packet's time in nanoseconds, its IP
+# bytes and the sids that alerted on it, a sid once per alert, '-' for none,
+# then 'end N SIDS': what alerted when flow N was flushed at the end of
+# the capture, its last address byte being N, then 'proto N NAME': the
+# application protocol Suricata logged for flow N.
+rule 12000 alert dns any any -> any any (msg:"dataset 12000"; dns.query; dataset:isset,names;)
+rule 12001 alert dns any any -> any any (msg:"dataset 12001"; dns.query; dataset:isnotset,names;)
+rule 12002 alert dns any any -> any any (msg:"dataset 12002"; dns.query; dataset:isset,names, type string;)
+refused 12003 alert dns any any -> any any (msg:"dataset 12003"; dns.query; dataset:isset,names, type md5;)
+refused 12004 alert dns any any -> any any (msg:"dataset 12004"; dns.query; dataset:isset,nobody;)
+rule 12005 alert dns any any -> any any (msg:"dataset 12005"; dns.query; dataset:isset,later, type string;)
+rule 12006 alert dns any any -> any any (msg:"dataset 12006"; dns.query; content:"example"; dataset:set,later;)
+rule 12007 alert dns any any -> any any (msg:"dataset 12007"; dns.query; dataset:isset,later;)
+rule 12008 alert dns any any -> any any (msg:"dataset 12008"; dns.query; dataset:unset,unsets;)
+rule 12009 alert dns any any -> any any (msg:"dataset 12009"; dns.query; dataset:isset,unsets;)
+rule 12010 alert dns any any -> any any (msg:"dataset 12010"; dns.query; datarep:reps, >, 10;)
+rule 12011 alert dns any any -> any any (msg:"dataset 12011"; dns.query; datarep:reps, <, 10;)
+rule 12012 alert dns any any -> any any (msg:"dataset 12012"; dns.query; datarep:reps, ==, 5;)
+refused 12013 alert dns any any -> any any (msg:"dataset 12013"; dns.query; datarep:reps, =, 20;)
+refused 12014 alert dns any any -> any any (msg:"dataset 12014"; dns.query; datarep:reps, >=, 5;)
+refused 12015 alert dns any any -> any any (msg:"dataset 12015"; dns.query; datarep:reps, <=, 5;)
+refused 12016 alert dns any any -> any any (msg:"dataset 12016"; dns.query; datarep:reps, !=, 5;)
+rule 12017 alert dns any any -> any any (msg:"dataset 12017"; dns.query; datarep:plain, ==, 0;)
+rule 12018 alert dns any any -> any any (msg:"dataset 12018"; dns.query; dataset:isset,reps;)
+rule 12019 alert dns any any -> any any (msg:"dataset 12019"; dns.query; datarep:mixed, ==, 5;)
+rule 12020 alert dns any any -> any any (msg:"dataset 12020"; dns.query; dataset:isset,mixed;)
+rule 12021 alert dns any any -> any any (msg:"dataset 12021"; dns.query; to_md5; dataset:isset,md5s;)
+rule 12022 alert dns any any -> any any (msg:"dataset 12022"; dns.query; dataset:isset,md5s;)
+rule 12023 alert dns any any -> any any (msg:"dataset 12023"; dns.query; to_sha256; dataset:isset,shas;)
+rule 12024 alert dns any any -> any any (msg:"dataset 12024"; dns.query; dataset:isset,names, memcap 10mb, hashsize 1024;)
+rule 12025 alert dns any any -> any any (msg:"dataset 12025"; dns.query; content:"evil"; dataset:set,fresh, type sha256;)
+rule 12026 alert dns any any -> any any (msg:"dataset 12026"; dns.query; to_sha256; dataset:set,fresh2, type sha256;)
+rule 12027 alert dns any any -> any any (msg:"dataset 12027"; dns.query; to_sha256; dataset:isset,fresh2;)
+refused 12028 alert dns any any -> any any (msg:"dataset 12028"; dataset:isset,names;)
+rule 12029 alert dns any any -> any any (msg:"dataset 12029"; dns.query; dataset:isset,latemix;)
+rule 12030 alert dns any any -> any any (msg:"dataset 12030"; dns.query; dataset:isset,names, type string, load names.lst;)
+packet 10000000000000 45000039000100004011669f0a0900010a0a0001a7f90035002561bf123401000001000000000000076578616d706c6503636f6d0000010001 12000,12002,12006,12007,12008,12011,12012,12017,12018,12019,12020,12021,12023,12024,12026,12027,12030
+packet 10000010000000 45000049000100004011668f0a0a00010a0900010035a7f90035b727123481800001000100000000076578616d706c6503636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 20000000000000 45000037000100004011669f0a0900020a0a0002a7fa003500235f80123401000001000000000000046576696c04746573740000010001 12000,12002,12008,12010,12017,12018,12024,12026,12027,12030
+packet 20000010000000 45000047000100004011668f0a0a00020a0900020035a7fa0033b4e8123481800001000100000000046576696c04746573740000010001c00c000100010000003c00045db8d822 -
+packet 30000000000000 45000038000100004011669c0a0900030a0a0003a7fb003500249145123401000001000000000000054d6978656404436173650000010001 12000,12002,12008,12017,12024,12026,12027,12030
+packet 30000010000000 45000048000100004011668c0a0a00030a0900030035a7fb00341a7a123481800001000100000000054d6978656404436173650000010001c00c000100010000003c00045db8d822 -
+packet 40000000000000 45000038000100004011669a0a0900040a0a0004a7fc00350024177212340100000100000000000008756e70616464656401780000010001 12001,12026,12027
+packet 40000010000000 45000048000100004011668a0a0a00040a0900040035a7fc0034a0a612348180000100010000000008756e70616464656401780000010001c00c000100010000003c00045db8d822 -
+packet 50000000000000 4500003700010000401166990a0900050a0a0005a7fd00350023d903123401000001000000000000056f74686572036f72670000010001 12001,12026,12027
+packet 50000010000000 4500004700010000401166890a0a00050a0900050035a7fd00332e6c123481800001000100000000056f74686572036f72670000010001c00c000100010000003c00045db8d822 -
+packet 60000000000000 4500003900010000401166950a0900060a0a0006a7fe0035002561b0123401000001000000000000076578616d706c6503636f6d0000010001 12000,12002,12005,12007,12011,12012,12017,12018,12019,12020,12021,12023,12024,12027,12030
+packet 60000010000000 4500004900010000401166850a0a00060a0900060035a7fe0035b718123481800001000100000000076578616d706c6503636f6d0000010001c00c000100010000003c00045db8d822 -
+packet 70000000000000 4500003700010000401166950a0900070a0a0007a7ff00350023dff1123401000001000000000000044556494c04544553540000010001 12001,12021,12026,12027
+packet 70000010000000 4500004700010000401166850a0a00070a0900070035a7ff0033355a123481800001000100000000044556494c04544553540000010001c00c000100010000003c00045db8d822 -
+packet 80000000000000 4500003700010000401166930a0900080a0a0008a80000350023efed123401000001000000000000056166746572036d69780000010001 12001,12026,12027
+packet 80000010000000 4500004700010000401166830a0a00080a0900080035a80000334556123481800001000100000000056166746572036d69780000010001c00c000100010000003c00045db8d822 -
+packet 90000000000000 4500003700010000401166910a0900090a0a0009a80100350023ee09123401000001000000000000036261640573636f72650000010001 12001,12026,12027
+packet 90000010000000 4500004700010000401166810a0a00090a0900090035a80100334372123481800001000100000000036261640573636f72650000010001c00c000100010000003c00045db8d822 -
+packet 100000000000000 45000038000100004011668e0a09000a0a0a000aa8020035002490f0123401000001000000000000056d6978656404636173650000010001 12001,12026,12027
+packet 100000010000000 45000048000100004011667e0a0a000a0a09000a0035a80200341a25123481800001000100000000056d6978656404636173650000010001c00c000100010000003c00045db8d822 -
+end 1 -
+end 2 -
+end 3 -
+end 4 -
+end 5 -
+end 6 -
+end 7 -
+end 8 -
+end 9 -
+end 10 -
+proto 1 dns
+proto 2 dns
+proto 3 dns
+proto 4 dns
+proto 5 dns
+proto 6 dns
+proto 7 dns
+proto 8 dns
+proto 9 dns
+proto 10 dns

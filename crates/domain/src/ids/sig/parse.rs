@@ -1774,7 +1774,13 @@ fn parse_dataset(k: &str, value: &str, reputation: bool) -> Compiled<DatasetMatc
         let [name, op, score, rest @ ..] = args.as_slice() else {
             return Err(bad(k, "is not 'name, operator, value'"));
         };
-        if !matches!(*op, "<" | ">" | "==" | "=" | "<=" | ">=" | "!=") {
+        if matches!(*op, "=" | "<=" | ">=" | "!=") {
+            return Err(bad(
+                k,
+                format!("operator '{op}' is not supported by Suricata"),
+            ));
+        }
+        if !matches!(*op, "<" | ">" | "==") {
             return Err(bad(k, format!("'{op}' is not an operator")));
         }
         number(score).map_err(|e| bad(k, e))?;

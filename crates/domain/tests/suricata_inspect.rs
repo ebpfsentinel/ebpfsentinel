@@ -68,7 +68,8 @@ fn program(case: &Case) -> Result<Program, String> {
     );
     let signature = parse_signature(&text, &SuricataVars::default())
         .map_err(|r| format!("{}: {}", r.keyword, r.reason))?;
-    Program::compile(&signature).map_err(|r| format!("{}: {}", r.keyword, r.reason))
+    Program::compile(&signature, &domain::ids::dataset::Datasets::default())
+        .map_err(|r| format!("{}: {}", r.keyword, r.reason))
 }
 
 #[test]

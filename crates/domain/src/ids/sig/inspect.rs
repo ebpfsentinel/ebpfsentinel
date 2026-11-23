@@ -24,6 +24,7 @@ use super::model::{
     RuleProto, Signature, StreamSide, TcpFlags, TcpFlagsMode, Transform, Value,
 };
 use crate::ids::applayer::{AppProto, AppView};
+use crate::ids::dataset::{Command, Datasets, SetRef};
 use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
@@ -972,6 +973,8 @@ enum Op {
         value: FloatMatch,
     },
     Base64(Base64Decode),
+    /// A `dataset` or `datarep` lookup of the whole buffer.
+    Dataset(SetRef, Command),
 }
 
 impl Op {
@@ -985,7 +988,7 @@ impl Op {
             | Self::ByteExtract { at, .. }
             | Self::ByteMath { at, .. } => at.read.relative,
             Self::Base64(b) => b.relative,
-            Self::Bsize(_) | Self::Entropy { .. } => false,
+            Self::Bsize(_) | Self::Entropy { .. } | Self::Dataset(..) => false,
         }
     }
 }
@@ -1160,7 +1163,7 @@ impl Program {
     ///
     /// Refuses a match this engine does not run, a variable read before a
     /// match sets it, and a pcre or transform argument PCRE2 rejects.
-    pub fn compile(signature: &Signature) -> Compiled<Self> {
+    pub fn compile(signature: &Signature, datasets: &Datasets) -> Compiled<Self> {
         let mut names: HashMap<String, usize> = HashMap::new();
         let mut vars = Vec::new();
         let mut lists = Vec::new();
@@ -1178,7 +1181,7 @@ impl Program {
             check_case(&list.transforms, &list.matches)?;
             let mut ops = Vec::new();
             for m in &list.matches {
-                ops.push(compile_match(m, &mut names, &mut vars)?);
+                ops.push(compile_match(m, &mut names, &mut vars, datasets)?);
             }
             let cursor_after = (0..ops.len())
                 .map(|i| ops[i + 1..].iter().any(Op::reads_cursor))
@@ -1616,6 +1619,9 @@ impl Program {
                 float_matches(value, entropy(&buf.bytes[start..end]))
                     && self.step(li, oi + 1, cursor, buf, run)
             }
+            Op::Dataset(set, command) => {
+                set.run(*command, buf.bytes) && self.step(li, oi + 1, cursor, buf, run)
+            }
             Op::Base64(decode) => {
                 let start = if decode.relative { cursor } else { 0 }
                     .saturating_add(usize::try_from(decode.offset).unwrap_or(usize::MAX));
@@ -1802,7 +1808,7 @@ fn float_matches(m: &FloatMatch, v: f64) -> bool {
     }
 }
 
-fn sextet(c: u8) -> Option<u8> {
+pub(crate) fn sextet(c: u8) -> Option<u8> {
     match c {
         b'A'..=b'Z' => Some(c - b'A'),
         b'a'..=b'z' => Some(c - b'a' + 26),
@@ -1816,7 +1822,7 @@ fn sextet(c: u8) -> Option<u8> {
 /// Base64 decoding as Suricata's keywords do it: padding optional, a last
 /// partial group decoded, the input ending at `=`. A character outside the
 /// alphabet ends it too, or is skipped when `skip_invalid` (RFC 2045).
-fn base64(input: &[u8], skip_invalid: bool) -> Vec<u8> {
+pub(crate) fn base64(input: &[u8], skip_invalid: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len() / 4 * 3 + 2);
     let mut acc: u32 = 0;
     let mut bits = 0;
@@ -2262,6 +2268,7 @@ fn compile_match(
     m: &Match,
     names: &mut HashMap<String, usize>,
     vars: &mut Vec<(bool, String)>,
+    datasets: &Datasets,
 ) -> Compiled<Op> {
     Ok(match m {
         Match::Content(c) => Op::Content(compile_content(c, names)?),
@@ -2327,10 +2334,10 @@ fn compile_match(
             return Err(refused("absent", "is not run by the inspection engine"));
         }
         Match::Dataset(d) => {
-            return Err(refused(
-                d.keyword.clone(),
-                "is not run by the inspection engine",
-            ));
+            let (set, command) = datasets
+                .resolve(d)
+                .map_err(|reason| refused(d.keyword.clone(), reason))?;
+            Op::Dataset(set, command)
         }
         Match::Field { keyword, .. } => {
             return Err(refused(
@@ -2350,7 +2357,7 @@ mod tests {
         let signature =
             super::super::parse_signature(&text, &crate::ids::suricata::SuricataVars::default())
                 .expect("parses");
-        Program::compile(&signature)
+        Program::compile(&signature, &crate::ids::dataset::Datasets::default())
             .expect("compiles")
             .fast_pattern()
             .cloned()
