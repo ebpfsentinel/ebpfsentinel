@@ -1159,23 +1159,23 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "ssh.proto",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+        support: Support::Compiled,
+        note: "The protocol version of a side's identification string, between its first two hyphens. Read over TCP, once the side's first line is whole.",
     },
     KeywordSupport {
         keyword: "ssh_proto",
-        support: Support::Pending,
-        note: "The older name of `ssh.proto`. Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+        support: Support::Compiled,
+        note: "The older name of `ssh.proto`, read alike.",
     },
     KeywordSupport {
         keyword: "ssh.software",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+        support: Support::Compiled,
+        note: "The software version of a side's identification string, up to its first space: the comments are not part of it. Read over TCP, once the side's first line is whole.",
     },
     KeywordSupport {
         keyword: "ssh_software",
-        support: Support::Pending,
-        note: "The older name of `ssh.software`. Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+        support: Support::Compiled,
+        note: "The older name of `ssh.software`, read alike.",
     },
     KeywordSupport {
         keyword: "ssh.hassh",
@@ -3073,7 +3073,8 @@ fn check_flow(value: &str) -> Compiled<()> {
 }
 
 /// Decode a content value: `|41 42|` sections are hex bytes, a backslash
-/// escapes the next character, and the rest is literal.
+/// escapes a backslash, a quote, a semicolon or a colon, and the rest is
+/// literal.
 pub(crate) fn decode_content(value: &str) -> Compiled<Vec<u8>> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut hex = false;
@@ -3113,6 +3114,14 @@ pub(crate) fn decode_content(value: &str) -> Compiled<Vec<u8>> {
                 let next = chars
                     .next()
                     .ok_or_else(|| Refused::new("content", "ends on an escape"))?;
+                if !matches!(next, '\\' | '"' | ';' | ':') {
+                    return Err(Refused::new(
+                        "content",
+                        format!(
+                            "escapes '{next}', where Suricata escapes only a backslash, a quote, a semicolon and a colon"
+                        ),
+                    ));
+                }
                 push_char(&mut bytes, next);
             }
             c => push_char(&mut bytes, c),
@@ -3417,6 +3426,17 @@ mod tests {
         // SMB past depth 8 does not anchor the chain.
         let late = b"0123456789SMB powershell -w hidden";
         assert!(!said(&engine, &to_smb, late));
+    }
+
+    #[test]
+    fn a_content_escapes_only_what_suricata_escapes() {
+        assert_eq!(
+            decode_content(r#"a\\\"\;\:b"#).ok(),
+            Some(br#"a\";:b"#.to_vec())
+        );
+        for value in [r"a\rb", r"a\nb", r"a\x41", r"a\|b", r"a\ b"] {
+            assert!(decode_content(value).is_err(), "{value}");
+        }
     }
 
     #[test]

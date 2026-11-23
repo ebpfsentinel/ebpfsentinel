@@ -146,6 +146,7 @@ const RESPONSE_ONLY: &[&str] = &[
 fn transaction_buffer(name: &str) -> bool {
     name == "file.data"
         || is_dcerpc(name)
+        || is_ssh(name)
         || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns" | "tls"))
 }
 
@@ -208,14 +209,75 @@ fn dcerpc_transaction(
             "is not yet read beside a packet header keyword",
         ));
     }
-    let flow = &signature.flow;
-    Ok(Some(if flow.to_server {
+    Ok(Some(sides(&signature.flow)))
+}
+
+/// The request's side under `flow:to_server`, the response's under
+/// `flow:to_client`, else both.
+fn sides(flow: &FlowMatch) -> [bool; 2] {
+    if flow.to_server {
         [true, false]
     } else if flow.to_client {
         [false, true]
     } else {
         [true, true]
-    }))
+    }
+}
+
+/// Whether a sticky buffer reads an SSH identification string.
+fn is_ssh(name: &str) -> bool {
+    matches!(name, "ssh.proto" | "ssh.software")
+}
+
+/// The sides a rule reading SSH identification strings is inspected on:
+/// the client's under `flow:to_server`, the server's under
+/// `flow:to_client`, else both. Suricata loads such a rule on `ssh` and the
+/// transport protocols.
+fn ssh_transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    names: &[&'static str],
+    keywords: &[&'static str],
+    first: &'static str,
+) -> Compiled<Option<[bool; 2]>> {
+    if let Some(other) = names.iter().chain(keywords).find(|n| !is_ssh(n)) {
+        return Err(refused(
+            *other,
+            "is a buffer of another protocol beside an SSH one, which no transaction holds together",
+        ));
+    }
+    match &signature.header.proto {
+        RuleProto::App(name) if name != "ssh" => {
+            return Err(refused(
+                first,
+                format!("is an SSH buffer, which Suricata refuses on {name}"),
+            ));
+        }
+        RuleProto::App(_) | RuleProto::Ip | RuleProto::Ipv4 | RuleProto::Ipv6 | RuleProto::Tcp => {}
+        _ => {
+            return Err(refused(
+                first,
+                "is read on SSH over TCP, not with this rule protocol",
+            ));
+        }
+    }
+    if lists
+        .iter()
+        .any(|l| matches!(l.source, Source::Sticky(name) if !is_ssh(name)))
+    {
+        return Err(refused(
+            first,
+            "is not yet read beside a buffer of another protocol",
+        ));
+    }
+    if !headers.is_empty() {
+        return Err(refused(
+            first,
+            "is not yet read beside a packet header keyword",
+        ));
+    }
+    Ok(Some(sides(&signature.flow)))
 }
 
 /// Whether a sticky buffer or a field keyword belongs to TLS.
@@ -437,13 +499,7 @@ fn tls_transaction(
     }))
 }
 
-/// The transaction sides a rule reading HTTP buffers is inspected on,
-/// request then response, or `None` for a rule reading none. Suricata
-/// refuses a rule mixing request and response buffers, a request buffer
-/// with `flow:to_client`, a response buffer with `flow:to_server` (but for
-/// the response body, which it then inspects on the response), the raw
-/// header without a direction, and a host matched on uppercase letters.
-/// A transaction rule read on TLS, DCE/RPC or DNS, when it is one.
+/// A transaction rule read on TLS, DCE/RPC, SSH or DNS, when it is one.
 fn other_transaction(
     signature: &Signature,
     lists: &[List],
@@ -462,10 +518,21 @@ fn other_transaction(
             signature, lists, headers, names, keywords, first,
         ));
     }
+    if names.iter().any(|n| is_ssh(n)) {
+        return Some(ssh_transaction(
+            signature, lists, headers, names, keywords, first,
+        ));
+    }
     let dns = !keywords.is_empty() || names.iter().any(|n| n.starts_with("dns."));
     dns.then(|| dns_transaction(signature, lists, headers, names, first))
 }
 
+/// The transaction sides a rule reading HTTP buffers is inspected on,
+/// request then response, or `None` for a rule reading none. Suricata
+/// refuses a rule mixing request and response buffers, a request buffer
+/// with `flow:to_client`, a response buffer with `flow:to_server` (but for
+/// the response body, which it then inspects on the response), the raw
+/// header without a direction, and a host matched on uppercase letters.
 fn transaction(
     signature: &Signature,
     lists: &[List],

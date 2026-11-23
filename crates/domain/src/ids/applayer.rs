@@ -46,13 +46,15 @@
 //!
 //! These rules are held to Suricata by
 //! `tests/fixtures/suricata/applayer-verdicts.txt`,
-//! `tests/fixtures/suricata/windows-verdicts.txt` and
-//! `tests/fixtures/suricata/dcerpc-verdicts.txt`.
+//! `tests/fixtures/suricata/windows-verdicts.txt`,
+//! `tests/fixtures/suricata/dcerpc-verdicts.txt` and
+//! `tests/fixtures/suricata/ssh-verdicts.txt`.
 
 use super::dcerpc::Dcerpc;
 use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
 use super::smb::Smb;
+use super::ssh::Ssh;
 use super::tls::Tls;
 
 /// An application protocol the agent finds, or the verdict that none was.
@@ -464,6 +466,8 @@ pub struct AppLayer {
     dcerpc: Option<Box<Dcerpc>>,
     /// The SMB pipe reader, once the flow speaks SMB.
     smb: Option<Box<Smb>>,
+    /// The SSH identification reader, once the flow speaks SSH.
+    ssh: Option<Box<Ssh>>,
 }
 
 /// What the application layer says of one packet.
@@ -503,6 +507,7 @@ impl AppLayer {
             tls: None,
             dcerpc: None,
             smb: None,
+            ssh: None,
         }
     }
 
@@ -658,6 +663,9 @@ impl AppLayer {
             }
             Some(AppProto::Tls) if !self.udp => {
                 self.tls.get_or_insert_with(Box::default).feed(side, bytes)
+            }
+            Some(AppProto::Ssh) if !self.udp => {
+                self.ssh.get_or_insert_with(Box::default).feed(side, bytes)
             }
             Some(AppProto::Dcerpc) => {
                 let rpc = self.dcerpc.get_or_insert_with(Box::default);

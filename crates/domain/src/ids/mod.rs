@@ -11,6 +11,7 @@ pub mod packet;
 pub mod prefilter;
 pub mod sig;
 pub mod smb;
+pub mod ssh;
 pub mod stream;
 pub mod suricata;
 pub mod tls;
