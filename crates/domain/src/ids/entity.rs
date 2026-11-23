@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
 use crate::firewall::entity::IpNetwork;
 use crate::firewall::workload::WorkloadSelector;
+use crate::ids::sig::model::PortMatch;
 use ebpf_common::event::PacketEvent;
 use ebpf_common::ids::{
     IDS_ACTION_ALERT, IDS_ACTION_DROP, IDS_SCOPE_ALL, IDS_SCOPE_WORKLOAD, IdsPatternKey,
@@ -274,6 +275,71 @@ pub struct ImportedRule {
     /// rule's `pattern` only names it for a reader; this decides it.
     #[serde(skip)]
     pub inspection: Option<Inspection>,
+    /// The packets the rule's header selects: protocol, ports, direction.
+    /// `None` for a rule keyed on its native port, whose header is the
+    /// native rule's own and only the addresses are read from here.
+    #[serde(skip)]
+    pub scope: Option<PacketScope>,
+}
+
+/// The protocol a rule's header names, among those the agent inspects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PacketProto {
+    /// Every IP packet.
+    Ip,
+    /// TCP, packet by packet and on the stream.
+    #[default]
+    Tcp,
+    /// TCP, packet by packet only.
+    TcpPkt,
+    Udp,
+    /// ICMP over IPv4 and over IPv6, as Suricata reads `icmp`.
+    Icmp,
+    /// ICMP over IPv6 only.
+    Icmpv6,
+}
+
+impl PacketProto {
+    /// Whether a packet of this transport protocol, over this IP version,
+    /// is one the rule's header selects.
+    pub const fn admits(self, proto: u8, v6: bool) -> bool {
+        match self {
+            Self::Ip => true,
+            Self::Tcp | Self::TcpPkt => proto == 6,
+            Self::Udp => proto == 17,
+            Self::Icmp => proto == 1 || proto == 58,
+            Self::Icmpv6 => v6 && proto == 58,
+        }
+    }
+}
+
+/// The ports and the direction a rule's header names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PacketScope {
+    pub proto: PacketProto,
+    pub src_ports: PortMatch,
+    pub dst_ports: PortMatch,
+    /// `<>`: the header holds with source and destination either way round.
+    pub both_ways: bool,
+}
+
+impl PacketScope {
+    /// The ports to index the rule under: those one side lists, `None` when
+    /// both sides reach more than `limit` ports or every port.
+    pub fn index_ports(&self, limit: usize) -> Option<Vec<u16>> {
+        self.dst_ports
+            .listed(limit)
+            .or_else(|| self.src_ports.listed(limit))
+    }
+}
+
+/// Whether a port set holds for a packet's port; a packet without ports
+/// satisfies only a set that names none.
+fn port_holds(set: &PortMatch, port: Option<u16>) -> bool {
+    match port {
+        Some(port) => set.matches(port),
+        None => set.any || (set.within.is_empty() && set.outside.is_empty()),
+    }
 }
 
 /// A compiled signature's matches, shared by the per-port rules one
@@ -295,6 +361,34 @@ impl ImportedRule {
     pub fn addresses_match(&self, event: &PacketEvent) -> bool {
         let v6 = event.is_ipv6();
         self.src.matches(&event.src_addr, v6) && self.dst.matches(&event.dst_addr, v6)
+    }
+
+    /// Whether the rule's header holds for the event: its protocol, then
+    /// addresses and ports one way, or either way for `<>`. `ports` are the
+    /// packet's source and destination ports, `None` for a packet without.
+    /// A rule without a scope is decided on its addresses alone.
+    pub fn header_matches(&self, event: &PacketEvent, ports: Option<(u16, u16)>) -> bool {
+        let v6 = event.is_ipv6();
+        let Some(scope) = &self.scope else {
+            return self.addresses_match(event);
+        };
+        if !scope.proto.admits(event.protocol, v6) {
+            return false;
+        }
+        let (sport, dport) = (ports.map(|p| p.0), ports.map(|p| p.1));
+        let forward = || {
+            self.src.matches(&event.src_addr, v6)
+                && self.dst.matches(&event.dst_addr, v6)
+                && port_holds(&scope.src_ports, sport)
+                && port_holds(&scope.dst_ports, dport)
+        };
+        let reverse = || {
+            self.src.matches(&event.dst_addr, v6)
+                && self.dst.matches(&event.src_addr, v6)
+                && port_holds(&scope.src_ports, dport)
+                && port_holds(&scope.dst_ports, sport)
+        };
+        forward() || (scope.both_ways && reverse())
     }
 }
 

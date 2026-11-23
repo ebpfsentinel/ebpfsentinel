@@ -1243,18 +1243,30 @@ impl Builder {
         let check = match k {
             "dsize" => header(HeaderField::Dsize, u64::from(u16::MAX))?,
             "ttl" => header(HeaderField::Ttl, u64::from(u8::MAX))?,
-            "id" => header(HeaderField::IpId, u64::from(u16::MAX))?,
-            "tos" => header(HeaderField::Tos, u64::from(u8::MAX))?,
-            "seq" | "tcp.seq" => header(HeaderField::Seq, u64::from(u32::MAX))?,
-            "ack" | "tcp.ack" => header(HeaderField::Ack, u64::from(u32::MAX))?,
-            "window" | "tcp.window" => header(HeaderField::Window, u64::from(u16::MAX))?,
+            "id" => Check::Header(HeaderField::IpId, plain(k, value, u64::from(u16::MAX))?),
+            "tos" => Check::Header(
+                HeaderField::Tos,
+                plain_or_not(k, value, u64::from(u8::MAX))?,
+            ),
+            "seq" | "tcp.seq" => {
+                Check::Header(HeaderField::Seq, plain(k, value, u64::from(u32::MAX))?)
+            }
+            "ack" | "tcp.ack" => {
+                Check::Header(HeaderField::Ack, plain(k, value, u64::from(u32::MAX))?)
+            }
+            "window" | "tcp.window" => Check::Header(
+                HeaderField::Window,
+                plain_or_not(k, value, u64::from(u16::MAX))?,
+            ),
             "tcp.mss" => header(HeaderField::TcpMss, u64::from(u16::MAX))?,
             "tcp.wscale" => header(HeaderField::TcpWscale, u64::from(u8::MAX))?,
-            "fragoffset" => header(HeaderField::FragOffset, 8191)?,
+            "fragoffset" => Check::Header(HeaderField::FragOffset, frag_offset(value)?),
             "itype" => header(HeaderField::Itype, u64::from(u8::MAX))?,
             "icode" => header(HeaderField::Icode, u64::from(u8::MAX))?,
-            "icmp_id" => header(HeaderField::IcmpId, u64::from(u16::MAX))?,
-            "icmp_seq" => header(HeaderField::IcmpSeq, u64::from(u16::MAX))?,
+            "icmp_id" => Check::Header(HeaderField::IcmpId, plain(k, value, u64::from(u16::MAX))?),
+            "icmp_seq" => {
+                Check::Header(HeaderField::IcmpSeq, plain(k, value, u64::from(u16::MAX))?)
+            }
             "icmpv6.mtu" => header(HeaderField::Icmpv6Mtu, u64::from(u32::MAX))?,
             "vlan.layers" => header(HeaderField::VlanLayers, 3)?,
             "igmp.type" => header(HeaderField::IgmpType, u64::from(u8::MAX))?,
@@ -1277,8 +1289,8 @@ impl Builder {
             "flags" | "tcp.flags" => Check::Flags(parse_tcp_flags(k, value)?),
             "fragbits" => parse_fragbits(value)?,
             "ipopts" => match value {
-                "rr" | "eol" | "nop" | "ts" | "sec" | "esec" | "lsrr" | "lsrre" | "ssrr"
-                | "satid" | "any" => Check::IpOpts(value.to_string()),
+                "rr" | "eol" | "nop" | "ts" | "sec" | "esec" | "lsrr" | "ssrr" | "satid"
+                | "any" => Check::IpOpts(value.to_string()),
                 other => return Err(bad(k, format!("'{other}' is not an IP option"))),
             },
             "sameip" => {
@@ -2332,6 +2344,44 @@ fn parse_tcp_flags(k: &str, value: &str) -> Compiled<TcpFlags> {
         mode,
         ignore,
     })
+}
+
+/// A keyword Suricata reads as one decimal number and nothing else: no
+/// comparison, no range, no hexadecimal.
+fn plain(k: &str, value: &str, max: u64) -> Compiled<IntMatch> {
+    let text = value.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad(k, format!("'{value}' is not a plain decimal number")));
+    }
+    int(k, text, max)
+}
+
+/// A keyword Suricata reads as a decimal number, or `!` and one.
+fn plain_or_not(k: &str, value: &str, max: u64) -> Compiled<IntMatch> {
+    let text = value.trim();
+    match text.strip_prefix('!') {
+        Some(rest) => {
+            let m = plain(k, rest, max)?;
+            Ok(IntMatch { op: IntOp::Ne, ..m })
+        }
+        None => plain(k, text, max),
+    }
+}
+
+/// `fragoffset`: a number, `<` one or `>` one. Suricata also reads a range
+/// there; it is refused rather than given a meaning nobody tested.
+fn frag_offset(value: &str) -> Compiled<IntMatch> {
+    let k = "fragoffset";
+    let text = value.trim();
+    let (op, rest) = if let Some(rest) = text.strip_prefix('<') {
+        (IntOp::Lt, rest)
+    } else if let Some(rest) = text.strip_prefix('>') {
+        (IntOp::Gt, rest)
+    } else {
+        (IntOp::Eq, text)
+    };
+    let m = plain(k, rest, 8191)?;
+    Ok(IntMatch { op, ..m })
 }
 
 fn parse_fragbits(value: &str) -> Compiled<Check> {

@@ -132,7 +132,7 @@ use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
 use domain::firewall::fqdn::WorkloadDnsSettings;
 use domain::ids::entity::{IdsRule, SamplingMode};
-use domain::ids::suricata::RulesetImport;
+use domain::ids::suricata::{MAX_PORTS_PER_RULE, RulesetImport};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
 use domain::nat::entity::{NatRule, NptV6Rule};
@@ -1752,14 +1752,22 @@ impl AgentConfig {
             })
             .filter(|rule| is_tcp_or_any(&rule.protocol))
             .map(|rule| rule.dst_port);
-        // An imported rule carrying content is decided on the payload too.
+        // An imported rule is captured on the ports its header lists.
         let imported_ports = self
             .ids
             .imported
             .rules
             .iter()
-            .filter(|rule| self.ids.enabled && rule.enabled && !rule.pattern.is_empty())
-            .flat_map(|rule| [rule.dst_port, rule.src_port]);
+            .filter(|rule| self.ids.enabled && rule.enabled)
+            .filter_map(|rule| {
+                rule.imported
+                    .as_ref()?
+                    .scope
+                    .as_ref()?
+                    .index_ports(MAX_PORTS_PER_RULE)
+            })
+            .flatten()
+            .map(Some);
         ids_ports
             .chain(ips_ports)
             .chain(imported_ports)
@@ -6289,7 +6297,7 @@ ids:
     }
 
     const SMTP_EXPN: &str = r#"alert tcp $EXTERNAL_NET any -> $SMTP_SERVERS 25 (msg:"GPL SMTP expn root"; flow:to_server,established; content:"expn"; nocase; content:"root"; distance:1; nocase; classtype:attempted-recon; sid:2100660; rev:9;)"#;
-    const FLOWBITS: &str = r#"alert tcp any any -> any 80 (msg:"needs state"; flowbits:isset,seen; content:"abc"; sid:9000001; rev:1;)"#;
+    const LUA: &str = r#"alert tcp any any -> any 80 (msg:"needs a script"; lua:check.lua; content:"abc"; sid:9000001; rev:1;)"#;
 
     fn suricata_yaml(paths: &[String], share: &str) -> String {
         let list: Vec<String> = paths.iter().map(|p| format!("      - {p}")).collect();
@@ -6301,7 +6309,7 @@ ids:
 
     #[test]
     fn a_suricata_ruleset_loads_its_rules_and_its_report() {
-        let file = RulesetFile::new("load", &format!("{SMTP_EXPN}\n{FLOWBITS}\n"));
+        let file = RulesetFile::new("load", &format!("{SMTP_EXPN}\n{LUA}\n"));
         let config = AgentConfig::from_yaml(&suricata_yaml(&[file.path()], "0.5")).unwrap();
         let rules = config.ids_rules().unwrap();
         assert_eq!(rules.len(), 1);
@@ -6310,14 +6318,14 @@ ids:
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].source, file.path());
         assert_eq!(reports[0].report.compiled, 1);
-        assert_eq!(reports[0].report.refused[0].keyword, "flowbits");
+        assert_eq!(reports[0].report.refused[0].keyword, "lua");
         // The content rule is decided on the payload, so its port is captured.
         assert!(config.l7_ports().contains(&25));
     }
 
     #[test]
     fn a_ruleset_refusing_more_than_the_share_fails_the_load() {
-        let file = RulesetFile::new("share", &format!("{SMTP_EXPN}\n{FLOWBITS}\n"));
+        let file = RulesetFile::new("share", &format!("{SMTP_EXPN}\n{LUA}\n"));
         let err = AgentConfig::from_yaml(&suricata_yaml(&[file.path()], "0.4")).unwrap_err();
         let message = err.to_string();
         assert!(
@@ -6325,7 +6333,7 @@ ids:
             "{message}"
         );
         assert!(message.contains("refuses 1 of 2 rules"), "{message}");
-        assert!(message.contains("flowbits 1"), "{message}");
+        assert!(message.contains("lua 1"), "{message}");
     }
 
     #[test]

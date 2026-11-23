@@ -1,0 +1,104 @@
+# Rules on packet headers, protocols and ports, each without its sid:
+# make-header-verdicts.py numbers them from 4000 in this order and sends every
+# packet it builds through all of them.
+
+# TCP flags, with each modifier and an ignore mask
+alert tcp any any -> any any (msg:"syn only"; flags:S;)
+alert tcp any any -> any any (msg:"syn ack"; flags:SA;)
+alert tcp any any -> any any (msg:"syn and more"; flags:S+;)
+alert tcp any any -> any any (msg:"syn or fin"; flags:*SF;)
+alert tcp any any -> any any (msg:"not ack"; flags:!A;)
+alert tcp any any -> any any (msg:"not syn ack"; flags:!SA;)
+alert tcp any any -> any any (msg:"no flag"; flags:0;)
+alert tcp any any -> any any (msg:"syn ignoring ecn"; flags:S,CE;)
+alert tcp any any -> any any (msg:"ack ignoring push"; flags:A,P;)
+alert tcp any any -> any any (msg:"fin push urg"; flags:FPU;)
+alert tcp any any -> any any (msg:"cwr and more"; tcp.flags:C+;)
+alert tcp any any -> any any (msg:"reset"; flags:R;)
+
+# TCP fields and options
+alert tcp any any -> any any (msg:"seq"; seq:12345;)
+alert tcp any any -> any any (msg:"ack number"; ack:777;)
+alert tcp any any -> any any (msg:"window"; window:1024;)
+alert tcp any any -> any any (msg:"window not"; window:!65535;)
+alert tcp any any -> any any (msg:"mss"; tcp.mss:1460;)
+alert tcp any any -> any any (msg:"mss below"; tcp.mss:<1000;)
+alert tcp any any -> any any (msg:"wscale"; tcp.wscale:7;)
+alert tcp any any -> any any (msg:"tcp header"; tcp.hdr; content:"|02 04 05 b4|";)
+alert tcp any any -> any any (msg:"tcp header offset"; tcp.hdr; content:"|30 39|"; offset:6; depth:2;)
+
+# IP fields
+alert ip any any -> any any (msg:"ttl"; ttl:3;)
+alert ip any any -> any any (msg:"ttl range"; ttl:200-255;)
+alert ip any any -> any any (msg:"ip id"; id:4242;)
+alert ip any any -> any any (msg:"tos"; tos:16;)
+alert ip any any -> any any (msg:"tos not"; tos:!0;)
+alert ip any any -> any any (msg:"proto udp"; ip_proto:17;)
+alert ip any any -> any any (msg:"proto by name"; ip_proto:ICMP;)
+alert ip any any -> any any (msg:"proto not tcp"; ip_proto:!6;)
+alert ip any any -> any any (msg:"proto below"; ip_proto:<2;)
+alert ip any any -> any any (msg:"same ip"; sameip;)
+alert ip any any -> any any (msg:"ipv4 header"; ipv4.hdr; content:"|10 92|"; offset:4; depth:2;)
+alert ip any any -> any any (msg:"ipv6 header"; ipv6.hdr; content:"|20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 99|";)
+
+# IP options
+alert ip any any -> any any (msg:"rr"; ipopts:rr;)
+alert ip any any -> any any (msg:"nop"; ipopts:nop;)
+alert ip any any -> any any (msg:"eol"; ipopts:eol;)
+alert ip any any -> any any (msg:"ts"; ipopts:ts;)
+alert ip any any -> any any (msg:"sec"; ipopts:sec;)
+alert ip any any -> any any (msg:"lsrr"; ipopts:lsrr;)
+alert ip any any -> any any (msg:"ssrr"; ipopts:ssrr;)
+alert ip any any -> any any (msg:"satid"; ipopts:satid;)
+alert ip any any -> any any (msg:"any option"; ipopts:any;)
+alert ip any any -> any any (msg:"esec"; ipopts:esec;)
+alert ip any any -> any any (msg:"lsrre"; ipopts:lsrre;)
+
+# Fragment bits and offset
+alert ip any any -> any any (msg:"df"; fragbits:D;)
+alert ip any any -> any any (msg:"mf"; fragbits:M;)
+alert ip any any -> any any (msg:"reserved"; fragbits:R;)
+alert ip any any -> any any (msg:"df and more"; fragbits:D+;)
+alert ip any any -> any any (msg:"mf or reserved"; fragbits:*MR;)
+alert ip any any -> any any (msg:"not df"; fragbits:!D;)
+alert ip any any -> any any (msg:"offset"; fragoffset:100;)
+alert ip any any -> any any (msg:"offset not zero"; fragoffset:!0;)
+
+# ICMP
+alert icmp any any -> any any (msg:"echo request"; itype:8;)
+alert icmp any any -> any any (msg:"type range"; itype:>100;)
+alert icmp any any -> any any (msg:"code"; icode:3;)
+alert icmp any any -> any any (msg:"icmp id"; icmp_id:99;)
+alert icmp any any -> any any (msg:"icmp seq"; icmp_seq:7;)
+alert icmp any any -> any any (msg:"icmp any"; ttl:>0;)
+alert icmpv6 any any -> any any (msg:"icmpv6 rule proto"; ttl:>0;)
+alert ipv6-icmp any any -> any any (msg:"ipv6-icmp rule proto"; ttl:>0;)
+alert icmp any any -> any any (msg:"mtu"; icmpv6.mtu:1280;)
+alert icmp any any -> any any (msg:"icmpv4 header"; icmpv4.hdr; content:"|08 00|"; depth:2;)
+alert icmp any any -> any any (msg:"icmpv6 header"; icmpv6.hdr; content:"|80 00|"; depth:2;)
+
+# UDP
+alert udp any any -> any any (msg:"udp any"; ttl:>0;)
+alert udp any any -> any any (msg:"udp header"; udp.hdr; content:"|00 35|"; offset:2; depth:2;)
+alert udp any any -> any 53 (msg:"udp payload"; content:"query";)
+
+# Payload size
+alert tcp-pkt any any -> any any (msg:"dsize zero"; dsize:0;)
+alert ip any any -> any any (msg:"dsize range"; dsize:10<>20;)
+alert tcp-pkt any any -> any any (msg:"dsize big"; dsize:>1400;)
+
+# Protocols and ports
+alert ip any any -> any any (msg:"every ip packet"; ttl:>0;)
+alert tcp any any -> any any (msg:"every tcp packet"; ttl:>0;)
+alert tcp-pkt any any -> any 8080 (msg:"one port"; ttl:>0;)
+alert tcp-pkt any any -> any [8080,8443] (msg:"port list"; ttl:>0;)
+alert tcp-pkt any any -> any 8000:8100 (msg:"port range"; ttl:>0;)
+alert tcp-pkt any any -> any !8080 (msg:"negated port"; ttl:>0;)
+alert tcp-pkt any any -> any [1:65535,!8443] (msg:"range less one"; ttl:>0;)
+alert tcp-pkt any 5555 -> any 8080 (msg:"both sides"; ttl:>0;)
+alert tcp-pkt any any <> any 8443 (msg:"either way"; ttl:>0;)
+alert tcp-pkt 10.9.0.0/16 any <> any 8443 (msg:"either way from the address"; ttl:>0;)
+alert udp any any -> any :1024 (msg:"low port"; ttl:>0;)
+alert ip any any -> any 53 (msg:"ip rule with a port"; ttl:>0;)
+alert icmp any any -> any any (msg:"icmp with content"; content:"ping";)
+alert tcp-pkt any any -> any 80 (msg:"tcp packet content"; content:"GET"; flags:PA;)

@@ -15,21 +15,23 @@
 //! The compiler is a pure function of the rule text and the variables it is
 //! given, so it is fuzzed and tested against real rules without an agent.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
 use super::entity::{
-    AddressMatch, IdsRule, ImportedRule, Inspection, ThresholdConfig, ThresholdType, TrackBy,
+    AddressMatch, IdsRule, ImportedRule, Inspection, PacketProto, PacketScope, ThresholdConfig,
+    ThresholdType, TrackBy,
 };
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
 use crate::firewall::entity::IpNetwork;
 
-/// The most ports one rule may name. Each port is a native rule of its own,
-/// because the classifier keys on one port, so a range would multiply into
-/// thousands of rules nobody wrote.
+/// The most ports one rule keyed in the kernel may name. Each port is a
+/// native rule of its own, because the classifier keys on one port, so a
+/// range would multiply into thousands of rules nobody wrote. A rule imported
+/// from Suricata is decided in userspace and names any port set.
 pub const MAX_PORTS_PER_RULE: usize = 16;
 
 /// How deep one variable may refer to another before the chain is refused.
@@ -2508,9 +2510,19 @@ fn compile_into(
 
 // ── One rule ─────────────────────────────────────────────────────
 
-/// Compile one rule, returning the native rules it becomes (one per port it
-/// names) or the refusal.
+/// Compile one rule, returning the native rule it becomes or the refusal.
 pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
+    compile_rule_admitting(text, vars, false)
+}
+
+/// Compile one rule; with `pending`, a keyword the engine evaluates but the
+/// agent does not feed yet is compiled rather than refused, so a test can hold
+/// the evaluation to Suricata before the input reaches it.
+fn compile_rule_admitting(
+    text: &str,
+    vars: &SuricataVars,
+    pending: bool,
+) -> Compiled<Vec<IdsRule>> {
     let text = text.trim();
     // A rule that is not valid Suricata is refused by the parser; a valid one
     // naming a keyword the engine does not inspect yet, or never will, is
@@ -2518,7 +2530,7 @@ pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
     let signature = super::sig::parse_signature(text, vars)?;
     for keyword in &signature.keywords {
         if let Some(row) = table_row(keyword)
-            && matches!(row.support, Support::Pending | Support::Refused)
+            && (row.support == Support::Refused || (!pending && row.support == Support::Pending))
         {
             let mut refused = Refused::new(keyword, row.note);
             refused.sid = Some(signature.sid);
@@ -2551,89 +2563,70 @@ pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
         refused.sid = Some(sid);
         refused
     })?;
-    let pattern = label(&signature).ok_or_else(|| {
-        let mut refused = Refused::new(
-            "content",
-            "names no content or pcre; a rule on the port alone is written natively",
-        );
-        refused.sid = Some(sid);
-        refused
-    })?;
+    let pattern = label(&signature);
+    if !pending {
+        // The header's own refusals first: they say what the rule is.
+        packet_scope(&signature.header)
+            .and_then(|_| fed_today(&signature.header, pattern.is_some()))
+            .map_err(|mut refused| {
+                refused.sid = Some(sid);
+                refused
+            })?;
+    }
+    let pattern = pattern.unwrap_or_default();
     let inspection = Inspection(std::sync::Arc::new(inspection));
-    compile_parts(&text[..open], &options, vars, &pattern, inspection).map_err(|mut refused| {
+    compile_parts(&signature, &options, &pattern, inspection).map_err(|mut refused| {
         refused.sid = Some(sid);
         refused
     })
 }
 
 fn compile_parts(
-    header: &str,
+    signature: &super::sig::model::Signature,
     options: &[(String, String)],
-    vars: &SuricataVars,
     pattern: &str,
     inspection: Inspection,
 ) -> Compiled<Vec<IdsRule>> {
-    let header = parse_header(header, vars)?;
+    let scope = packet_scope(&signature.header)?;
     let body = compile_options(options)?;
-
-    let (ports, on_destination) = match (&header.src_ports, &header.dst_ports) {
-        (PortSpec::Any, PortSpec::Any) => {
-            return Err(Refused::new(
-                "port",
-                "names no port on either side, and the classifier keys on one",
-            ));
-        }
-        (PortSpec::Any, PortSpec::Set(ports)) => (ports, true),
-        (PortSpec::Set(ports), PortSpec::Any) => (ports, false),
-        (PortSpec::Set(_), PortSpec::Set(_)) => {
-            return Err(Refused::new(
-                "port",
-                "names ports on both sides, and a rule is keyed on one",
-            ));
-        }
+    let protocol = match scope.proto {
+        PacketProto::Ip => Protocol::Any,
+        PacketProto::Tcp | PacketProto::TcpPkt => Protocol::Tcp,
+        PacketProto::Udp => Protocol::Udp,
+        PacketProto::Icmp | PacketProto::Icmpv6 => Protocol::Icmp,
     };
-
     let imported = ImportedRule {
         sid: body.sid,
         rev: body.rev,
         classtype: body.classtype.clone(),
         references: body.references.clone(),
-        src: header.src,
-        dst: header.dst,
+        src: signature.header.src.clone(),
+        dst: signature.header.dst.clone(),
         inspection: Some(inspection),
+        scope: Some(scope),
     };
-    let several = ports.len() > 1;
-    let rules = ports
-        .iter()
-        .map(|port| {
-            let id = if several {
-                format!("suricata-{}-{port}", body.sid)
-            } else {
-                format!("suricata-{}", body.sid)
-            };
-            IdsRule {
-                id: RuleId(id),
-                description: body.msg.clone(),
-                severity: body.severity,
-                mode: DomainMode::Alert,
-                protocol: Protocol::Tcp,
-                dst_port: on_destination.then_some(*port),
-                src_port: (!on_destination).then_some(*port),
-                pattern: pattern.to_string(),
-                enabled: true,
-                threshold: body.threshold.clone(),
-                domain_pattern: None,
-                domain_match_mode: None,
-                country_thresholds: None,
-                group_mask: 0,
-                tenant_id: 0,
-                workload: None,
-                kill_process: false,
-                imported: Some(Box::new(imported.clone())),
-            }
-        })
-        .collect();
-    Ok(rules)
+    Ok(vec![IdsRule {
+        id: RuleId(format!("suricata-{}", body.sid)),
+        description: body.msg.clone(),
+        severity: body.severity,
+        mode: DomainMode::Alert,
+        protocol,
+        // An imported rule is decided in userspace on the packet, never in a
+        // kernel slot, so it names no port there.
+        dst_port: None,
+        src_port: None,
+        pattern: pattern.to_string(),
+        enabled: true,
+        threshold: body.threshold,
+        domain_pattern: None,
+        domain_match_mode: None,
+        country_thresholds: None,
+        group_mask: 0,
+        tenant_id: 0,
+        workload: None,
+        kill_process: false,
+        imported: Some(Box::new(imported)),
+    }])
 }
 
 /// What a reader sees as the rule's pattern: its first content, printable
@@ -2677,77 +2670,97 @@ fn label(signature: &super::sig::model::Signature) -> Option<String> {
 
 // ── Header ───────────────────────────────────────────────────────
 
-struct Header {
-    src: AddressMatch,
-    src_ports: PortSpec,
-    dst: AddressMatch,
-    dst_ports: PortSpec,
+/// Refuse what the agent cannot hand a rule yet: it sees the payload of TCP
+/// segments on the ports it captures, so a rule must be on TCP, name at most
+/// [`MAX_PORTS_PER_RULE`] ports on one side, and read some content.
+fn fed_today(header: &super::sig::model::Header, has_content: bool) -> Compiled<()> {
+    use super::sig::model::RuleProto;
+    if !matches!(header.proto, RuleProto::Tcp | RuleProto::TcpPkt) {
+        return Err(Refused::new(
+            "protocol",
+            "is read on the whole packet, which the agent does not capture yet; only TCP payloads are",
+        ));
+    }
+    let listed = header
+        .dst_ports
+        .listed(MAX_PORTS_PER_RULE)
+        .or_else(|| header.src_ports.listed(MAX_PORTS_PER_RULE));
+    if listed.is_none() {
+        return Err(Refused::new(
+            "port",
+            format!(
+                "names no side with at most {MAX_PORTS_PER_RULE} ports, and a payload is captured only on the ports a rule lists"
+            ),
+        ));
+    }
+    if !has_content {
+        return Err(Refused::new(
+            "content",
+            "is missing, and a rule on the header alone needs the whole packet, which the agent does not capture yet",
+        ));
+    }
+    Ok(())
 }
 
-fn parse_header(text: &str, vars: &SuricataVars) -> Compiled<Header> {
-    let tokens = split_header(text)?;
-    let [action, protocol, src, src_ports, direction, dst, dst_ports] = tokens.as_slice() else {
-        return Err(Refused::new(
-            "header",
-            "is not 'action protocol source port direction destination port'",
-        ));
-    };
-
-    match action.as_str() {
-        "alert" => {}
-        "drop" | "reject" | "rejectsrc" | "rejectdst" | "rejectboth" => {
-            return Err(Refused::new(
-                action.as_str(),
-                "would drop on the port before the content is seen; imported rules alert only",
-            ));
-        }
-        "pass" => {
+/// The packets a parsed header selects, or why the agent does not import it.
+fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
+    use super::sig::model::{Action, Direction, RuleProto};
+    match header.action {
+        Action::Alert => {}
+        Action::Pass => {
             return Err(Refused::new(
                 "pass",
                 "exempts traffic from other rules, which the engine does not order",
             ));
         }
-        other => return Err(Refused::new(other, "is not a rule action")),
-    }
-
-    match protocol.as_str() {
-        "tcp" => {}
-        "udp" | "icmp" | "ip" | "icmpv6" | "sctp" => {
-            return Err(Refused::new(
-                protocol.as_str(),
-                "only TCP segments carry a captured payload",
-            ));
-        }
-        "tcp-pkt" | "tcp-stream" => {
-            return Err(Refused::new(
-                protocol.as_str(),
-                "selects packets or the reassembled stream, and the agent matches segments",
-            ));
-        }
         other => {
             return Err(Refused::new(
-                other,
+                other.keyword(),
+                "would drop traffic; imported rules alert only",
+            ));
+        }
+    }
+    let proto = match &header.proto {
+        RuleProto::Ip => PacketProto::Ip,
+        RuleProto::Tcp => PacketProto::Tcp,
+        RuleProto::TcpPkt => PacketProto::TcpPkt,
+        RuleProto::Udp => PacketProto::Udp,
+        RuleProto::Icmp => PacketProto::Icmp,
+        RuleProto::Icmpv6 => PacketProto::Icmpv6,
+        RuleProto::TcpStream => {
+            return Err(Refused::new(
+                "tcp-stream",
+                "inspects the reassembled stream alone, which the agent does not keep",
+            ));
+        }
+        RuleProto::Ipv4 | RuleProto::Ipv6 | RuleProto::Icmpv4 | RuleProto::Sctp => {
+            return Err(Refused::new(
+                "protocol",
+                "is a header protocol not compared with Suricata yet",
+            ));
+        }
+        RuleProto::App(name) => {
+            return Err(Refused::new(
+                name.as_str(),
                 "is an application-layer protocol the agent does not parse",
             ));
         }
-    }
-
-    match direction.as_str() {
-        "->" => {}
-        "<>" => {
+    };
+    let both_ways = match header.direction {
+        Direction::OneWay => false,
+        Direction::Both => true,
+        Direction::Transactional => {
             return Err(Refused::new(
-                "<>",
-                "matches both directions, and a rule is keyed on one side's port",
+                "=>",
+                "pairs a request with its response, which the agent does not track",
             ));
         }
-        other => return Err(Refused::new(other, "is not a direction")),
-    }
-
-    Ok(Header {
-        src: parse_addresses(src, vars, 0)?.into_match(src)?,
-        src_ports: parse_ports(src_ports, vars, 0)?,
-        dst: parse_addresses(dst, vars, 0)?.into_match(dst)?,
-        dst_ports: parse_ports(dst_ports, vars, 0)?,
+    };
+    Ok(PacketScope {
+        proto,
+        src_ports: header.src_ports.clone(),
+        dst_ports: header.dst_ports.clone(),
+        both_ways,
     })
 }
 
@@ -2923,87 +2936,6 @@ pub fn parse_network(text: &str) -> Option<IpNetwork> {
             prefix_len,
         },
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PortSpec {
-    Any,
-    Set(BTreeSet<u16>),
-}
-
-fn parse_ports(token: &str, vars: &SuricataVars, depth: usize) -> Compiled<PortSpec> {
-    let mut ports = BTreeSet::new();
-    if collect_ports(token, vars, depth, &mut ports)? {
-        return Ok(PortSpec::Any);
-    }
-    Ok(PortSpec::Set(ports))
-}
-
-/// Add the ports a token names to `ports`, returning `true` for `any`.
-fn collect_ports(
-    token: &str,
-    vars: &SuricataVars,
-    depth: usize,
-    ports: &mut BTreeSet<u16>,
-) -> Compiled<bool> {
-    if depth > MAX_VARIABLE_DEPTH {
-        return Err(Refused::new(
-            token,
-            "refers through more variables than are followed",
-        ));
-    }
-    let token = token.trim();
-    if token == "any" {
-        return Ok(true);
-    }
-    if token.starts_with('!') {
-        return Err(Refused::new(
-            token,
-            "negates a port, and a rule is keyed on the ports it names",
-        ));
-    }
-    if let Some(body) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
-        let mut any = false;
-        for item in split_list(body) {
-            any |= collect_ports(item, vars, depth + 1, ports)?;
-        }
-        return Ok(any);
-    }
-    if let Some(name) = token.strip_prefix('$') {
-        let value = vars
-            .ports
-            .get(name)
-            .ok_or_else(|| Refused::new(token, "names a port variable that has no value"))?;
-        return collect_ports(value, vars, depth + 1, ports);
-    }
-    let not_a_port = || Refused::new(token, "is not a port, a range or a variable");
-    let bound = |text: &str, empty: u16| -> Compiled<u16> {
-        if text.is_empty() {
-            Ok(empty)
-        } else {
-            text.parse::<u16>().map_err(|_| not_a_port())
-        }
-    };
-    let (low, high) = if let Some((low, high)) = token.split_once(':') {
-        (bound(low, 0)?, bound(high, u16::MAX)?)
-    } else {
-        let port = token.parse::<u16>().map_err(|_| not_a_port())?;
-        (port, port)
-    };
-    if low > high {
-        return Err(Refused::new(token, "is a range that ends before it starts"));
-    }
-    let span = usize::from(high - low) + 1;
-    if ports.len() + span > MAX_PORTS_PER_RULE {
-        return Err(Refused::new(
-            token,
-            format!(
-                "names more than {MAX_PORTS_PER_RULE} ports, and each port is a rule of its own"
-            ),
-        ));
-    }
-    ports.extend(low..=high);
-    Ok(false)
 }
 
 // ── Options ──────────────────────────────────────────────────────
@@ -3414,8 +3346,14 @@ mod tests {
         assert_eq!(rules.len(), 1);
         let rule = &rules[0];
         assert_eq!(rule.id.0, "suricata-2100660");
-        assert_eq!(rule.dst_port, Some(25));
-        assert_eq!(rule.src_port, None);
+        // Decided on the packet in userspace: no kernel port, the header's
+        // ports sit on the imported rule.
+        assert_eq!((rule.dst_port, rule.src_port), (None, None));
+        assert!(rule.imported.as_ref().is_some_and(|i| {
+            i.scope
+                .as_ref()
+                .is_some_and(|s| s.dst_ports.matches(25) && !s.dst_ports.matches(26))
+        }));
         assert_eq!(rule.mode, DomainMode::Alert);
         assert_eq!(rule.severity, Severity::Medium);
         let imported = rule
@@ -3447,10 +3385,10 @@ mod tests {
     }
 
     #[test]
-    fn expands_a_port_range_into_one_rule_per_port_on_the_source_side() {
+    fn keeps_a_source_port_range_on_one_rule() {
         let rules = compile(ET_PCANYWHERE);
         let ids: Vec<&str> = rules.iter().map(|r| r.id.0.as_str()).collect();
-        assert_eq!(ids, ["suricata-2100512-5631", "suricata-2100512-5632"]);
+        assert_eq!(ids, ["suricata-2100512"]);
         assert!(rules.iter().all(|r| r.dst_port.is_none()));
         assert_eq!(rules[0].severity, Severity::High);
 
@@ -3571,19 +3509,17 @@ mod tests {
     }
 
     #[test]
-    fn refuses_headers_it_cannot_key_on() {
+    fn refuses_headers_it_does_not_decide() {
         let base = "(msg:\"x\"; content:\"abc\"; sid:1;)";
         let cases = [
             ("drop tcp any any -> any 80", "drop"),
-            ("alert udp any any -> any 53", "udp"),
-            ("alert tcp any any -> any any", "port"),
-            ("alert tcp any 80 -> any 80", "port"),
-            ("alert tcp any any <> any 80", "<>"),
-            ("alert tcp any any -> any !80", "!80"),
-            ("alert tcp any any -> any 1:1024", "1:1024"),
+            ("pass tcp any any -> any 80", "pass"),
+            ("alert tcp-stream any any -> any 80", "tcp-stream"),
+            ("alert sctp any any -> any 80", "protocol"),
+            ("alert http any any -> any 80", "http"),
+            ("alert tcp any any => any 80", "=>"),
             ("alert tcp !any any -> any 80", "!any"),
             ("alert tcp $NOPE any -> any 80", "$NOPE"),
-            ("alert tcp any any -> any $SHELLCODE_PORTS", "!80"),
         ];
         for (header, keyword) in cases {
             let refused = refusal(&format!("{header} {base}"));
@@ -3593,14 +3529,47 @@ mod tests {
     }
 
     #[test]
+    fn compiles_headers_on_every_protocol_port_set_and_direction() {
+        let base = "(msg:\"x\"; content:\"abc\"; sid:1;)";
+        let headers = [
+            ("alert udp any any -> any 53", "protocol"),
+            ("alert icmp any any -> any any", "protocol"),
+            ("alert icmpv6 any any -> any any", "protocol"),
+            ("alert ip any any -> any any", "protocol"),
+            ("alert tcp-pkt any any -> any any", "port"),
+            ("alert tcp any any -> any !80", "port"),
+            ("alert tcp any any -> any 1:1024", "port"),
+            ("alert tcp any any -> any $SHELLCODE_PORTS", "port"),
+        ];
+        for (header, keyword) in headers {
+            let rule = format!("{header} {base}");
+            // The engine decides each of them on the whole packet...
+            assert!(
+                compile_rule_admitting(&rule, &vars(), true).is_ok(),
+                "{header}"
+            );
+            // ...and the agent refuses them until it captures that packet.
+            assert_eq!(refusal(&rule).keyword, keyword, "{header}");
+        }
+        for header in [
+            "alert tcp any 80 -> any 80",
+            "alert tcp any any <> any 80",
+            "alert tcp-pkt any 1:16 -> any any",
+        ] {
+            assert_eq!(compile(&format!("{header} {base}")).len(), 1, "{header}");
+        }
+        let header_only = "alert ip any any -> any any (msg:\"x\"; ttl:1; sid:2;)";
+        assert!(compile_rule_admitting(header_only, &vars(), true).is_ok());
+    }
+
+    #[test]
     fn refuses_options_outside_the_subset() {
         let cases = [
+            ("flow:established;", "content"),
             ("content:\"abcdef\"; depth:3;", "depth"),
-            ("content:\"abc\"; dsize:>10;", "dsize"),
             ("content:\"abc\"; http.uri;", "http.uri"),
             ("content:\"abc\"; http_uri;", "http_uri"),
             ("content:\"abc\"; frobnicate;", "frobnicate"),
-            ("flow:established;", "content"),
             (
                 "content:\"abc\"; threshold: type limit, track by_rule, count 1, seconds 5;",
                 "threshold",
@@ -3790,3 +3759,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "suricata_header_tests.rs"]
+mod header_tests;

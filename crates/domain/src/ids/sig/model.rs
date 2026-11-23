@@ -548,7 +548,8 @@ pub enum TcpFlagsMode {
     Plus,
     /// Any of these flags.
     Any,
-    /// None of these flags.
+    /// Not all of these flags: a packet carrying some of them still
+    /// matches.
     Not,
 }
 

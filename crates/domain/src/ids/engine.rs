@@ -12,10 +12,16 @@ use ebpf_common::event::PacketEvent;
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
 use super::flow::{FlowTable, Packet};
+use super::packet::IpPacket;
 use super::prefilter::{Entry, Prefilter, needle};
+
 use super::sig::inspect::Program;
 use crate::common::entity::Protocol;
 use crate::dns::entity::DomainPattern;
+
+/// The most ports an imported rule is indexed under; past it the rule is a
+/// candidate for every packet and its header decides.
+const INDEXED_PORTS: usize = 64;
 
 /// Internal state for per-rule, per-track-key threshold tracking.
 #[derive(Debug)]
@@ -361,30 +367,25 @@ impl IdsEngine {
             return Vec::new();
         }
 
-        let prefilter = self.prefilter.get_or_init(|| {
-            Arc::new(Prefilter::build(
-                self.rules
-                    .iter()
-                    .zip(&self.inspections)
-                    .map(|(rule, program)| Entry {
-                        ports: [rule.dst_port, rule.src_port],
-                        needle: needle(program.as_ref()),
-                    }),
-            ))
-        });
-        let matched = prefilter
-            .candidates([event.dst_port, event.src_port], payload)
+        let ports = [event.dst_port, event.src_port];
+        let matched = self
+            .prefilter()
+            .candidates(&ports, payload)
             .into_iter()
             .filter_map(|idx| {
                 let rule = self.rules.get(idx)?;
                 let applies = rule.enabled
-                    && matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
-                    && (rule.dst_port == Some(event.dst_port)
-                        || rule.src_port == Some(event.src_port))
-                    && rule
-                        .imported
-                        .as_ref()
-                        .is_none_or(|imported| imported.addresses_match(event));
+                    && match rule.imported.as_ref() {
+                        Some(imported) if imported.scope.is_some() => {
+                            imported.header_matches(event, Some((event.src_port, event.dst_port)))
+                        }
+                        imported => {
+                            matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
+                                && (rule.dst_port == Some(event.dst_port)
+                                    || rule.src_port == Some(event.src_port))
+                                && imported.is_none_or(|i| i.addresses_match(event))
+                        }
+                    };
                 if !applies {
                     return None;
                 }
@@ -397,6 +398,67 @@ impl IdsEngine {
             })
             .collect();
         self.run_state(event, matched)
+    }
+
+    /// Evaluate the rules imported from Suricata against one whole IP
+    /// packet, from its IP header on: protocol, addresses, ports, direction,
+    /// every header keyword, then the payload and the header buffers.
+    ///
+    /// `event` is the packet's summary, which keys the sampling decision and
+    /// the flow state; `bytes` is the packet from its IP header. A packet
+    /// that does not decode matches nothing.
+    pub fn evaluate_packet(
+        &self,
+        event: &PacketEvent,
+        bytes: &[u8],
+        src_country: Option<&str>,
+    ) -> Vec<(usize, &IdsRule)> {
+        let Some(packet) = IpPacket::decode(bytes) else {
+            return Vec::new();
+        };
+        if !self
+            .sampling
+            .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
+        {
+            return Vec::new();
+        }
+        let ports = packet.ports();
+        let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
+        let payload = packet.payload().unwrap_or_default();
+        let matched = self
+            .prefilter()
+            .candidates(&keys, payload)
+            .into_iter()
+            .filter_map(|idx| {
+                let rule = self.rules.get(idx)?;
+                let imported = rule.imported.as_ref().filter(|i| i.scope.is_some())?;
+                if !rule.enabled || !imported.header_matches(event, ports) {
+                    return None;
+                }
+                let program = self.inspections.get(idx)?.as_ref()?;
+                program.matches_packet(&packet).then_some((idx, rule))
+            })
+            .collect();
+        self.run_state(event, matched)
+    }
+
+    /// The candidate index, built on first use from the rules' ports and
+    /// fast patterns.
+    fn prefilter(&self) -> &Prefilter {
+        self.prefilter.get_or_init(|| {
+            Arc::new(Prefilter::build(
+                self.rules
+                    .iter()
+                    .zip(&self.inspections)
+                    .map(|(rule, program)| Entry {
+                        ports: match rule.imported.as_ref().and_then(|i| i.scope.as_ref()) {
+                            Some(scope) => scope.index_ports(INDEXED_PORTS),
+                            None => Some(rule.dst_port.into_iter().chain(rule.src_port).collect()),
+                        },
+                        needle: needle(program.as_ref()),
+                    }),
+            ))
+        })
     }
 
     /// Run what the matched rules read and write outside the packet, in
@@ -415,7 +477,7 @@ impl IdsEngine {
         if matched.iter().all(|(idx, _)| state(*idx).is_none()) {
             return matched;
         }
-        matched.sort_by_key(|(idx, _)| (state(*idx).map_or(3, |s| s.rank()), *idx));
+        matched.sort_by_key(|(idx, _)| (state(*idx).map_or(3, super::flow::State::rank), *idx));
         let packet = Packet::of(event);
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
         flows.touch(&packet);

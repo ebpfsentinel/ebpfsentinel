@@ -19,9 +19,10 @@ use sha2::{Digest, Sha256};
 use super::int::{IntMatch, IntOp};
 use super::model::{
     Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
-    HeaderField, Match, MathOp, NumBase, Pcre, Signature, Transform, Value,
+    HeaderField, Match, MathOp, NumBase, Pcre, Signature, TcpFlags, TcpFlagsMode, Transform, Value,
 };
 use crate::ids::flow::State;
+use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
 
 /// How many times one inspection may return to an earlier match to try its
@@ -32,7 +33,7 @@ const RETRY_BUDGET: u32 = 3000;
 #[derive(Debug)]
 pub struct Program {
     lists: Vec<List>,
-    dsize: Vec<IntMatch>,
+    headers: Vec<HeaderCheck>,
     slots: usize,
     fast: Option<Needle>,
     state: Option<State>,
@@ -194,6 +195,153 @@ fn refused(keyword: impl Into<String>, reason: impl Into<String>) -> Refused {
     Refused::new(keyword, reason)
 }
 
+/// The buffers that are a packet header rather than something decoded from
+/// the payload.
+const HEADER_BUFFERS: [&str; 6] = [
+    "ipv4.hdr",
+    "ipv6.hdr",
+    "tcp.hdr",
+    "udp.hdr",
+    "icmpv4.hdr",
+    "icmpv6.hdr",
+];
+
+/// One condition on the packet headers.
+#[derive(Debug, Clone, Copy)]
+enum HeaderCheck {
+    Int(HeaderField, IntMatch),
+    Flags(TcpFlags),
+    FragBits {
+        flags: u8,
+        mode: TcpFlagsMode,
+    },
+    /// An option kind the IPv4 header must carry; `0` for `ipopts:any`,
+    /// which Suricata accepts and never matches.
+    IpOpt(u16),
+    SameIp,
+}
+
+impl HeaderCheck {
+    fn compile(check: &Check) -> Compiled<Option<Self>> {
+        Ok(Some(match check {
+            Check::Header(field, m) => match field {
+                HeaderField::VlanId | HeaderField::VlanLayers => {
+                    return Err(Refused::new(
+                        "vlan",
+                        "reads the link layer, which the packet the agent inspects starts after",
+                    ));
+                }
+                HeaderField::IgmpType => {
+                    return Err(Refused::new("igmp.type", "reads a header not decoded yet"));
+                }
+                _ => Self::Int(*field, *m),
+            },
+            Check::Flags(f) => Self::Flags(*f),
+            Check::FragBits { flags, mode } => Self::FragBits {
+                flags: *flags,
+                mode: *mode,
+            },
+            Check::IpOpts(name) => Self::IpOpt(match name.as_str() {
+                "rr" => opt::RR,
+                "eol" => opt::EOL,
+                "nop" => opt::NOP,
+                "ts" => opt::TS,
+                "sec" => opt::SEC,
+                "esec" => opt::ESEC,
+                "lsrr" => opt::LSRR,
+                "ssrr" => opt::SSRR,
+                "satid" => opt::SATID,
+                "any" => 0,
+                other => {
+                    return Err(Refused::new(
+                        "ipopts",
+                        format!("'{other}' is not an option"),
+                    ));
+                }
+            }),
+            Check::SameIp => Self::SameIp,
+            _ => return Ok(None),
+        }))
+    }
+
+    fn matches(&self, p: &IpPacket<'_>) -> bool {
+        match *self {
+            Self::Int(field, m) => field_value(field, p).is_some_and(|v| m.matches(v)),
+            Self::Flags(f) => match p.l4 {
+                L4::Tcp(t) => tcp_flags_match(f, t.flags),
+                _ => false,
+            },
+            Self::FragBits { flags, mode } => {
+                p.v4.is_some_and(|v4| bits_match(mode, flags, v4.frag_bits))
+            }
+            Self::IpOpt(bit) => p.v4.is_some_and(|v4| v4.options & bit != 0),
+            Self::SameIp => p.src == p.dst,
+        }
+    }
+}
+
+/// A header field's value on this packet, `None` where the packet has no
+/// such field: Suricata then never matches the rule.
+fn field_value(field: HeaderField, p: &IpPacket<'_>) -> Option<u64> {
+    let tcp = match p.l4 {
+        L4::Tcp(t) => Some(t),
+        _ => None,
+    };
+    let icmp = match p.l4 {
+        L4::Icmp(i) => Some(i),
+        _ => None,
+    };
+    Some(match field {
+        HeaderField::Dsize => len_u64(p.payload()?.len()),
+        HeaderField::Ttl => u64::from(p.ttl),
+        HeaderField::IpId => u64::from(p.v4?.id),
+        HeaderField::Tos => u64::from(p.v4?.tos),
+        HeaderField::FragOffset => u64::from(p.v4?.frag_offset),
+        HeaderField::IpProto => u64::from(p.proto),
+        HeaderField::L3Proto => {
+            if p.v6 {
+                0x86dd
+            } else {
+                0x0800
+            }
+        }
+        HeaderField::Seq => u64::from(tcp?.seq),
+        HeaderField::Ack => u64::from(tcp?.ack),
+        HeaderField::Window => u64::from(tcp?.window),
+        HeaderField::TcpMss => u64::from(tcp?.mss?),
+        HeaderField::TcpWscale => u64::from(tcp?.wscale?),
+        HeaderField::Itype => u64::from(icmp?.kind),
+        HeaderField::Icode => u64::from(icmp?.code),
+        HeaderField::IcmpId => u64::from(icmp?.echo?.0),
+        HeaderField::IcmpSeq => u64::from(icmp?.echo?.1),
+        HeaderField::Icmpv6Mtu => u64::from(icmp?.mtu?),
+        HeaderField::VlanId | HeaderField::VlanLayers | HeaderField::IgmpType => return None,
+    })
+}
+
+/// Suricata's `flags`: the ignored flags are taken off first, and a rule
+/// naming SYN, FIN or RST needs at least one of the three on the packet, one
+/// naming URG, ECE or CWR at least one of those, whatever the modifier.
+fn tcp_flags_match(f: TcpFlags, flags: u8) -> bool {
+    let have = flags & !f.ignore;
+    if f.flags & 0x07 != 0 && have.trailing_zeros() >= 3 {
+        return false;
+    }
+    if f.flags & 0xe0 != 0 && have & 0xe0 == 0 {
+        return false;
+    }
+    bits_match(f.mode, f.flags, have)
+}
+
+fn bits_match(mode: TcpFlagsMode, want: u8, have: u8) -> bool {
+    match mode {
+        TcpFlagsMode::Exact => have == want,
+        TcpFlagsMode::Plus => have & want == want,
+        TcpFlagsMode::Any => have & want != 0,
+        TcpFlagsMode::Not => have & want != want,
+    }
+}
+
 impl Program {
     /// Compile the matches of a parsed signature.
     ///
@@ -230,17 +378,14 @@ impl Program {
                 cursor_after,
             });
         }
-        let dsize = signature
+        let headers = signature
             .checks
             .iter()
-            .filter_map(|check| match check {
-                Check::Header(HeaderField::Dsize, m) => Some(*m),
-                _ => None,
-            })
-            .collect();
+            .filter_map(|check| HeaderCheck::compile(check).transpose())
+            .collect::<Compiled<Vec<_>>>()?;
         Ok(Self {
             lists,
-            dsize,
+            headers,
             slots: names.len(),
             fast: fast_pattern(signature),
             state: State::compile(signature)?,
@@ -265,7 +410,8 @@ impl Program {
 
     /// Whether the signature's matches hold on this payload. A list that
     /// inspects a buffer other than the payload and its base64 decoding finds
-    /// nothing, so its signature does not match.
+    /// nothing, so its signature does not match; nor does a header check
+    /// other than `dsize`, the payload carrying no header.
     #[must_use]
     pub fn matches(&self, payload: &[u8]) -> bool {
         self.matches_with(payload, &|_| None)
@@ -279,9 +425,43 @@ impl Program {
         payload: &'a [u8],
         sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>,
     ) -> bool {
-        if !self.dsize.iter().all(|m| m.matches(len_u64(payload.len()))) {
+        let len = len_u64(payload.len());
+        if !self.headers.iter().all(|h| match h {
+            HeaderCheck::Int(HeaderField::Dsize, m) => m.matches(len),
+            _ => false,
+        }) {
             return false;
         }
+        self.run(payload, sticky)
+    }
+
+    /// Whether the signature holds on a whole packet: its header checks on
+    /// the headers, its payload matches on what follows the transport
+    /// header, and the header buffers it names on those headers.
+    #[must_use]
+    pub fn matches_packet(&self, packet: &IpPacket<'_>) -> bool {
+        if !self.headers.iter().all(|h| h.matches(packet)) {
+            return false;
+        }
+        let packet = *packet;
+        let sticky = move |name: &str| packet.header_buffer(name);
+        self.run(packet.payload().unwrap_or_default(), &sticky)
+    }
+
+    /// Whether the program checks anything in the packet headers beyond the
+    /// payload size, so that a payload alone cannot decide it.
+    #[must_use]
+    pub fn reads_headers(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|h| !matches!(h, HeaderCheck::Int(HeaderField::Dsize, _)))
+            || self
+                .lists
+                .iter()
+                .any(|l| matches!(l.source, Source::Sticky(name) if HEADER_BUFFERS.contains(&name)))
+    }
+
+    fn run<'a>(&self, payload: &'a [u8], sticky: &'a dyn Fn(&str) -> Option<&'a [u8]>) -> bool {
         let mut run = Run {
             payload,
             sticky,
