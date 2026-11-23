@@ -34,7 +34,7 @@ use crate::firewall::entity::IpNetwork;
 pub const MAX_PORTS_PER_RULE: usize = 16;
 
 /// How deep one variable may refer to another before the chain is refused.
-const MAX_VARIABLE_DEPTH: usize = 8;
+pub(crate) const MAX_VARIABLE_DEPTH: usize = 8;
 
 /// The longest payload the agent captures, which bounds every offset.
 const PAYLOAD_LIMIT: usize = MAX_L7_PAYLOAD;
@@ -50,7 +50,10 @@ pub enum Support {
     /// The keyword is accepted and changes nothing, because the agent
     /// already behaves the way it asks for.
     Accepted,
-    /// A rule carrying the keyword is refused.
+    /// The keyword is parsed and its arguments checked, and a rule carrying
+    /// it is refused until the engine inspects what it asks for.
+    Pending,
+    /// The keyword is out of scope: a rule carrying it is refused.
     Refused,
 }
 
@@ -182,111 +185,2021 @@ pub const KEYWORDS: &[KeywordSupport] = &[
         note: "Types `limit`, `threshold` and `both`, tracked by source, destination or both.",
     },
     KeywordSupport {
-        keyword: "flowbits",
-        support: Support::Refused,
-        note: "State carried from one rule to another is not kept.",
-    },
-    KeywordSupport {
-        keyword: "xbits",
-        support: Support::Refused,
-        note: "State carried from one rule to another is not kept.",
-    },
-    KeywordSupport {
-        keyword: "flowint",
-        support: Support::Refused,
-        note: "State carried from one rule to another is not kept.",
-    },
-    KeywordSupport {
-        keyword: "noalert",
-        support: Support::Refused,
-        note: "A rule that never alerts only sets state for another.",
-    },
-    KeywordSupport {
-        keyword: "dsize",
-        support: Support::Refused,
-        note: "The captured payload is cut at 2048 bytes, so its size is not the segment's.",
+        keyword: "requires",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the requirements it states are checked against the engine.",
     },
     KeywordSupport {
         keyword: "isdataat",
-        support: Support::Refused,
-        note: "Not in the compiled subset.",
-    },
-    KeywordSupport {
-        keyword: "byte_test",
-        support: Support::Refused,
-        note: "Decoding a field out of the payload is not in the compiled subset.",
-    },
-    KeywordSupport {
-        keyword: "byte_jump",
-        support: Support::Refused,
-        note: "Decoding a field out of the payload is not in the compiled subset.",
-    },
-    KeywordSupport {
-        keyword: "byte_extract",
-        support: Support::Refused,
-        note: "Decoding a field out of the payload is not in the compiled subset.",
-    },
-    KeywordSupport {
-        keyword: "byte_math",
-        support: Support::Refused,
-        note: "Decoding a field out of the payload is not in the compiled subset.",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
     },
     KeywordSupport {
         keyword: "bsize",
-        support: Support::Refused,
-        note: "Measures an application-layer buffer.",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
     },
     KeywordSupport {
-        keyword: "stream_size",
-        support: Support::Refused,
-        note: "Streams are not reassembled.",
+        keyword: "dsize",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
     },
     KeywordSupport {
-        keyword: "flags",
-        support: Support::Refused,
-        note: "A payload is matched per segment, without its TCP flags.",
+        keyword: "byte_test",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "byte_jump",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "byte_extract",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "byte_math",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "entropy",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "absent",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "base64_decode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "base64_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "asn1",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the inspection engine evaluates it.",
+    },
+    KeywordSupport {
+        keyword: "urilen",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "uricontent",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "flowbits",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "xbits",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "hostbits",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flowint",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flowvar",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "pktvar",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "noalert",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
     },
     KeywordSupport {
         keyword: "detection_filter",
-        support: Support::Refused,
-        note: "Not in the compiled subset; `threshold` is.",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.age",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.pkts",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.pkts_toserver",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.pkts_toclient",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.bytes",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.bytes_toserver",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.bytes_toclient",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "flow.elephant",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+    },
+    KeywordSupport {
+        keyword: "stream_size",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until TCP is reassembled by sequence number.",
+    },
+    KeywordSupport {
+        keyword: "tcp.session",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until TCP is reassembled by sequence number.",
+    },
+    KeywordSupport {
+        keyword: "dataset",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the datasets the configuration names are loaded.",
+    },
+    KeywordSupport {
+        keyword: "datarep",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the datasets the configuration names are loaded.",
+    },
+    KeywordSupport {
+        keyword: "iprep",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the reputation lists the configuration names are loaded.",
+    },
+    KeywordSupport {
+        keyword: "geoip",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the GeoIP database answers it.",
+    },
+    KeywordSupport {
+        keyword: "flags",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.flags",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "seq",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.seq",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ack",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.ack",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "window",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.window",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.mss",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.wscale",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ttl",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tos",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ipopts",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "fragbits",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "fragoffset",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "sameip",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ip_proto",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "l3_proto",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "itype",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icmp_id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icmp_seq",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icmpv6.mtu",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "vlan.id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "vlan.layers",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "igmp.type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "decode-event",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the engine reports the events it names.",
+    },
+    KeywordSupport {
+        keyword: "stream-event",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the engine reports the events it names.",
+    },
+    KeywordSupport {
+        keyword: "engine-event",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the engine reports the events it names.",
+    },
+    KeywordSupport {
+        keyword: "app-layer-event",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the engine reports the events it names.",
+    },
+    KeywordSupport {
+        keyword: "app-layer-protocol",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the application protocol is detected from the traffic.",
+    },
+    KeywordSupport {
+        keyword: "app-layer-state",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the application protocol is detected from the traffic.",
+    },
+    KeywordSupport {
+        keyword: "ftpbounce",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "filename",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "fileext",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "filemd5",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "filesha1",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "filesha256",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "filesize",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "to_lowercase",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "to_uppercase",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "to_md5",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "to_sha1",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "to_sha256",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "strip_whitespace",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "compress_whitespace",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "url_decode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "header_lowercase",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "pcrexform",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "from_base64",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "dotprefix",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "strip_pseudo_headers",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "xor",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "gunzip",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "zlib_deflate",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "domain",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "tld",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until transforms run on a buffer.",
+    },
+    KeywordSupport {
+        keyword: "file.data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "file_data",
+        support: Support::Pending,
+        note: "The older name of `file.data`. Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
+    },
+    KeywordSupport {
+        keyword: "file.name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until files are extracted from the protocols that carry them.",
     },
     KeywordSupport {
         keyword: "http.uri",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.uri.normalized",
+        support: Support::Pending,
+        note: "The older name of `http.uri`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_uri",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.uri`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.uri.raw",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_raw_uri",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.uri.raw`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.method",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_method",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.method`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.request_line",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_request_line",
+        support: Support::Pending,
+        note: "The older name of `http.request_line`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.request_body",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_client_body",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.request_body`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.header",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_header",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.header`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.header.raw",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_raw_header",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.header.raw`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.cookie",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_cookie",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.cookie`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.user_agent",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_user_agent",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.user_agent`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.host",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_host",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.host`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.host.raw",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_raw_host",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.host.raw`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.accept",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_accept",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.accept_enc",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_accept_enc",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.accept_lang",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_accept_lang",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.referer",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_referer",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.connection",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_connection",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.content_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_content_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.content_len",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_content_len",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.start",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_start",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.protocol",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_protocol",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.header_names",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_header_names",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.request_header",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.response_header",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.stat_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_stat_code",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.stat_code`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.stat_msg",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_stat_msg",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.stat_msg`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.response_line",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_response_line",
+        support: Support::Pending,
+        note: "The older name of `http.response_line`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.response_body",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http_server_body",
+        support: Support::Pending,
+        note: "Moves the content before it into `http.response_body`. Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.server",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http.location",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the HTTP/1 parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http2.header_name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dns.query",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns_query",
+        support: Support::Pending,
+        note: "The older name of `dns.query`. Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.queries.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.answers.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.authorities.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.additionals.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.response.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mdns.queries.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for mDNS.",
+    },
+    KeywordSupport {
+        keyword: "mdns.answers.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for mDNS.",
+    },
+    KeywordSupport {
+        keyword: "mdns.authorities.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for mDNS.",
+    },
+    KeywordSupport {
+        keyword: "mdns.additionals.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for mDNS.",
+    },
+    KeywordSupport {
+        keyword: "mdns.response.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for mDNS.",
+    },
+    KeywordSupport {
+        keyword: "llmnr.queries.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for LLMNR.",
+    },
+    KeywordSupport {
+        keyword: "llmnr.answers.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for LLMNR.",
+    },
+    KeywordSupport {
+        keyword: "llmnr.authorities.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for LLMNR.",
+    },
+    KeywordSupport {
+        keyword: "llmnr.additionals.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for LLMNR.",
+    },
+    KeywordSupport {
+        keyword: "llmnr.response.rrname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers for LLMNR.",
+    },
+    KeywordSupport {
+        keyword: "tls.sni",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_sni",
+        support: Support::Pending,
+        note: "The older name of `tls.sni`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.cert_subject",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_subject",
+        support: Support::Pending,
+        note: "The older name of `tls.cert_subject`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.cert_issuer",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_issuer",
+        support: Support::Pending,
+        note: "The older name of `tls.cert_issuer`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.cert_serial",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_serial",
+        support: Support::Pending,
+        note: "The older name of `tls.cert_serial`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.cert_fingerprint",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_fingerprint",
+        support: Support::Pending,
+        note: "The older name of `tls.cert_fingerprint`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.certs",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.subjectaltname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.alpn",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.random",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.random_time",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.random_bytes",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3.hash",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3_hash",
+        support: Support::Pending,
+        note: "The older name of `ja3.hash`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3.string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3_string",
+        support: Support::Pending,
+        note: "The older name of `ja3.string`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3s.hash",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja3s.string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja4.hash",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ja4_hash",
+        support: Support::Pending,
+        note: "The older name of `ja4.hash`. Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.proto",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh_proto",
+        support: Support::Pending,
+        note: "The older name of `ssh.proto`. Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.software",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh_software",
+        support: Support::Pending,
+        note: "The older name of `ssh.software`. Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.hassh",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.hassh.string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.hassh.server",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.hassh.server.string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.command",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.command_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.completion_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.reply",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "smtp.helo",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "smtp.mail_from",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "smtp.rcpt_to",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.from",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.to",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.cc",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.subject",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.date",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.message_id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.x_mailer",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.url",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.received",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "email.body_md5",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb.named_pipe",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb_named_pipe",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb.share",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb_share",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb.ntlmssp_user",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb.ntlmssp_domain",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "dcerpc.stub_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "dce_stub_data",
+        support: Support::Pending,
+        note: "The older name of `dcerpc.stub_data`. Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5_cname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5_sname",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.community",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.usm",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.trap_oid",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.trap_address",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.method",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.uri",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.request_line",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.stat_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.stat_msg",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.response_line",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.protocol",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.from",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.to",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.via",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.user_agent",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.content_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "sip.content_length",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SIP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "quic.sni",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the QUIC parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "quic.ua",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the QUIC parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "quic.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the QUIC parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "quic.cyu.hash",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the QUIC parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "quic.cyu.string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the QUIC parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.clientid",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.username",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.password",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.willtopic",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.willmessage",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.protocol_string",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.publish.topic",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.publish.message",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.subscribe.topic",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.unsubscribe.topic",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.request.dn",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.request.attribute_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.dn",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.message",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.attribute_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.bind_request.sasl.mechanism",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.bind_request.sasl.credentials",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ike.vendor",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.key_exchange_payload",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.nonce_payload",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "pgsql.query",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a PostgreSQL parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "rfb.name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a RFB parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "websocket.payload",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a WebSocket parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3.data",
+        support: Support::Pending,
+        note: "The older name of `dnp3_data`. Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.product_name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.service_name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ntp.reference_id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NTP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.origin",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.session_name",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.session_info",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.uri",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.email",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.phone_number",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.connection_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.bandwidth",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.time",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.repeat_time",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.timezone",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.encryption_key",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.attribute",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.media.media",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.media.session_info",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.media.connection_data",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sdp.media.encryption_key",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a SDP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ipv4.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ipv6.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "tcp.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "udp.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icmpv4.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "icmpv6.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "sctp.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "igmp.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "ether.hdr",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "dns.opcode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.rcode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "dns.rrtype",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the DNS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssl_version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssl_state",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.cert_chain_len",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_expired",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_valid",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_notbefore",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls_cert_notafter",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.fingerprint",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.subject",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "tls.issuerdn",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the TLS parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.protoversion",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ssh.softwareversion",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SSH parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "http2.frametype",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "http2.errorcode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "http2.priority",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "http2.window",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "http2.size_update",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "http2.settings",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until an HTTP/2 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dcerpc.iface",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "dcerpc.opnum",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "smb.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5_err_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5_msg_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5.ticket_encryption",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "krb5.weak_encryption",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the Kerberos parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "snmp.pdu_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the SNMP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.dynamic_port",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.mode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftp.reply_received",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ftpdata_command",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the FTP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.flags",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.qos",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.protocol_version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.reason_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connack.session_present",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "mqtt.connect.flags",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the MQTT parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.request.operation",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.operation",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.count",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.responses.result_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.bind_request.authentication",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "ldap.bind_request.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the LDAP parser exposes its buffers.",
+    },
+    KeywordSupport {
+        keyword: "modbus",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a Modbus parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3_func",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3.func",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3_ind",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3.ind",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3_obj",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dnp3.obj",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DNP3 parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip_command",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "cip_service",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.status",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.vendor_id",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.product_code",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "enip.device_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a ENIP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "nfs_procedure",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NFS parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "nfs.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NFS parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "rpc",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a RPC parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ntp.mode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NTP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ntp.stratum",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NTP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ntp.version",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a NTP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "rfb.secresult",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a RFB parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "rfb.sectype",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a RFB parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.exchtype",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.chosen_sa_attribute",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.key_exchange_payload_length",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "ike.nonce_payload_length",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a IKE parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "websocket.flags",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a WebSocket parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "websocket.mask",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a WebSocket parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "websocket.opcode",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a WebSocket parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dhcp.leasetime",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DHCP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dhcp.rebinding_time",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DHCP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "dhcp.renewal_time",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until a DHCP parser exposes its fields.",
+    },
+    KeywordSupport {
+        keyword: "sctp.chunk_type",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "sctp.vtag",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "sctp.chunk_cnt",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+    },
+    KeywordSupport {
+        keyword: "frame",
+        support: Support::Pending,
+        note: "Parsed and checked; a rule carrying it is refused until the application protocol is detected from the traffic.",
+    },
+    KeywordSupport {
+        keyword: "tag",
+        support: Support::Accepted,
+        note: "Packets after the alert are not logged; the alert itself is raised.",
+    },
+    KeywordSupport {
+        keyword: "prefilter",
+        support: Support::Accepted,
+        note: "A prefilter hint; the engine chooses its own prefilter.",
+    },
+    KeywordSupport {
+        keyword: "lua",
         support: Support::Refused,
-        note: "Inspects an application-layer buffer; so does every sticky buffer and every `http_`, `tls`, `dns`, `ja3`, `file` and `smb` keyword.",
+        note: "Runs a Lua script; the agent embeds no interpreter.",
+    },
+    KeywordSupport {
+        keyword: "luajit",
+        support: Support::Refused,
+        note: "Runs a Lua script; the agent embeds no interpreter.",
+    },
+    KeywordSupport {
+        keyword: "luaxform",
+        support: Support::Refused,
+        note: "Transforms a buffer with a Lua script; the agent embeds no interpreter.",
+    },
+    KeywordSupport {
+        keyword: "replace",
+        support: Support::Refused,
+        note: "Rewrites the packet in flight; the agent matches a copy and never rewrites traffic.",
+    },
+    KeywordSupport {
+        keyword: "filestore",
+        support: Support::Refused,
+        note: "Writes files to disk; the agent stores no payload.",
+    },
+    KeywordSupport {
+        keyword: "filemagic",
+        support: Support::Refused,
+        note: "Needs libmagic, which the agent does not link.",
+    },
+    KeywordSupport {
+        keyword: "file.magic",
+        support: Support::Refused,
+        note: "Needs libmagic, which the agent does not link.",
+    },
+    KeywordSupport {
+        keyword: "bypass",
+        support: Support::Refused,
+        note: "Hands the flow to a bypass path the agent does not have.",
+    },
+    KeywordSupport {
+        keyword: "nfq_set_mark",
+        support: Support::Refused,
+        note: "Marks a packet in an NFQUEUE the agent does not read.",
+    },
+    KeywordSupport {
+        keyword: "tls_store",
+        support: Support::Refused,
+        note: "Writes certificates to disk; the agent stores no payload.",
+    },
+    KeywordSupport {
+        keyword: "tls.store",
+        support: Support::Refused,
+        note: "Writes certificates to disk; the agent stores no payload.",
+    },
+    KeywordSupport {
+        keyword: "config",
+        support: Support::Refused,
+        note: "Changes how Suricata logs and bypasses a flow, which the agent does not imitate.",
     },
 ];
-
-/// The keywords that select an application-layer buffer: everything with a
-/// dot in it, and the older modifier spellings by prefix.
-fn is_application_buffer(keyword: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "http_",
-        "tls_",
-        "dns_",
-        "ja3",
-        "ja4",
-        "file_",
-        "file",
-        "smb",
-        "ssh_",
-        "ssl_",
-        "krb5",
-        "dcerpc",
-        "sip_",
-        "smtp_",
-        "ftp",
-        "nfs",
-        "dnp3",
-        "modbus",
-        "enip",
-        "base64_",
-        "uricontent",
-        "urilen",
-    ];
-    keyword.contains('.') || PREFIXES.iter().any(|prefix| keyword.starts_with(prefix))
-}
 
 fn table_row(keyword: &str) -> Option<&'static KeywordSupport> {
     KEYWORDS.iter().find(|row| row.keyword == keyword)
@@ -469,7 +2382,7 @@ pub struct Refused {
 }
 
 impl Refused {
-    fn new(keyword: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(keyword: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             sid: None,
             keyword: keyword.into(),
@@ -478,7 +2391,7 @@ impl Refused {
     }
 }
 
-type Compiled<T> = Result<T, Refused>;
+pub(crate) type Compiled<T> = Result<T, Refused>;
 
 // ── Ruleset ──────────────────────────────────────────────────────
 
@@ -603,6 +2516,19 @@ fn compile_into(
 /// names) or the refusal.
 pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
     let text = text.trim();
+    // A rule that is not valid Suricata is refused by the parser; a valid one
+    // naming a keyword the engine does not inspect yet, or never will, is
+    // refused by the keyword table.
+    let signature = super::sig::parse_signature(text, vars)?;
+    for keyword in &signature.keywords {
+        if let Some(row) = table_row(keyword)
+            && matches!(row.support, Support::Pending | Support::Refused)
+        {
+            let mut refused = Refused::new(keyword, row.note);
+            refused.sid = Some(signature.sid);
+            return Err(refused);
+        }
+    }
     let open = text
         .find('(')
         .ok_or_else(|| Refused::new("rule", "has no option list in parentheses"))?;
@@ -776,7 +2702,7 @@ fn parse_header(text: &str, vars: &SuricataVars) -> Compiled<Header> {
 }
 
 /// Split the header on whitespace, keeping a bracketed list whole.
-fn split_header(text: &str) -> Compiled<Vec<String>> {
+pub(crate) fn split_header(text: &str) -> Compiled<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;
@@ -811,7 +2737,7 @@ fn split_header(text: &str) -> Compiled<Vec<String>> {
 }
 
 /// Split a bracketed list's body on the commas at its own level.
-fn split_list(body: &str) -> Vec<&str> {
+pub(crate) fn split_list(body: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
@@ -831,14 +2757,14 @@ fn split_list(body: &str) -> Vec<&str> {
 }
 
 #[derive(Default)]
-struct AddressSet {
+pub(crate) struct AddressSet {
     any: bool,
     within: Vec<IpNetwork>,
     outside: Vec<IpNetwork>,
 }
 
 impl AddressSet {
-    fn into_match(self, written: &str) -> Compiled<AddressMatch> {
+    pub(crate) fn into_match(self, written: &str) -> Compiled<AddressMatch> {
         if self.any && !self.within.is_empty() {
             return Ok(AddressMatch {
                 within: Vec::new(),
@@ -855,7 +2781,11 @@ impl AddressSet {
     }
 }
 
-fn parse_addresses(token: &str, vars: &SuricataVars, depth: usize) -> Compiled<AddressSet> {
+pub(crate) fn parse_addresses(
+    token: &str,
+    vars: &SuricataVars,
+    depth: usize,
+) -> Compiled<AddressSet> {
     if depth > MAX_VARIABLE_DEPTH {
         return Err(Refused::new(
             token,
@@ -1030,10 +2960,11 @@ fn collect_ports(
 
 /// Split the option list into `(keyword, value)` pairs. A value runs to the
 /// first semicolon outside quotes; a backslash escapes the next character.
-fn parse_options(text: &str) -> Compiled<Vec<(String, String)>> {
+pub(crate) fn parse_options(text: &str) -> Compiled<Vec<(String, String)>> {
+    // Suricata ends an option at the first `;` that no backslash escapes,
+    // quotes or not: a `;` inside a content is written `\;` or `|3b|`.
     let mut options = Vec::new();
     let mut current = String::new();
-    let mut quoted = false;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         match ch {
@@ -1043,19 +2974,12 @@ fn parse_options(text: &str) -> Compiled<Vec<(String, String)>> {
                     current.push(next);
                 }
             }
-            '"' => {
-                quoted = !quoted;
-                current.push(ch);
-            }
-            ';' if !quoted => {
+            ';' => {
                 push_option(&mut options, &current)?;
                 current.clear();
             }
             _ => current.push(ch),
         }
-    }
-    if quoted {
-        return Err(Refused::new("rule", "opens a quoted value it never closes"));
     }
     push_option(&mut options, &current)?;
     Ok(options)
@@ -1082,7 +3006,7 @@ fn push_option(options: &mut Vec<(String, String)>, raw: &str) -> Compiled<()> {
 
 /// A quoted option value with its quotes taken off. Escapes are kept for the
 /// caller, which knows which ones it reads.
-fn unquote<'a>(keyword: &str, value: &'a str) -> Compiled<&'a str> {
+pub(crate) fn unquote<'a>(keyword: &str, value: &'a str) -> Compiled<&'a str> {
     value
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -1090,7 +3014,7 @@ fn unquote<'a>(keyword: &str, value: &'a str) -> Compiled<&'a str> {
 }
 
 /// Remove the escapes Suricata defines inside a quoted value.
-fn unescape(value: &str) -> String {
+pub(crate) fn unescape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
@@ -1258,12 +3182,6 @@ fn refuse_keyword(keyword: &str) -> Refused {
     if let Some(row) = table_row(keyword) {
         return Refused::new(keyword, row.note);
     }
-    if is_application_buffer(keyword) {
-        return Refused::new(
-            keyword,
-            "inspects an application-layer buffer the agent does not reassemble",
-        );
-    }
     Refused::new(keyword, "is not in the compiled subset")
 }
 
@@ -1318,7 +3236,7 @@ fn apply_modifier(content: &mut Content, key: &str, value: &str) -> Compiled<()>
 
 /// Decode a content value: `|41 42|` sections are hex bytes, a backslash
 /// escapes the next character, and the rest is literal.
-fn decode_content(value: &str) -> Compiled<Vec<u8>> {
+pub(crate) fn decode_content(value: &str) -> Compiled<Vec<u8>> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut hex = false;
     let mut digits = String::new();
@@ -1866,8 +3784,8 @@ mod tests {
         let cases = [
             (ET_FOKIRTOR, "pcre", "flag 'R'"),
             (ET_ORACLE_BACKREF, "pcre", "backreference"),
-            (ET_HTTP, "http", "application-layer protocol"),
-            (ET_FLOWBITS, "flowbits", "State carried"),
+            (ET_HTTP, "http.method", "HTTP/1 parser"),
+            (ET_FLOWBITS, "flowbits", "flow table"),
         ];
         for (text, keyword, reason) in cases {
             let refused = refusal(text);
@@ -2071,6 +3989,24 @@ mod tests {
             assert!(seen.insert(row.keyword), "{} twice", row.keyword);
             assert!(!row.note.is_empty());
         }
+    }
+
+    #[test]
+    fn every_keyword_the_parser_reads_has_a_row() {
+        use crate::ids::sig::{buffers, parse};
+        let mut names: Vec<&str> = Vec::new();
+        for def in buffers::BUFFERS {
+            names.push(def.name);
+            names.extend(def.aliases);
+            names.extend(def.modifier);
+        }
+        names.extend(buffers::FIELDS.iter().map(|field| field.name));
+        names.extend(parse::TRANSFORMS.iter().map(|(name, _)| *name));
+        let missing: Vec<&str> = names
+            .into_iter()
+            .filter(|name| table_row(name).is_none())
+            .collect();
+        assert!(missing.is_empty(), "no row for {missing:?}");
     }
 
     #[test]
