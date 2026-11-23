@@ -273,7 +273,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "flowint",
         support: Support::Compiled,
-        note: "Every operator, against a number or another flow variable. A comparison on a variable never set fails; adding to one starts it from 0.",
+        note: "Every operator, against a number or another flow variable. A comparison of a variable never set fails, a variable never set reads 0 on the right of one, and adding to one starts it from 0. A rule writes only once every test of it held.",
     },
     KeywordSupport {
         keyword: "flowvar",
