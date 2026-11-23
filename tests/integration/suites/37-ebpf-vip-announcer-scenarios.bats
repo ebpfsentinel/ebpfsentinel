@@ -11,7 +11,7 @@
 #   * BGP export goes through the routing daemon's control socket, the
 #     speaker exporting each VIP and a standby withdrawing it
 #
-# Requires: root, kernel >= 6.12, bpftool, python3 + scapy
+# Requires: root, kernel >= 6.18, bpftool, python3 + scapy
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

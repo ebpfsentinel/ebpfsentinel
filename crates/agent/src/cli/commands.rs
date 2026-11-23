@@ -7553,7 +7553,7 @@ mod tests {
     #[test]
     fn the_verdict_refuses_a_kernel_below_the_floor_even_with_the_lsm_active() {
         let lines = network_executables_verdict(
-            Some("kernel 6.8 is below the required minimum 6.12. x"),
+            Some("kernel 6.8 is below the required minimum 6.18. x"),
             &lsm(true),
         );
         assert!(lines[0].ends_with("will not load on this host."));

@@ -16,7 +16,7 @@
 #   * The same refusing rule over the real cgroup root starts, so what stops
 #     the agent above is the attach and nothing else in the file.
 #
-# Requires: root, kernel >= 6.12, jq.
+# Requires: root, kernel >= 6.18, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

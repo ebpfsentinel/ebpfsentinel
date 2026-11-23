@@ -4,7 +4,7 @@
 # Why Talos + qemu: minikube/kind run the node as a container, so the agent's
 # self-unshare (a child user namespace owning the bpffs the warden delegates)
 # hits a nested-userns wall. Talos qemu nodes are real VMs with a real kernel
-# (>= 6.12 on Talos 1.13), so token loading and real eBPF attach work exactly as
+# (6.18 on Talos 1.12 and later), so token loading and real eBPF attach work exactly as
 # on a production node.
 #
 # `verify` is a gate, not a report: it exits non-zero unless the shipped split

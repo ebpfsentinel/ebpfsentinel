@@ -18,7 +18,7 @@
 #   * On a kernel.ubuntu.com mainline build (the kernel matrix), every entry
 #     the kernel alone decides is active exactly from its `since` release.
 #
-# Requires: root, kernel >= 6.12, jq, unshare.
+# Requires: root, kernel >= 6.18, jq, unshare.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn a_signal_not_read_is_named_and_a_missing_source_gives_its_reason() {
-        let host = HostSources::new(Some((6, 12)))
+        let host = HostSources::new(Some((6, 18)))
             .present(Source::ProcessTracing)
             .absent(Source::FileWatch, "fanotify refused");
         let out = unavailable(

@@ -545,10 +545,7 @@ mod tests {
         id: "string_kfuncs",
         unlocks: "kernel strings compared in the kernel",
         probe: ProbeKind::Loaded,
-        since: KernelVersion {
-            major: 6,
-            minor: 17,
-        },
+        since: KernelVersion { major: 7, minor: 1 },
         needs_lsm: false,
         fallback: "compared in userspace",
     };
@@ -564,7 +561,7 @@ mod tests {
             load: Load::Refused("not declared".into()),
         };
         assert_eq!(
-            classify(&ABOVE, Some(k(7, 0)), true, &e),
+            classify(&ABOVE, Some(k(7, 2)), true, &e),
             Some(Inactive::NotDeclared)
         );
     }
@@ -575,7 +572,7 @@ mod tests {
             declared: Some(true),
             load: Load::Loaded,
         };
-        assert_eq!(classify(&ABOVE, Some(k(6, 12)), false, &e), None);
+        assert_eq!(classify(&ABOVE, Some(k(6, 18)), false, &e), None);
     }
 
     #[test]
@@ -584,9 +581,9 @@ mod tests {
             declared: Some(false),
             load: Load::Refused("not declared".into()),
         };
-        let inactive = classify(&ABOVE, Some(k(6, 12)), true, &e).expect("inactive");
+        let inactive = classify(&ABOVE, Some(k(6, 18)), true, &e).expect("inactive");
         assert_eq!(inactive, Inactive::KernelOlder { since: ABOVE.since });
-        assert_eq!(inactive.describe(Some(k(6, 12))), "needs 6.17, found 6.12");
+        assert_eq!(inactive.describe(Some(k(6, 18))), "needs 7.1, found 6.18");
     }
 
     #[test]
@@ -595,9 +592,9 @@ mod tests {
             declared: Some(false),
             load: Load::NotRun("the load needs a BPF token and none was granted".into()),
         };
-        let inactive = classify(&ABOVE, Some(k(6, 12)), true, &e).expect("inactive");
+        let inactive = classify(&ABOVE, Some(k(6, 18)), true, &e).expect("inactive");
         assert_eq!(inactive.code(), "not_probed");
-        let said = inactive.describe(Some(k(6, 12)));
+        let said = inactive.describe(Some(k(6, 18)));
         assert!(!said.contains("needs 6."), "{said}");
         assert!(!said.contains("found 6."), "{said}");
         assert!(!said.contains("kernel does not"), "{said}");
@@ -612,11 +609,11 @@ mod tests {
             load: Load::Refused("sleepable programs refused".into()),
         };
         assert_eq!(
-            classify(file, Some(k(6, 12)), false, &e),
+            classify(file, Some(k(6, 18)), false, &e),
             Some(Inactive::LsmInactive)
         );
         assert_eq!(
-            classify(file, Some(k(6, 12)), true, &e),
+            classify(file, Some(k(6, 18)), true, &e),
             Some(Inactive::Refused("sleepable programs refused".into()))
         );
     }
@@ -642,7 +639,7 @@ mod tests {
             declared: Some(true),
             load: Load::NotAttempted,
         };
-        assert_eq!(classify(reqsk, Some(k(6, 12)), false, &e), None);
+        assert_eq!(classify(reqsk, Some(k(6, 18)), false, &e), None);
     }
 
     #[test]
@@ -661,11 +658,7 @@ mod tests {
             reason: Some("the kernel does not declare bpf_send_signal_task".into()),
         });
         assert_eq!(
-            classify(entry, Some(k(6, 12)), false, &undeclared),
-            Some(Inactive::KernelOlder { since: k(6, 13) })
-        );
-        assert_eq!(
-            classify(entry, Some(k(6, 14)), false, &undeclared),
+            classify(entry, Some(k(6, 18)), false, &undeclared),
             Some(Inactive::NotDeclared)
         );
 
@@ -675,7 +668,7 @@ mod tests {
             reason: Some("the kernel refused the signal program (errno 22)".into()),
         });
         assert_eq!(
-            classify(entry, Some(k(6, 13)), false, &refused),
+            classify(entry, Some(k(6, 18)), false, &refused),
             Some(Inactive::Refused(
                 "the kernel refused the signal program (errno 22)".into()
             ))
@@ -683,7 +676,7 @@ mod tests {
 
         let off = immediate_signal_evidence(&DirectSignalProbe::default());
         assert_eq!(
-            classify(entry, Some(k(6, 13)), false, &off)
+            classify(entry, Some(k(6, 18)), false, &off)
                 .expect("inactive")
                 .code(),
             "not_probed"
@@ -698,14 +691,14 @@ mod tests {
             Some("stopping a process is turned off in the configuration".into()),
         );
         assert_eq!(
-            classify(signal, Some(k(6, 12)), true, &e),
+            classify(signal, Some(k(6, 18)), true, &e),
             Some(Inactive::NotProbed(
                 "stopping a process is turned off in the configuration".into()
             ))
         );
         let never = attach_evidence(false, None);
         assert_eq!(
-            classify(signal, Some(k(6, 12)), true, &never)
+            classify(signal, Some(k(6, 18)), true, &never)
                 .expect("inactive")
                 .code(),
             "not_probed"
@@ -717,11 +710,11 @@ mod tests {
         let guard = find("self_protection").expect("entry");
         let e = attach_evidence(false, Some("the LSM hook did not attach".into()));
         assert_eq!(
-            classify(guard, Some(k(6, 12)), false, &e),
+            classify(guard, Some(k(6, 18)), false, &e),
             Some(Inactive::LsmInactive)
         );
         assert_eq!(
-            classify(guard, Some(k(6, 12)), true, &e),
+            classify(guard, Some(k(6, 18)), true, &e),
             Some(Inactive::Refused("the LSM hook did not attach".into()))
         );
     }
@@ -735,7 +728,7 @@ mod tests {
             read: true,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 12)), false, &booted_without),
+            classify(lsm, Some(k(6, 18)), false, &booted_without),
             Some(Inactive::LsmInactive)
         );
         let built_without = Evidence::Lsm {
@@ -744,7 +737,7 @@ mod tests {
             read: true,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 12)), false, &built_without),
+            classify(lsm, Some(k(6, 18)), false, &built_without),
             Some(Inactive::NotDeclared)
         );
         let unread = Evidence::Lsm {
@@ -753,7 +746,7 @@ mod tests {
             read: false,
         };
         assert_eq!(
-            classify(lsm, Some(k(6, 12)), false, &unread)
+            classify(lsm, Some(k(6, 18)), false, &unread)
                 .expect("inactive")
                 .code(),
             "not_probed"
@@ -762,14 +755,14 @@ mod tests {
 
     #[test]
     fn the_report_answers_every_entry_and_a_missing_one_is_not_probed() {
-        let report = build(Some("6.12.48+deb13-amd64".into()), true, None, &|id| {
+        let report = build(Some("6.18.12+deb13-amd64".into()), true, None, &|id| {
             (id == "bpf_lsm").then_some(Evidence::Lsm {
                 active: true,
                 built: Some(true),
                 read: true,
             })
         });
-        assert_eq!(report.kernel, Some(k(6, 12)));
+        assert_eq!(report.kernel, Some(k(6, 18)));
         assert_eq!(report.entries.len(), CATALOGUE.len());
         assert_eq!(report.active_count(), 1);
         for e in report.entries.iter().filter(|e| !e.active()) {
@@ -781,7 +774,7 @@ mod tests {
     fn each_reason_gets_the_hint_that_could_change_it() {
         let lsm_off = "add bpf to the lsm= kernel boot parameter: lsm=landlock,bpf";
         let report = build(
-            Some("6.12.48+deb13-amd64".into()),
+            Some("6.18.12+deb13-amd64".into()),
             false,
             Some(lsm_off),
             &|id| match id {
@@ -826,9 +819,9 @@ mod tests {
     #[test]
     fn an_older_kernel_is_pointed_at_the_version_it_lacks() {
         let inactive = Inactive::KernelOlder { since: ABOVE.since };
-        let hint = hint_for(&ABOVE, &inactive, Some("6.12.48+deb13-amd64"), None).expect("hint");
+        let hint = hint_for(&ABOVE, &inactive, Some("6.18.12+deb13-amd64"), None).expect("hint");
         assert!(
-            hint.starts_with("This needs 6.17 and the host runs 6.12"),
+            hint.starts_with("This needs 7.1 and the host runs 6.18"),
             "{hint}"
         );
         assert_eq!(hint_for(&ABOVE, &inactive, None, None), None);
@@ -877,7 +870,7 @@ mod tests {
         let lsm_off = "add bpf to the lsm= kernel boot parameter, keeping the modules already \
                        active, and reboot: lsm=landlock,yama,apparmor,bpf";
         let report = build(
-            Some("6.12.48+deb13-amd64".into()),
+            Some("6.18.12+deb13-amd64".into()),
             false,
             Some(lsm_off),
             &|id| match id {
@@ -922,7 +915,7 @@ mod tests {
             .filter(|l| l.contains("kernel capabilities above the floor"))
             .collect();
         assert_eq!(summary.len(), 1, "{lines:#?}");
-        assert!(summary[0].contains("kernel=6.12"), "{}", summary[0]);
+        assert!(summary[0].contains("kernel=6.18"), "{}", summary[0]);
         assert!(summary[0].contains("family=\"debian\""), "{}", summary[0]);
         assert!(summary[0].contains("active=6"), "{}", summary[0]);
 

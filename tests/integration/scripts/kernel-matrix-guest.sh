@@ -5,7 +5,7 @@
 # the version):
 #   kernel-matrix-guest.sh <build> <tier> <out-dir>
 #
-# <build> is what check-kernel-matrix.py --resolve answered: 6.12.118, 6.13 (a
+# <build> is what check-kernel-matrix.py --resolve answered: 6.18.5, 6.19 (a
 # .0 release) or 7.4-rc4.
 #
 # 1. Refuses to go on when the running kernel is not the mainline build of

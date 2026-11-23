@@ -4,7 +4,7 @@
 # baseline. Validates that pktgen + XDP firewall + rate-limiter behave
 # at production volumes.
 #
-# Topology: 2vm. Profile: nightly. Kernel >= 6.12.
+# Topology: 2vm. Profile: nightly. Kernel >= 6.18.
 #
 # Test plan:
 #   1. Baseline (no XDP rule effect) - record achievable pps + CPU.

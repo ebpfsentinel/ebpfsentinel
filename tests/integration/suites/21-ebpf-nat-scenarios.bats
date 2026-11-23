@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 21-ebpf-nat-scenarios.bats - NAT eBPF scenario tests, API and redirect datapath
-# Requires: root, kernel >= 6.12, bpftool
+# Requires: root, kernel >= 6.18, bpftool
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -20,7 +20,7 @@
 # Runs on all three lanes: the local lane drives the flow from the test
 # namespace, the 2-VM and 3-VM lanes from the client VM toward the agent VM.
 #
-# Requires: root, kernel >= 6.12, bpftool, ncat, jq.
+# Requires: root, kernel >= 6.18, bpftool, ncat, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

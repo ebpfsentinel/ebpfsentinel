@@ -35,10 +35,10 @@
 #   VAGRANT_3VM       Set to "1" / "true" to enable the 3-VM transit topology
 #   AGENT_KERNEL      Boot the agent VM on an Ubuntu mainline kernel build, by
 #                     its exact name under kernel.ubuntu.com/mainline (e.g.
-#                     "6.12.118", "7.4-rc4"). Unset: the 24.04 HWE kernel.
+#                     "6.18.5", "7.4-rc4"). Unset: the 24.04 HWE kernel.
 #                     Applied by the kernel-mainline provisioner, which reboots;
 #                     the newest build of a release of tests/integration/kernels.toml:
-#                       AGENT_KERNEL="$(../scripts/check-kernel-matrix.py --resolve 6.12)" \
+#                       AGENT_KERNEL="$(../scripts/check-kernel-matrix.py --resolve 6.18)" \
 #                         vagrant provision agent --provision-with kernel-mainline
 #                     scripts/run-kernel-matrix.sh walks the whole list.
 #
@@ -182,11 +182,11 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     # ----------------------------------------------------------
     # Provisioner: kernel-hwe
     #
-    # The agent enforces a hard minimum kernel of 6.12 with no fallback,
-    # the kernel the managed node images converge on.
+    # The agent enforces a hard minimum kernel of 6.18 with no fallback,
+    # the first release that verifies a signed BPF program.
     # The bento/ubuntu-24.04 box ships 6.8, so without this the agent
     # refuses to start and every eBPF suite's setup_file fails. Install
-    # the HWE kernel (>= 6.12) and reboot into it. The Ubuntu HWE kernel
+    # the HWE kernel (>= 6.18) and reboot into it. The Ubuntu HWE kernel
     # ships vboxsf/vboxguest in-tree, so the synced folder still mounts
     # after the reboot without rebuilding the ISO guest additions.
     #
@@ -207,13 +207,13 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
 
       running="$(uname -r | sed 's/-generic//')"
-      if dpkg --compare-versions "$running" ge 6.12; then
-        echo "kernel $running already >= 6.12, nothing to do"
+      if dpkg --compare-versions "$running" ge 6.18; then
+        echo "kernel $running already >= 6.18, nothing to do"
         exit 0
       fi
 
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04
-      echo "HWE kernel + tools installed; rebooting into >= 6.12"
+      echo "HWE kernel + tools installed; rebooting into >= 6.18"
     SHELL
 
     # ----------------------------------------------------------
@@ -720,10 +720,10 @@ UNIT
     #
     # bats runs on this VM, so its kernel gates the require_kernel checks
     # of every eBPF suite, and suite 61 starts a local agent here - and the
-    # agent hard-refuses to start below 6.12. The bento/ubuntu-24.04 box
+    # agent hard-refuses to start below 6.18. The bento/ubuntu-24.04 box
     # ships 6.8, so without this the kernel-gated suites all skip and the
     # PQ-handshake suite's setup_file fails. Mirror the agent VM: install
-    # the HWE kernel (>= 6.12) and reboot into it.
+    # the HWE kernel (>= 6.18) and reboot into it.
     # ----------------------------------------------------------
     attacker.vm.provision "shell", name: "kernel-hwe", reboot: true, inline: <<-SHELL
       set -euxo pipefail
@@ -733,13 +733,13 @@ UNIT
       apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
 
       running="$(uname -r | sed 's/-generic//')"
-      if dpkg --compare-versions "$running" ge 6.12; then
-        echo "kernel $running already >= 6.12, nothing to do"
+      if dpkg --compare-versions "$running" ge 6.18; then
+        echo "kernel $running already >= 6.18, nothing to do"
         exit 0
       fi
 
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04
-      echo "HWE kernel + tools installed; rebooting into >= 6.12"
+      echo "HWE kernel + tools installed; rebooting into >= 6.18"
     SHELL
 
     # ----------------------------------------------------------

@@ -15,15 +15,15 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# Check kernel version >= 6.12, the agent's floor: the kernel the managed node
-# images converge on. BPF token delegation (6.9) and every kfunc the programs
-# call are older than it.
+# Check kernel version >= 6.18, the agent's floor: the first release that
+# verifies a signed BPF program. BPF token delegation (6.9) and every kfunc
+# the programs call are older than it.
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 12 ]]; }; then
-  echo "Error: kernel >= 6.12 is required (found $(uname -r))." >&2
-  echo "       The agent refuses to start below its 6.12 floor." >&2
+if [[ "$KERNEL_MAJOR" -lt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 18 ]]; }; then
+  echo "Error: kernel >= 6.18 is required (found $(uname -r))." >&2
+  echo "       The agent refuses to start below its 6.18 floor." >&2
   exit 1
 fi
 

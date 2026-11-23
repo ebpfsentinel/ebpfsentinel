@@ -11,7 +11,7 @@
 #     counted, and raised as a threatintel alert
 #   * a reload keeps the agent answering and the indicators loaded
 #
-# Requires: root, kernel >= 6.12, bpftool, ncat, python3
+# Requires: root, kernel >= 6.18, bpftool, ncat, python3
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

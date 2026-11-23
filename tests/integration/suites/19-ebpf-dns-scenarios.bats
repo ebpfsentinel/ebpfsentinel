@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 19-ebpf-dns-scenarios.bats - DNS intelligence eBPF scenario tests
-# Requires: root, kernel >= 6.12, bpftool
+# Requires: root, kernel >= 6.18, bpftool
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

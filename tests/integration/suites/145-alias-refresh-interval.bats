@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 145-alias-refresh-interval.bats - An alias refreshes on its own interval
-# Requires: root, kernel >= 6.12, python3, ncat
+# Requires: root, kernel >= 6.18, python3, ncat
 #
 # A url_table alias names the sources a deny rule drops, read from a list the
 # suite serves on the host. GeoIP is off, which used to leave such an alias

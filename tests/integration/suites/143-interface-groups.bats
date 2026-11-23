@@ -10,7 +10,7 @@
 # `outside` or `!inside`. A rule that ignored its scope would refuse all five
 # ports; one that never matched a group would refuse none.
 #
-# Requires: root, kernel >= 6.12, ncat, jq.
+# Requires: root, kernel >= 6.18, ncat, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -9,7 +9,7 @@
 # then forking one worker per directory, and the figure is the one the
 # agent's own stop alert states, with the files the run had written by then.
 #
-# Requires: root, kernel >= 6.12, python3, jq.
+# Requires: root, kernel >= 6.18, python3, jq.
 # Nightly tier. Outputs JSON to /tmp/ebpfsentinel-mass-encryption-kill-latency.json
 
 FIXTURE_DIR="${BATS_TEST_DIRNAME}/../integration/fixtures"

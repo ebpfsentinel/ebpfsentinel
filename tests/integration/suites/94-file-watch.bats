@@ -16,7 +16,7 @@
 #     previous name, and the alert carries the process that moved the file
 #     and the shell above it.
 #
-# Requires: root, kernel >= 6.12, jq.
+# Requires: root, kernel >= 6.18, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

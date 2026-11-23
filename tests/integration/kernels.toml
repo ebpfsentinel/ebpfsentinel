@@ -32,44 +32,13 @@
 # stable, longterm or mainline-candidate release kernel.org publishes that is
 # missing here, or on a release kernel.ubuntu.com has no amd64 build of.
 
-floor = "6.12"
-
-[[kernel]]
-version = "6.12"
-tier = "full"
-longterm = true
-why = "the floor, longterm"
-
-[[kernel]]
-version = "6.13"
-tier = "load"
-why = "first release past the floor: bpf_send_signal_task, immediate_signal"
-
-[[kernel]]
-version = "6.14"
-tier = "load"
-why = "stable, end of life"
-
-[[kernel]]
-version = "6.15"
-tier = "load"
-why = "stable, end of life"
-
-[[kernel]]
-version = "6.16"
-tier = "load"
-why = "stable, end of life"
-
-[[kernel]]
-version = "6.17"
-tier = "load"
-why = "stable, end of life"
+floor = "6.18"
 
 [[kernel]]
 version = "6.18"
 tier = "full"
 longterm = true
-why = "longterm"
+why = "the floor, longterm: the first release that verifies a signed program"
 
 [[kernel]]
 version = "6.19"

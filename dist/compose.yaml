@@ -14,7 +14,7 @@
 #                               mode 0640, since the agent refuses a
 #                               world-readable file that may hold secrets
 #
-# Host prerequisites: Linux 6.12 or later with BTF, /etc/machine-id present,
+# Host prerequisites: Linux 6.18 or later with BTF, /etc/machine-id present,
 # and the agent allowed a user namespace. On Ubuntu 24.04 and later
 # (kernel.apparmor_restrict_unprivileged_userns=1) load the agent's AppArmor
 # profile, apparmor.d/ebpfsentinel-agent in the release tarball, which grants

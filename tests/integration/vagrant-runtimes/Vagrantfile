@@ -32,7 +32,7 @@
 #   RUNTIMES_VM_MEMORY   RAM in MB (default: 3072)
 #
 # Provider: VMware Workstation (vmware_desktop) or VirtualBox.
-# Base box: bento/ubuntu-24.04, moved onto the HWE kernel (>= 6.12).
+# Base box: bento/ubuntu-24.04, moved onto the HWE kernel (>= 6.18).
 
 # The CRI-O and cri-tools release lines installed. Both come from the
 # Kubernetes project's own repositories, which publish one line per minor.
@@ -85,7 +85,7 @@ Vagrant.configure("2") do |config|
       apt-get update
       apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
       running="$(uname -r | sed 's/-generic//')"
-      if dpkg --compare-versions "$running" ge 6.12; then
+      if dpkg --compare-versions "$running" ge 6.18; then
         exit 0
       fi
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04

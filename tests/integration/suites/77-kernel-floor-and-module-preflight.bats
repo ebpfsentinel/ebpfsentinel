@@ -9,7 +9,7 @@
 #   - the kernel-features route reports the facts probed at startup, including
 #     the file kfuncs and the newer kernel facts, each with a verdict rather
 #     than a version inferred from the release string;
-#   - an agent shown a release below 6.12 stops at startup and says what to
+#   - an agent shown a release below 6.18 stops at startup and says what to
 #     upgrade, with no degraded mode. The release is shown through a bind mount
 #     over /proc/sys/kernel/osrelease inside a private mount namespace, so the
 #     host is untouched and the agent reads exactly what it reads in production;
@@ -20,7 +20,7 @@
 #     iptables rules of any host running Docker and cannot be unloaded there,
 #     while nothing but fou6 holds fou.
 #
-# Requires: root, kernel >= 6.12, jq, unshare, modprobe. The module test skips
+# Requires: root, kernel >= 6.18, jq, unshare, modprobe. The module test skips
 # when fou is built in or held by something other than fou6.
 
 load '../lib/helpers'
@@ -85,12 +85,12 @@ teardown_file() {
     [ "$unexplained" = "0" ]
 }
 
-@test "an agent shown a release below 6.12 refuses to start and names the upgrade" {
+@test "an agent shown a release below 6.18 refuses to start and names the upgrade" {
     local agent="${PROJECT_ROOT}/target/release/ebpfsentinel-agent"
     [ -x "$agent" ] || soft_skip "no local agent build at $agent"
 
     local fake="${DATA_DIR}/osrelease"
-    printf '6.11.0-29-generic\n' >"$fake"
+    printf '6.17.0-14-generic\n' >"$fake"
 
     run timeout 30 unshare --mount --propagation private sh -c \
         'mount --bind "$1" /proc/sys/kernel/osrelease && exec "$2" --config "$3"' \
@@ -99,8 +99,8 @@ teardown_file() {
     [ "$status" -ne 0 ]
     [ "$status" -ne 124 ]
     [[ "$output" == *"refuses to start"* ]]
-    [[ "$output" == *"6.11"* ]]
-    [[ "$output" == *"6.12"* ]]
+    [[ "$output" == *"6.17"* ]]
+    [[ "$output" == *"6.18"* ]]
     # An Ubuntu release string earns the Ubuntu way up, not a generic line.
     [[ "$output" == *"linux-generic-hwe-24.04"* ]]
 }

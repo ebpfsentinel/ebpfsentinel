@@ -14,7 +14,7 @@
 #     keep working.
 #   * With the agent stopped, the refusal is gone: the call goes through.
 #
-# Requires: root, kernel >= 6.12, the BPF LSM active at boot, jq, python3,
+# Requires: root, kernel >= 6.18, the BPF LSM active at boot, jq, python3,
 # curl.
 
 load '../lib/helpers'

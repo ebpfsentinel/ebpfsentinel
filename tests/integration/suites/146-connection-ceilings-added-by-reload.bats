@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 146-connection-ceilings-added-by-reload.bats - A ceiling a reload adds counts open connections
-# Requires: root, kernel >= 6.12, bpftool, ncat, ss
+# Requires: root, kernel >= 6.18, bpftool, ncat, ss
 #
 # The agent starts with connection tracking on and no per-source ceiling, so
 # at start there is nothing to enforce and nothing to give back. A reload then

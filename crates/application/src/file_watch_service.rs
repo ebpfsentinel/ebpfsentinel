@@ -2268,7 +2268,7 @@ mod tests {
         let (rules, _rules_rx) = rules(&[]);
         let (tx, mut rx) = mpsc::channel(8);
         let sources: crate::ransom_service::HostSourcesReader = Arc::new(|| {
-            domain::hostrule::HostSources::new(Some((6, 12)))
+            domain::hostrule::HostSources::new(Some((6, 18)))
                 .present(domain::hostrule::Source::ProcessTracing)
                 .present(domain::hostrule::Source::FileWatch)
         });

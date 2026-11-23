@@ -8,7 +8,7 @@
 # gone once the alert is raised. A second copy dialing 4445, under a block
 # rule that does not ask for it, is blocked and keeps running.
 #
-# Requires: root, kernel >= 6.12, jq, ncat.
+# Requires: root, kernel >= 6.18, jq, ncat.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

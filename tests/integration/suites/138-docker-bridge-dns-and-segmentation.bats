@@ -14,7 +14,7 @@
 #     the closing deny, and once loaded refuses the client the database
 #     while every learned path and name resolution still works.
 #
-# Requires: root, kernel >= 6.12, jq, docker, python3, a static busybox.
+# Requires: root, kernel >= 6.18, jq, docker, python3, a static busybox.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

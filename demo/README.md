@@ -26,8 +26,9 @@ from the same release.
 
 ## What the host needs
 
-- Linux 6.12 or later with BTF (`/sys/kernel/btf/vmlinux`). Ubuntu 26.04, Ubuntu 24.04
-  with its HWE kernel, Debian 13 and Fedora 41 all qualify.
+- Linux 6.18 or later with BTF (`/sys/kernel/btf/vmlinux`). Ubuntu 26.04, Ubuntu 24.04
+  with its HWE kernel, Debian 13 with the trixie-backports kernel and Fedora 43
+  all qualify.
 - Docker with the compose plugin.
 - On Ubuntu 24.04 and later (`kernel.apparmor_restrict_unprivileged_userns=1`),
   the agent's AppArmor profile loaded, from this directory:

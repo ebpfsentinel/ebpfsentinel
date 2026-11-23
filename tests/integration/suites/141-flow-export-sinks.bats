@@ -27,7 +27,7 @@
 # something registers a netfilter hook that asks for it; the suite installs a
 # table of its own with one `ct state` rule and removes it after.
 #
-# Requires: root, kernel >= 6.12, python3, ncat, nft, jq.
+# Requires: root, kernel >= 6.18, python3, ncat, nft, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

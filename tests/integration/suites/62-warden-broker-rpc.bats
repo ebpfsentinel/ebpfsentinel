@@ -32,7 +32,7 @@
 # without the host's routing table being touched. The fenced acceptance of a
 # configured gateway is held by the warden's own unit tests.
 #
-# Requires: root, kernel >= 6.12, local eBPF build + warden binary, python3,
+# Requires: root, kernel >= 6.18, local eBPF build + warden binary, python3,
 # setpriv, ncat, jq. VM-only (Vagrant agent).
 
 load '../lib/helpers'

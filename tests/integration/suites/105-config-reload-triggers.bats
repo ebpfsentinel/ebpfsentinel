@@ -13,7 +13,7 @@
 #     the file's, and counts a policy write accepted through the API with its
 #     method and path; a refused write and a read count nothing.
 #
-# Requires: root, kernel >= 6.12, jq.
+# Requires: root, kernel >= 6.18, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

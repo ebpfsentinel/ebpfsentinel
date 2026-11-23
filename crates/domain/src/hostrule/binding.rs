@@ -269,7 +269,7 @@ mod tests {
     fn every_source_present() -> HostSources {
         Source::ALL
             .into_iter()
-            .fold(HostSources::new(Some((6, 12))), HostSources::present)
+            .fold(HostSources::new(Some((6, 18))), HostSources::present)
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
             let binding = intent.binding();
             assert!(!binding.sources.is_empty(), "{intent}");
             assert!(!binding.hook.is_empty(), "{intent}");
-            assert!(binding.min_kernel <= (6, 12), "{intent}");
+            assert!(binding.min_kernel <= (6, 18), "{intent}");
         }
     }
 
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn a_source_the_host_never_reported_is_absent_and_says_so() {
-        let verdict = resolve(Intent::PortHidden, &HostSources::new(Some((6, 12))));
+        let verdict = resolve(Intent::PortHidden, &HostSources::new(Some((6, 18))));
         let Applicability::NotApplicable { reason } = verdict else {
             panic!("an unreported source cannot be present");
         };
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn every_missing_source_is_named_not_only_the_first() {
-        let host = HostSources::new(Some((6, 12)))
+        let host = HostSources::new(Some((6, 18)))
             .absent(Source::DnsCapture, "tc-dns is not loaded")
             .absent(Source::SocketAttribution, "the cgroup hooks did not attach");
         let Applicability::NotApplicable { reason } = resolve(Intent::ProcessResolves, &host)

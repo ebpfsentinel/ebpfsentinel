@@ -23,7 +23,7 @@
 # attaches to: unbound, the loader turns the receive metadata kfuncs into
 # `-EOPNOTSUPP` before the verifier sees them, and veth answers both.
 #
-# Requires: root, kernel >= 6.12, local eBPF build, cargo or a prebuilt xtask.
+# Requires: root, kernel >= 6.18, local eBPF build, cargo or a prebuilt xtask.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

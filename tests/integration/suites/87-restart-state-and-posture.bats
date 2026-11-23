@@ -29,7 +29,7 @@
 #   * The eBPF coverage route refuses with a reason on a node that has no
 #     pod inventory, rather than reporting an empty node as covered.
 #
-# Requires: root, kernel >= 6.12, jq.
+# Requires: root, kernel >= 6.18, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

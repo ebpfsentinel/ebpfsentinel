@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 30-ebpf-geoip-scenarios.bats - GeoIP enrichment eBPF scenario tests
-# Requires: root, kernel >= 6.12, bpftool
+# Requires: root, kernel >= 6.18, bpftool
 # Note: most tests skip gracefully when no GeoLite2 mmdb files are present.
 
 load '../lib/helpers'

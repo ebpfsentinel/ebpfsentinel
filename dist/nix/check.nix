@@ -105,7 +105,7 @@ let
 
     "a host below the floor fails evaluation naming the kernel" =
       failedAssertions { boot.kernelPackages = pkgs.linuxPackages_6_6; } == [
-        "services.ebpfsentinel: the agent needs kernel 6.12 or newer; this host runs ${pkgs.linuxPackages_6_6.kernel.version}."
+        "services.ebpfsentinel: the agent needs kernel 6.18 or newer; this host runs ${pkgs.linuxPackages_6_6.kernel.version}."
       ];
 
     "settings and a profile together fail evaluation" =

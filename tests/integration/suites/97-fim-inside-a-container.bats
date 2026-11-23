@@ -11,7 +11,7 @@
 #   * The same file written on the host under a directory ending in
 #     etc/cron.d raises nothing: the host path does not match the rule.
 #
-# Requires: root, kernel >= 6.12, jq, docker, a static busybox.
+# Requires: root, kernel >= 6.18, jq, docker, a static busybox.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

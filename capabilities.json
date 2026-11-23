@@ -6,7 +6,7 @@
       "id": "bpf_lsm",
       "needs_lsm": true,
       "probe": "active_security_modules",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "programs attached at security module hooks, which is where the kernel decides a call before it happens"
     },
     {
@@ -15,7 +15,7 @@
       "id": "file_kfuncs",
       "needs_lsm": true,
       "probe": "sleepable_lsm",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a task's executable, a rendered path and a file's extended attribute read in the kernel"
     },
     {
@@ -24,7 +24,7 @@
       "id": "kprobe_session",
       "needs_lsm": false,
       "probe": "loaded",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "one program on a function's entry and return for the kernel TLS record path, instead of a kprobe, a kretprobe and a map correlating them"
     },
     {
@@ -33,7 +33,7 @@
       "id": "copy_from_user_str",
       "needs_lsm": true,
       "probe": "sleepable_lsm",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "the real argument vector of a process, read at exec"
     },
     {
@@ -42,7 +42,7 @@
       "id": "tcp_reqsk_assign",
       "needs_lsm": false,
       "probe": "declared_in_btf",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a validated SYN cookie handed to the stack as a request socket, so the stack does not revalidate a cookie it did not issue"
     },
     {
@@ -51,7 +51,7 @@
       "id": "attribution",
       "needs_lsm": false,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "the workload that opened a socket, named on every flow"
     },
     {
@@ -60,7 +60,7 @@
       "id": "process_tracing",
       "needs_lsm": false,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "the process behind a flow or an alert, with its command line and lineage"
     },
     {
@@ -69,7 +69,7 @@
       "id": "workload_firewall",
       "needs_lsm": false,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "rules on what a named workload may connect to, send to or bind, decided in the syscall"
     },
     {
@@ -78,7 +78,7 @@
       "id": "quarantine",
       "needs_lsm": false,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a workload cut off from the network in the kernel for a bounded time"
     },
     {
@@ -87,16 +87,16 @@
       "id": "process_signal",
       "needs_lsm": false,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a process stopped by a signal sent from the kernel"
     },
     {
-      "condition": "a kernel offering it, from Linux 6.13 or through a vendor backport",
+      "condition": "a kernel built with it",
       "fallback": "the signal waits for the target's next syscall, and a target making none within the window is reported as a survivor",
       "id": "immediate_signal",
       "needs_lsm": false,
       "probe": "loaded",
-      "since": "6.13",
+      "since": "6.18",
       "unlocks": "a signal that reaches its target at once, even a process making no syscall"
     },
     {
@@ -105,7 +105,7 @@
       "id": "network_executables",
       "needs_lsm": true,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "the list of executables allowed to reach the network, decided before the socket exists"
     },
     {
@@ -114,7 +114,7 @@
       "id": "write_refusal",
       "needs_lsm": true,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a write-open refused past a count, before a byte is written"
     },
     {
@@ -123,7 +123,7 @@
       "id": "self_protection",
       "needs_lsm": true,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "the agent's own maps and links refused to every other task"
     },
     {
@@ -132,9 +132,9 @@
       "id": "tamper_protection",
       "needs_lsm": true,
       "probe": "attach_status",
-      "since": "6.12",
+      "since": "6.18",
       "unlocks": "a signal, a trace or an unpin aimed at the agent refused unless a signed stop opened the window"
     }
   ],
-  "floor": "6.12"
+  "floor": "6.18"
 }

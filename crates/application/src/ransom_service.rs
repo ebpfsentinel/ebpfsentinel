@@ -717,7 +717,7 @@ mod tests {
     fn service() -> (RansomService, mpsc::Receiver<AlertEvent>) {
         let (tx, rx) = mpsc::channel(8);
         let sources: HostSourcesReader = Arc::new(|| {
-            HostSources::new(Some((6, 12)))
+            HostSources::new(Some((6, 18)))
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });
@@ -791,7 +791,7 @@ mod tests {
     fn without_command_lines_the_prior_is_named_unavailable_and_why() {
         let (tx, _rx) = mpsc::channel(1);
         let sources: HostSourcesReader = Arc::new(|| {
-            HostSources::new(Some((6, 12)))
+            HostSources::new(Some((6, 18)))
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });
@@ -1393,7 +1393,7 @@ mod tests {
     fn a_verdict_in_shadow_is_counted_by_workload_and_raises_nothing() {
         let (tx, mut rx) = mpsc::channel(8);
         let sources: HostSourcesReader = Arc::new(|| {
-            HostSources::new(Some((6, 12)))
+            HostSources::new(Some((6, 18)))
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });

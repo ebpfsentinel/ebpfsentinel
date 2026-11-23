@@ -22,7 +22,7 @@
 # from the object without hand-parsing relocations. So the gate is a real
 # kernel being asked, with the config that asks for all of it.
 #
-# Requires: root, kernel >= 6.12.
+# Requires: root, kernel >= 6.18.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

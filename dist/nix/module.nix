@@ -136,8 +136,8 @@ in
         message = "services.ebpfsentinel: set at most one of settings, profile and configFile; they are three ways to name the same file.";
       }
       {
-        assertion = lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.12";
-        message = "services.ebpfsentinel: the agent needs kernel 6.12 or newer; this host runs ${config.boot.kernelPackages.kernel.version}.";
+        assertion = lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.18";
+        message = "services.ebpfsentinel: the agent needs kernel 6.18 or newer; this host runs ${config.boot.kernelPackages.kernel.version}.";
       }
       {
         assertion = config.security.allowUserNamespaces;

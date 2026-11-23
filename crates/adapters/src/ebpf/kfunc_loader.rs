@@ -987,7 +987,7 @@ struct ProgLoadAttr {
     core_relo_rec_size: u32,
     log_true_size: u32,
     prog_token_fd: i32,
-    // The kernel (>= 6.12) reads `fd_array_cnt` at this offset. It MUST be a
+    // The kernel (>= 6.18) reads `fd_array_cnt` at this offset. It MUST be a
     // real, zero-initialised field: were it left as struct tail padding, Rust
     // leaves those bytes uninitialised, the kernel interprets the garbage as a
     // non-zero count, and then walks `fd_array` (which is NULL here) for that

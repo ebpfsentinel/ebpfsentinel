@@ -1,6 +1,6 @@
 //! Kfunc bindings for the kernel features the eBPF programs use. The
 //! column below says where each kfunc first appeared; all of them sit
-//! at or below the 6.12 floor.
+//! at or below the 6.18 floor.
 //!
 //! aya-ebpf 0.3.0 has no native kfunc infrastructure (see upstream
 //! aya-rs issue #432). Every kernel-resident kfunc the programs want

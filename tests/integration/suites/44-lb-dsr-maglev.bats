@@ -15,7 +15,7 @@
 #   * the agent does NOT alert on its own ARP announcements
 #     (is_self_announced predicate - ARP-guard foundation)
 #
-# Requires: 3-VM mode (EBPF_3VM_MODE=true), root on each VM, kernel >= 6.12
+# Requires: 3-VM mode (EBPF_3VM_MODE=true), root on each VM, kernel >= 6.18
 # on the agent, bpftool + tcpdump on agent + backend, python3 + scapy
 # available locally (attacker VM).
 

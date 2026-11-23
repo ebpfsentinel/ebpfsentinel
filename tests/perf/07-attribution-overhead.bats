@@ -26,7 +26,7 @@
 # taskset and four vCPUs allow it, which takes the scheduler's migrations out
 # of the same figure.
 #
-# Requires: root, kernel >= 6.12, a C compiler, python3, jq, bc.
+# Requires: root, kernel >= 6.18, a C compiler, python3, jq, bc.
 # Nightly tier. Outputs JSON to /tmp/ebpfsentinel-attribution-overhead.json
 
 FIXTURE_DIR="${BATS_TEST_DIRNAME}/fixtures"

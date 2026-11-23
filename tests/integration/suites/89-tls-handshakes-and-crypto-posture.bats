@@ -18,7 +18,7 @@
 #   * A clear-text HTTP request counts as clear text on its edge, with the
 #     protocol named, and never as TLS.
 #
-# Requires: root, kernel >= 6.12, jq, openssl, python3, curl.
+# Requires: root, kernel >= 6.18, jq, openssl, python3, curl.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

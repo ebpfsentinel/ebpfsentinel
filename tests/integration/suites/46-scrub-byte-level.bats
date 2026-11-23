@@ -15,7 +15,7 @@
 #   * Fragments        - drop_fragments: true → no IPv4 fragment reaches
 #     the backend, while an unfragmented control SYN does.
 #
-# Requires: 3-VM mode, kernel >= 6.12, scapy on attacker
+# Requires: 3-VM mode, kernel >= 6.18, scapy on attacker
 # (/opt/scapy-venv), tcpdump on the bats runner, libpcap on backend.
 
 load '../lib/helpers'

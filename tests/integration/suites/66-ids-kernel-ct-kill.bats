@@ -25,7 +25,7 @@
 # direction proves the counter moves, the other proves it is not simply a
 # copy of the drop count.
 #
-# Requires: root, kernel >= 6.12, ncat.
+# Requires: root, kernel >= 6.18, ncat.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

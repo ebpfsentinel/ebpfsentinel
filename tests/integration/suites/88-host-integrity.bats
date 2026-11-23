@@ -21,7 +21,7 @@
 #     it. The module list is shown through a bind mount in a private mount
 #     namespace, as in 86.
 #
-# Requires: root, kernel >= 6.12, jq, python3, bpftool, unshare.
+# Requires: root, kernel >= 6.18, jq, python3, bpftool, unshare.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -2099,7 +2099,7 @@ pub async fn run(
 
     // ── 10. Load eBPF programs ─────────────────────────────────────
     //
-    // Kernel version is MANDATORY: 6.12+ is required unconditionally.
+    // Kernel version is MANDATORY: 6.18+ is required unconditionally.
     // No "API-only" fallback when the kernel is too old - every eBPF
     // program depends on kfuncs introduced in 6.4 → 6.9 and the
     // verifier rejects them at load time on older kernels. The
@@ -5310,9 +5310,9 @@ fn is_safe_probe_target(target: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
 }
 
-/// Verify the kernel version is **>= 6.12**.
+/// Verify the kernel version is **>= 6.18**.
 ///
-/// The 6.12 floor is mandatory - there is **no graceful fallback on
+/// The 6.18 floor is mandatory - there is **no graceful fallback on
 /// older kernels**. The agent relies on the following kernel features
 /// across every eBPF program:
 ///
@@ -5331,7 +5331,7 @@ fn is_safe_probe_target(target: &str) -> bool {
 /// correct response is to upgrade the kernel, and the refusal names how
 /// for the distribution the release string belongs to. `BPF_TOKEN_CREATE` -
 /// the agent's only eBPF loading path - needs 6.9, and the floor is the
-/// 6.12 long-term kernel the distributions converged on.
+/// 6.18 long-term kernel, the first that verifies a signed BPF program.
 fn check_kernel_version() -> anyhow::Result<()> {
     check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
 }
@@ -5385,16 +5385,16 @@ mod kernel_version_tests {
     }
 
     #[test]
-    fn accepts_kernel_6_12_exact() {
+    fn accepts_kernel_6_18_exact() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.12.0-061200-generic\n");
+        let p = write_osrelease(&tmp, "6.18.0-061800-generic\n");
         assert!(check_kernel_version_from(&p).is_ok());
     }
 
     #[test]
-    fn accepts_kernel_6_17() {
+    fn accepts_kernel_6_19() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.17.0-5-generic\n");
+        let p = write_osrelease(&tmp, "6.19.0-5-generic\n");
         assert!(check_kernel_version_from(&p).is_ok());
     }
 
@@ -5406,12 +5406,12 @@ mod kernel_version_tests {
     }
 
     #[test]
-    fn rejects_kernel_6_11_naming_running_required_and_the_way_up() {
+    fn rejects_kernel_6_17_naming_running_required_and_the_way_up() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.11.0-29-generic\n");
+        let p = write_osrelease(&tmp, "6.17.0-14-generic\n");
         let err = check_kernel_version_from(&p).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("kernel 6.11 is below the required minimum 6.12"));
+        assert!(msg.contains("kernel 6.17 is below the required minimum 6.18"));
         assert!(msg.contains("linux-generic-hwe-24.04"));
         assert!(msg.contains("no degraded mode"));
     }

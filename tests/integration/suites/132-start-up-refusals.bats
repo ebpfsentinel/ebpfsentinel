@@ -22,7 +22,7 @@
 # the agent through a bind mount over /sys/kernel/security/lsm inside a mount
 # namespace of its own, so the host keeps its modules.
 #
-# Lane: ../vagrant-runtimes or ../vagrant. Requires: root, kernel >= 6.12,
+# Lane: ../vagrant-runtimes or ../vagrant. Requires: root, kernel >= 6.18,
 # jq, unshare, and the BPF LSM active on the host for the enforce pair.
 
 load '../lib/helpers'

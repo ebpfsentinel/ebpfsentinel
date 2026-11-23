@@ -15,7 +15,7 @@
 #                          `suites: []` when the sibling is the only caller
 #   coverage[].owner       required with ["TBD"]: a key of `owners` below
 #   coverage[].topology    none | 2vm | 3vm | docker | k8s
-#   coverage[].kernel_min  string ("6.12" minimum, "n/a" when no eBPF)
+#   coverage[].kernel_min  string ("6.18" minimum, "n/a" when no eBPF)
 #   coverage[].profile     pr | nightly | manual
 #   coverage[].notes       short free-text, optional
 #
@@ -255,7 +255,7 @@ coverage:
     feature: xdp-firewall
     suites: ["11", "24", "26", "perf/04", "40", "67", "69"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40; a port Docker publishes refused before its DNAT in 69"
 
@@ -263,7 +263,7 @@ coverage:
     feature: xdp-firewall-reject
     suites: ["42"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass"
 
@@ -271,7 +271,7 @@ coverage:
     feature: xdp-ratelimit
     suites: ["14", "15", "perf/04", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04"
 
@@ -279,7 +279,7 @@ coverage:
     feature: xdp-ratelimit-syncookie
     suites: ["43"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat"
 
@@ -287,7 +287,7 @@ coverage:
     feature: xdp-loadbalancer
     suites: ["20", "44", "67", "139"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound; suite 139 (3-VM) covers DNAT round trips, weights and least_conn"
 
@@ -295,7 +295,7 @@ coverage:
     feature: xdp-vip-announcer
     suites: ["37", "44", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client"
 
@@ -303,7 +303,7 @@ coverage:
     feature: xdp-pass
     suites: ["42", "46"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper"
 
@@ -311,7 +311,7 @@ coverage:
     feature: tc-ids
     suites: ["12", "25", "perf/04", "39", "66", "67", "77"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count; refused by name with fou unloaded in 77"
 
@@ -319,7 +319,7 @@ coverage:
     feature: tc-threatintel
     suites: ["17", "33", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "OSINT feed IOC matching (TC)"
 
@@ -327,7 +327,7 @@ coverage:
     feature: tc-conntrack
     suites: ["18", "24", "47", "67"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47"
 
@@ -335,7 +335,7 @@ coverage:
     feature: tc-dns
     suites: ["19", "45", "67"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45"
 
@@ -343,7 +343,7 @@ coverage:
     feature: tc-nat-ingress
     suites: ["21", "50", "perf/06", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06"
 
@@ -351,7 +351,7 @@ coverage:
     feature: tc-nat-egress
     suites: ["21", "50", "perf/06", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06"
 
@@ -359,7 +359,7 @@ coverage:
     feature: tc-qos
     suites: ["28", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive"
 
@@ -367,7 +367,7 @@ coverage:
     feature: tc-scrub
     suites: ["23", "40", "46", "67"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46"
 
@@ -375,7 +375,7 @@ coverage:
     feature: uprobe-dlp
     suites: ["27", "60", "62", "perf/06", "67"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06"
 
@@ -383,7 +383,7 @@ coverage:
     feature: cgroup-workload-firewall
     suites: ["67", "70", "92", "98"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents"
 
@@ -391,7 +391,7 @@ coverage:
     feature: cgroup-attribution
     suites: ["67", "perf/07"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Socket hooks naming the cgroup and the process behind a connection; loaded on its defaults in 67, connect() cost with and without it measured in perf/07"
 
@@ -400,7 +400,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-enterprise/27"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. The listener and the selection are the enterprise TLS interception's, so the suite lives in that repository: ebpfsentinel-enterprise/tests/integration/suites/27-enterprise-tls-redirect.bats asserts a process in the selected cgroup is answered by the agent's listener while one outside it reaches the server"
 
@@ -409,7 +409,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-operator/coexistence/03"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico by the operator's coexistence suite 03-clusterip.bats on kind, which reads the translated counter for the labelled pod and none for its bystander; no lane here provisions a cluster with Services"
 
@@ -417,7 +417,7 @@ coverage:
     feature: lsm-exec-network
     suites: ["91"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets"
 
@@ -425,7 +425,7 @@ coverage:
     feature: lsm-bpf-guard
     suites: ["88"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets"
 
@@ -433,7 +433,7 @@ coverage:
     feature: lsm-write-refusal
     suites: ["83"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not"
 
@@ -442,7 +442,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-enterprise/62"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "Refuses the signals, ptrace and writes that would end or alter a protected agent. Armed only by the enterprise tamper protection, so the suite lives there: ebpfsentinel-enterprise/tests/integration/suites/62-enterprise-signed-stop.bats asserts a kill is refused while armed and a signed stop ends the agent. Needs the BPF LSM active at boot (lsm=bpf)"
 
@@ -450,7 +450,7 @@ coverage:
     feature: tracepoint-drop-reason
     suites: ["90"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on"
 
@@ -458,7 +458,7 @@ coverage:
     feature: tracepoint-tcp-health
     suites: ["71"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back"
 
@@ -466,7 +466,7 @@ coverage:
     feature: uprobe-crypto
     suites: ["104"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. Suite 104 rewrites the body of each document twice, once with bytes it made itself and once through EVP_EncryptUpdate, and only the second reaches a verdict, on the crypto rate"
 
@@ -474,7 +474,7 @@ coverage:
     feature: tracepoint-process
     suites: ["67", "70", "perf/07"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07"
 
@@ -482,7 +482,7 @@ coverage:
     feature: tracepoint-signal
     suites: ["82", "93"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Signals the named task at its next syscall: the mass encryption run stopped in 82, the reverse shell stopped in 93"
 
@@ -508,14 +508,14 @@ coverage:
     feature: wardenpolicy
     suites: ["57"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Writes the warden's policy from the agent's configuration before the warden starts; every rootless start in the suites runs it, 57 through the token loader's start"
   - kind: cli_subcommand
     feature: uninstall
     suites: ["140"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Removes the pins and the state a graceful stop leaves behind, so nothing of the agent keeps enforcing; asserted in 140 after enforcement survived the agent"
 
@@ -571,7 +571,7 @@ coverage:
     feature: flows
     suites: ["04", "18"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Aggregated connection map"
 
@@ -595,7 +595,7 @@ coverage:
     feature: conntrack
     suites: ["18", "16"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Connection tracking inspection + flush"
 
@@ -603,7 +603,7 @@ coverage:
     feature: firewall
     suites: ["03", "11", "26", "40"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40"
 
@@ -611,7 +611,7 @@ coverage:
     feature: l7
     suites: ["16", "29", "38", "39"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39"
 
@@ -619,7 +619,7 @@ coverage:
     feature: ips
     suites: ["13", "16", "38", "39", "136"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39; a block rule with kill_process stops the local process behind the flow and one without it leaves it running in 136"
 
@@ -627,7 +627,7 @@ coverage:
     feature: ratelimit
     suites: ["04", "14", "16", "38"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Rate limit policies; MHDDoS flood matrix in 38"
 
@@ -635,7 +635,7 @@ coverage:
     feature: threatintel
     suites: ["16", "17", "33"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "OSINT feed CRUD + IOC matching + STIX feed"
 
@@ -643,7 +643,7 @@ coverage:
     feature: alerts
     suites: ["04", "25", "34"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Alert list + e2e + SSE stream"
 
@@ -659,7 +659,7 @@ coverage:
     feature: dns
     suites: ["04", "19"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "DNS cache, stats, blocklist"
 
@@ -675,7 +675,7 @@ coverage:
     feature: ddos
     suites: ["15", "22", "38", "39", "40"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40"
 
@@ -683,7 +683,7 @@ coverage:
     feature: lb
     suites: ["16", "20", "37"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Load balancer services + VIPs"
 
@@ -691,7 +691,7 @@ coverage:
     feature: qos
     suites: ["16", "28"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "QoS / traffic shaping"
 
@@ -699,7 +699,7 @@ coverage:
     feature: nat
     suites: ["16", "21", "50"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "NAT + NPTv6; NPTv6 prefix translation covered by suite 50"
 
@@ -707,7 +707,7 @@ coverage:
     feature: mitre
     suites: ["16", "51", "87"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion"
 
@@ -715,7 +715,7 @@ coverage:
     feature: fingerprints
     suites: ["29", "41"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "JA4 cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41"
 
@@ -723,7 +723,7 @@ coverage:
     feature: responses
     suites: ["48"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48"
 
@@ -731,7 +731,7 @@ coverage:
     feature: capture
     suites: ["49"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49"
 
@@ -739,7 +739,7 @@ coverage:
     feature: aliases
     suites: ["16"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Alias status and resolved content read back through /api/v1/aliases in 16, including an alias that does not exist"
 
@@ -747,7 +747,7 @@ coverage:
     feature: config
     suites: ["16", "17", "23", "25", "35", "52"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Effective configuration and reload through /api/v1/config; reload asserted under sustained load in 52 and against the operator-managed flag in 35"
 
@@ -755,7 +755,7 @@ coverage:
     feature: dlp
     suites: ["16", "27"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "DLP status and pattern list; the uprobe datapath behind them is asserted in 27"
 
@@ -763,7 +763,7 @@ coverage:
     feature: ebpf
     suites: ["16", "60", "62", "77", "79"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77; the hidden port and hidden process sweeps in 79"
 
@@ -771,7 +771,7 @@ coverage:
     feature: geoip
     suites: ["30"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "GeoIP status and address lookup against the fixture database in 30"
 
@@ -779,7 +779,7 @@ coverage:
     feature: ids
     suites: ["12", "16", "33", "55", "59"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59"
 
@@ -787,7 +787,7 @@ coverage:
     feature: routing
     suites: ["16", "32", "53"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Gateway and route list through /api/v1/routing; failover ordering in 53"
 
@@ -803,7 +803,7 @@ coverage:
     feature: zones
     suites: ["31"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Zone, policy and status reads through /api/v1/zones in 31"
 
@@ -811,7 +811,7 @@ coverage:
     feature: nptv6
     suites: ["50", "perf/03"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50; prefix-rule add control-plane latency (10/100) benched in perf/03"
 
@@ -819,7 +819,7 @@ coverage:
     feature: learning
     suites: ["87"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Learning window list and status, read back in 87 after the window came back from a restart"
 
@@ -827,7 +827,7 @@ coverage:
     feature: netpol
     suites: ["87"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The replay against a cluster's pods, and the refusal of a flow a policy denies, need a node reading a cluster: the operator's coexistence suite 04-networkpolicy-enforce.bats asserts both on kind"
 
@@ -835,7 +835,7 @@ coverage:
     feature: hostrules
     suites: ["78","135"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named"
 
@@ -843,7 +843,7 @@ coverage:
     feature: mass-encryption
     suites: ["81"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The mass encryption verdict through /api/v1/host-rules/mass-encryption and host-rules mass-encryption: evaluated in shadow by default, an archive extraction, rsync, cp, gzip over logs and a git checkout over a few hundred documents reach no verdict, a program rewriting and renaming the same documents is counted under its workload with no alert, and the verdict promoted to enforce raises the alert"
 
@@ -851,7 +851,7 @@ coverage:
     feature: mass-encryption-stop
     suites: ["82", "100", "101", "108", "perf/08"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08; in 100 an archive extraction, a copy, a mirror, a checkout, a package upgrade replacing compressed files through a rename, an index rebuild, a log rotation, a media encoder, a database compaction, a compressed backup and snapshot pruning all run to their end with the stop armed, and nothing is raised; in 101 a client on another address encrypting a Samba share is named by that address through smbd, and neither the session nor smbd is stopped; in 108 the same run from a second machine across the 2VM lane's network is named by that machine's address, runs to its end, and the share still answers it"
 
@@ -859,7 +859,7 @@ coverage:
     feature: surface
     suites: ["80"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "What is installed, root by root, through /api/v1/surface/packages, and the modules a running Go program (containerd or dockerd) states from its own build information, and every file live processes map executable through /api/v1/surface/loaded, joined to the package owning it in that process's root (a program started in the suite appears with its libc owned by libc6 and leaves when stopped, a chrooted process is attributed to its own root), and every listener through /api/v1/surface/listening with the packages its process maps, the connections it took and who the policy lets reach it (a Python server started in the suite names libc6 and its interpreter's package and leaves when stopped), and the whole of it summed through /api/v1/surface and the bare surface command (every installed package mapped or not, every listener under one origin, a server reachable from anywhere listed with its packages): the CLI's tables and JSON agree with the four routes"
 
@@ -867,7 +867,7 @@ coverage:
     feature: processes
     suites: ["93"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; show and list are driven in 93 on the shell a detection named"
 
@@ -876,7 +876,7 @@ coverage:
     feature: alert
     suites: ["04", "25", "34", "61"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Alert pipeline + routing; outbound delivery asserted in 61 across all three senders - webhook (POST + JSON body identity + route headers + 5xx retry + SSRF refusal of a loopback target), email (SMTP envelope + body) and OTLP (export on /v1/logs with the alert attributes)"
 
@@ -908,7 +908,7 @@ coverage:
     feature: capture
     suites: ["49", "62"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62"
 
@@ -916,7 +916,7 @@ coverage:
     feature: conntrack
     suites: ["16", "18", "24", "47", "62", "66"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream, a tracked flow read back from the listing and removed by the flush asserted in 18 on the datapath lane; brokered teardown from the user-namespace agent asserted in 62"
 
@@ -924,7 +924,7 @@ coverage:
     feature: container
     suites: ["54", "130", "131", "137"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane; a veth created after start-up, its peer in a namespace of its own, carries the agent's TC programs within seconds and the window before the attach is counted under its kind, in 137. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo"
 
@@ -932,7 +932,7 @@ coverage:
     feature: ddos
     suites: ["15", "22", "38", "39", "40"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40"
 
@@ -940,7 +940,7 @@ coverage:
     feature: dlp
     suites: ["16", "27", "60", "62", "perf/06"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
 
@@ -948,7 +948,7 @@ coverage:
     feature: dns
     suites: ["04", "19", "45", "55"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55"
 
@@ -956,7 +956,7 @@ coverage:
     feature: hidden
     suites: ["79"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit"
 
@@ -964,7 +964,7 @@ coverage:
     feature: inventory
     suites: ["80"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The host's dpkg database agrees with dpkg-query, a chroot's Alpine database is read under kind other, and a link climbing out of a root finds nothing. rpm's sqlite reader and every parser are unit-tested against databases taken from real images"
 
@@ -972,7 +972,7 @@ coverage:
     feature: hostrule
     suites: ["78","135"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule"
 
@@ -980,7 +980,7 @@ coverage:
     feature: firewall
     suites: ["03", "11", "24", "26", "40", "47", "55"]
     topology: 3vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55"
 
@@ -988,7 +988,7 @@ coverage:
     feature: ids
     suites: ["12", "25", "38", "39", "55", "59", "66", "130"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert)"
 
@@ -996,7 +996,7 @@ coverage:
     feature: ips
     suites: ["13", "16", "38", "39", "55", "59", "perf/03"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03"
 
@@ -1004,7 +1004,7 @@ coverage:
     feature: l2
     suites: ["37", "44", "62"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62"
 
@@ -1012,7 +1012,7 @@ coverage:
     feature: l7
     suites: ["16", "29", "38", "39", "56"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. real swaks, lftp and smbclient dialogues on the wire asserted in 56 (SMTP EHLO on the audit trail, FTP PORT and SMB1 negotiate denied)"
 
@@ -1020,7 +1020,7 @@ coverage:
     feature: loadbalancer
     suites: ["16", "20", "37", "44"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Maglev + DSR; 3-VM end-to-end coverage via suite 44"
 
@@ -1028,7 +1028,7 @@ coverage:
     feature: nat
     suites: ["16", "21", "50", "perf/03", "perf/06"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06"
 
@@ -1036,7 +1036,7 @@ coverage:
     feature: qos
     suites: ["16", "28"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Traffic shaping policies"
 
@@ -1044,7 +1044,7 @@ coverage:
     feature: ratelimit
     suites: ["04", "14", "38"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "Token bucket + variants; exhaustion under flood in 38"
 
@@ -1052,7 +1052,7 @@ coverage:
     feature: response
     suites: ["48"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48)"
 
@@ -1060,7 +1060,7 @@ coverage:
     feature: routing
     suites: ["32", "53"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). The in-process probe loop marking gateways down, the WAN_ALL_DOWN alert and an API-added gateway being probed are asserted in 53; egress shifting on a real link-down with traffic in flight needs the 3-VM transit topology and no suite runs it yet"
 
@@ -1076,7 +1076,7 @@ coverage:
     feature: threatintel
     suites: ["16", "17", "33"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: pr
     notes: "OSINT feeds + IOC + STIX"
 
@@ -1084,7 +1084,7 @@ coverage:
     feature: zone
     suites: ["31"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Zone-based policy"
 
@@ -1093,7 +1093,7 @@ coverage:
     suites: ["87"]
     elsewhere: ["ebpfsentinel-operator/coexistence/08"]
     topology: k8s
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the operator's coexistence suite 08-pods-and-guests.bats reads the per-pod report on kind beside Cilium and Calico (the test pod listed with its attached link and an unobserved loopback) and the counts and named gaps the operator folds into the agent resource's status"
 
@@ -1101,7 +1101,7 @@ coverage:
     feature: drops
     suites: ["90"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Kernel drop reasons as readable counts, fed by tracepoint-drop-reason; 90 reads NO_SOCKET back with its description"
 
@@ -1109,7 +1109,7 @@ coverage:
     feature: tcp_health
     suites: ["71"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "TCP health per edge as named counters, fed by tracepoint-tcp-health; 71 reads the no_listener resets and both ends of a connection"
 
@@ -1117,7 +1117,7 @@ coverage:
     feature: flow
     suites: ["90"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Flow records and their IPFIX, OTLP, JSON and SIEM encodings; 90 exports a connection to the JSON lines sink and reads it back with the export status, and no suite decodes IPFIX, OTLP or the SIEM encodings at a collector"
 
@@ -1125,7 +1125,7 @@ coverage:
     feature: learning
     suites: ["87"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Watching a node for a window and holding what it reached; 87 opens windows, restarts the agent and reads one back running with the downtime as a gap and one interrupted past its deadline, then its edges, policy, segmentation and stop"
 
@@ -1134,7 +1134,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-operator/coexistence/04"]
     topology: k8s
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "Kubernetes NetworkPolicy compiled for the pods of one node. Applied in enforce mode by the operator's coexistence suite 04-networkpolicy-enforce.bats on kind; the compilation needs the node's pod inventory, which no lane here provides"
 
@@ -1142,7 +1142,7 @@ coverage:
     feature: process
     suites: ["67", "70", "93"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93"
 
@@ -1150,7 +1150,7 @@ coverage:
     feature: workload
     suites: ["67", "70", "92", "95"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use"
 
@@ -1159,7 +1159,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-operator/coexistence/03"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. Exercised by the operator's coexistence suite 03-clusterip.bats on kind, where an opted-in pod's connection is translated and a bystander's stays with kube-proxy; the plan is built from the cluster's Services and EndpointSlices, which no lane here serves"
 
@@ -1167,7 +1167,7 @@ coverage:
     feature: exposure
     suites: ["90"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "What this node exposes, read off the socket hooks, and who bound it; 90 binds two listeners after start and reads one reachable by the default policy and one closed by a deny rule"
 
@@ -1175,7 +1175,7 @@ coverage:
     feature: file_watch
     suites: ["94","97"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Changes to watched files and the process that made them on the host, and a change to the agent's own configuration, asserted in 94. A file a container writes, matched by a host rule at the path the container sees and never at the path under Docker storage, asserted in 97"
 
@@ -1183,7 +1183,7 @@ coverage:
     feature: guest
     suites: ["73", "74", "75"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75"
 
@@ -1191,7 +1191,7 @@ coverage:
     feature: identity
     suites: ["107"]
     topology: 2vm
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "This node's addresses as names another node can read, and the peer's names on a flow. 107 opens a TCP connection and sends UDP datagrams from a named program on the agent's machine to the attacker VM, reads both back off /api/v1/conntrack/connections with that program's pid and executable while the far end records the agent's address, and asserts no flow carries a peer, since no list of remote identities was handed to this agent. The two-end reading, a peer named from the list another agent publishes, needs the routes that publish and take that list, which are the enterprise agent's, so it is asserted beside them"
 
@@ -1199,7 +1199,7 @@ coverage:
     feature: network_program
     suites: ["88"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, detaches the agent's own link without the guard and reads the alert, and puts another program in its place and reads that it replaced the agent's"
 
@@ -1207,7 +1207,7 @@ coverage:
     feature: ransom
     suites: ["81", "82", "83", "84", "96", "101", "104", "108"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads; a share encrypted by a client on another address in 101 and from a second machine in 108, the writer named by its address through smbd rather than smbd named as the run; and in 104 the encryption call counter, including a self-made rewrite reaching the verdict on a snapshot destroyed just before it"
 
@@ -1215,7 +1215,7 @@ coverage:
     feature: raw_socket
     suites: ["88"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Packet sockets open on the node and the classic BPF filter behind them; 88 opens an AF_PACKET socket, with and without a classic filter, and reads its holder, its filter length and the alert"
 
@@ -1223,7 +1223,7 @@ coverage:
     feature: share_writes
     suites: ["85"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "A host writing to file shares it never wrote to, read off its own flows, including the sealed SMB 3 case"
 
@@ -1231,7 +1231,7 @@ coverage:
     feature: trace
     suites: ["87"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name"
 
@@ -1239,7 +1239,7 @@ coverage:
     feature: exposure
     suites: ["90"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "exposure listeners; 90 reads the same listing through the API, and no suite drives the CLI"
 
@@ -1247,7 +1247,7 @@ coverage:
     feature: trace
     suites: ["87"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "trace through the loaded programs, naming the deny rule a crafted packet meets, in 87"
 
@@ -1260,7 +1260,7 @@ coverage:
     feature: bpf_lsm
     suites: ["83", "86"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86"
 
@@ -1269,7 +1269,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-enterprise/62"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "A signal, a trace or an unpin aimed at the agent refused unless a signed stop opened the window. Armed only by the enterprise layer: 62 asserts the refusal and the signed stop. Needs the BPF LSM active at boot (lsm=bpf)"
 
@@ -1277,7 +1277,7 @@ coverage:
     feature: file_kfuncs
     suites: ["77"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Probed and reported in 77"
 
@@ -1285,7 +1285,7 @@ coverage:
     feature: kprobe_session
     suites: ["86"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
 
@@ -1293,7 +1293,7 @@ coverage:
     feature: copy_from_user_str
     suites: ["86"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
 
@@ -1301,7 +1301,7 @@ coverage:
     feature: tcp_reqsk_assign
     suites: ["86"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
 
@@ -1309,7 +1309,7 @@ coverage:
     feature: attribution
     suites: ["70"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The workload named on a flow"
 
@@ -1317,7 +1317,7 @@ coverage:
     feature: process_tracing
     suites: ["70"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "The process and its lineage behind a flow"
 
@@ -1325,7 +1325,7 @@ coverage:
     feature: workload_firewall
     suites: ["70", "72", "92", "98", "99"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     notes: "Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99"
 
@@ -1334,7 +1334,7 @@ coverage:
     suites: []
     elsewhere: ["ebpfsentinel-enterprise/26"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: manual
     notes: "Nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite lives beside that response: ebpfsentinel-enterprise/tests/integration/suites/26-enterprise-quarantine.bats reads the workload's connections refused for the window, reaching the network again once it closes, and the release audited"
 
@@ -1342,7 +1342,7 @@ coverage:
     feature: process_signal
     suites: ["82"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "A run encrypting files stopped by the signal"
 
@@ -1350,7 +1350,7 @@ coverage:
     feature: immediate_signal
     suites: ["82"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only"
 
@@ -1358,7 +1358,7 @@ coverage:
     feature: network_executables
     suites: ["91", "132"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "Needs the BPF LSM active at boot, which the agent VM's boot line sets; 132 has an enforcing list refuse to start where bpf is masked out of the module list, naming the lsm= parameter, an observing one start, and an enforcing one refuse to start with no BPF token rather than serve an API enforcing nothing"
 
@@ -1366,7 +1366,7 @@ coverage:
     feature: write_refusal
     suites: ["83", "84", "100"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "At the LSM hook in 83 and through the fanotify permission group in 84; in 100 the ordinary workloads writing under a counted directory at the shipped threshold, and a package upgrade by the expected writer under a held one, refuse nothing"
 
@@ -1374,7 +1374,7 @@ coverage:
     feature: self_protection
     suites: ["88"]
     topology: none
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     notes: "88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list"
 
@@ -1401,7 +1401,7 @@ attack_suites:
     name: mhddos-l7-attacks
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["l7", "ips", "ratelimit", "ddos", "ids"]
     notes: "MHDDoS GET/POST/STRESS/BYPASS/OVH/TLS/CFB/SLOW multi-method floods"
@@ -1410,7 +1410,7 @@ attack_suites:
     name: pktgen-high-pps
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-firewall", "xdp-ratelimit", "tc-ids"]
     notes: "≥1 Mpps via kernel pktgen; asserts XDP-drop CPU savings + SYN cookie path"
@@ -1419,7 +1419,7 @@ attack_suites:
     name: slowhttptest-slow-attacks
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["l7", "ids", "ips", "ddos"]
     notes: "Slowloris / RUDY / Slowread via slowhttptest; asserts IPS auto-blacklist + MITRE T1499.002 + false-positive guard"
@@ -1428,7 +1428,7 @@ attack_suites:
     name: scapy-amplification
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-firewall", "tc-scrub", "ddos"]
     notes: "Spoofed-source DNS ANY / NTP monlist / SSDP / Memcached probes; asserts pre-response drop + MITRE T1498.002 + zero egress amplification"
@@ -1437,7 +1437,7 @@ attack_suites:
     name: ja4-fingerprint-diversity
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["l7", "fingerprints"]
     notes: "Diverse TLS clients (curl/openssl/urllib3/aiohttp/go/MHDDoS) populate JA4 cache; asserts cache growth + MITRE T1071 tag on malicious-SNI alert + ja4_fingerprint surfaces on /api/v1/alerts + FP guard for legit SNI + endpoint liveness after agent restart"
@@ -1446,7 +1446,7 @@ attack_suites:
     name: xdp-firewall-reject
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-firewall", "xdp-firewall-reject"]
     notes: "Forged-reply wire validation: TCP RST yields ECONNREFUSED + valid checksum + swapped src/dst; UDP yields ICMP type 3 code 3; whitelisted source bypasses reject path; rejected metric increments"
@@ -1455,7 +1455,7 @@ attack_suites:
     name: xdp-ratelimit-syncookie
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
     notes: "SYN flood: nstat TcpExtSyncookiesSent and agent syncookie_sent metric grow, legit ncat completes 3-way via cookie, spoofed-source flood leaves TcpExtSyncookiesRecv flat"
@@ -1464,7 +1464,7 @@ attack_suites:
     name: lb-dnat-connections
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-loadbalancer", "loadbalancer"]
     notes: "DNAT end-to-end: every TCP connection through three round-robin backends completes with the reply translated back to the VIP; a 3:1:1 weighted service spreads 100 connections in that proportion; least_conn keeps new connections off backends holding open ones"
@@ -1473,7 +1473,7 @@ attack_suites:
     name: flow-export-sinks
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["flow_export", "conntrack"]
     notes: "A tracked TCP connection reaches a local collector as IPFIX over UDP (template set first, five-tuple, both directions' counters, end reason, observation domain), RFC 5424 syslog over TCP octet counted, CEF over UDP with the agent's version in the header, and JSON lines on disk; the status route reports four healthy sinks"
@@ -1482,7 +1482,7 @@ attack_suites:
     name: auto-capture
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["auto_capture", "capture", "ids"]
     notes: "A medium IDS alert under min_severity high starts no capture; a critical one starts exactly one, filtered on the alert's source, on the configured interface, which completes on its own and leaves a pcap tcpdump reads holding only the source's packets"
@@ -1491,7 +1491,7 @@ attack_suites:
     name: interface-groups
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["interface_groups", "firewall"]
     notes: "Firewall rules scoped to a group holding the watched link, to a group without it, to each group's complement and to the link by name: traffic on the link is refused exactly where the scope includes it"
@@ -1500,7 +1500,7 @@ attack_suites:
     name: connection-ceilings-release
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     surfaces: ["conntrack", "firewall"]
     notes: "A per-source and a per-rule connection ceiling refuse the connection past the ceiling, give the room back once the kernel table no longer holds the connections open, and admit the same number again"
@@ -1509,7 +1509,7 @@ attack_suites:
     name: alias-refresh-interval
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     surfaces: ["alias", "firewall"]
     notes: "A url_table alias with GeoIP off refreshes on its own interval: a source added to the served list is dropped and one removed reaches the host again"
@@ -1518,7 +1518,7 @@ attack_suites:
     name: connection-ceilings-added-by-reload
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     surfaces: ["conntrack", "firewall", "config-reload"]
     notes: "An agent started with no per-source ceiling admits every connection; a reload setting max_src_states enforces it from then on, and closed connections give the room back so the source opens as many again"
@@ -1527,7 +1527,7 @@ attack_suites:
     name: ddos-half-open-released
     topology: 2vm
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: datapath
     surfaces: ["xdp-ratelimit", "ddos"]
     notes: "A source completing its handshakes opens many times the half-open threshold one after another and is never refused; one past the threshold on SYNs a closed port reset is refused, then admitted again once its count has aged"
@@ -1536,7 +1536,7 @@ attack_suites:
     name: lb-dsr-maglev
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["xdp-loadbalancer", "xdp-vip-announcer", "loadbalancer"]
     notes: "L2 DSR end-to-end: agent rewrites dst MAC and the backend→client return bypasses it; Maglev rebuild on backend removal stays under the 2/N disruption bound; XDP ARP responder answers on the client subnet; gratuitous-ARP takeover metric increments; is_self_announced() suppresses self-ARP alerts"
@@ -1545,7 +1545,7 @@ attack_suites:
     name: dns-doh-dot-detect
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["tc-dns", "l7", "dns"]
     notes: "DoH detection via TLS ClientHello SNI on built-in resolver list and on custom dns.doh_resolvers entry; DoT detection by dst_port 853; plain UDP/53 traffic does not raise an EncryptedDns alert (FP guard)"
@@ -1554,7 +1554,7 @@ attack_suites:
     name: scrub-byte-level
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["tc-scrub", "firewall"]
     notes: "Byte-level pcap assertions on the post-transit backend capture: TTL floor (min_ttl raises low TTL to 64), TCP MSS option clamped to max_mss=1400, IPv4 DF flag cleared, IPv4 identification randomized away from sender-chosen value; with `drop_fragments` set, no IPv4 fragment reaches the backend while the unfragmented control SYN does"
@@ -1563,7 +1563,7 @@ attack_suites:
     name: conntrack-kernel-ct-kill
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["tc-conntrack", "xdp-firewall", "firewall", "conntrack"]
     notes: "Established iperf3 flow tracked by kernel netfilter conntrack on the transit agent; mid-flow deny rule POST triggers kill_flow_via_xdp_ct kfunc; CT entry disappears within seconds and does not re-establish while the rule is active; removing the rule restores forwarding"
@@ -1572,7 +1572,7 @@ attack_suites:
     name: responses-time-bounded
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["responses", "response"]
     notes: "Time-bounded ResponseEngine via /api/v1/responses/manual: TTL-bound block_ip surfaces in list_active with decreasing remaining_secs; entry drops from active list after TTL; DELETE /api/v1/responses/{id} revokes before TTL; CLI parity via `responses create --action --target --ttl`; the create lands a responses/rule_added audit entry and the TTL expiry a responses/rule_removed one"
@@ -1581,7 +1581,7 @@ attack_suites:
     name: capture-pcap-export
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["capture"]
     notes: "Manual capture lifecycle via /api/v1/captures/manual + /api/v1/captures: session reaches status=completed at duration boundary, pcap lands at /var/lib/ebpfsentinel/captures/<id>.pcap, tcpdump -r parses cleanly; CLI parity via `capture start --filter --duration --interface`"
@@ -1590,7 +1590,7 @@ attack_suites:
     name: nptv6-prefix-translation
     topology: 3vm
     lanes: ["3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["tc-nat-egress", "tc-nat-ingress", "nat", "nptv6"]
     notes: "NPTv6 (RFC 6296) prefix translation surface: GET /api/v1/nat/nptv6 surfaces configured rule, POST + DELETE round-trip a rule, CLI `nat nptv6 list` mirrors the REST list - all three read a fixture bound to the external NIC, so the whole suite needs the multi-NIC topology and not only the wire test; wire-level egress-source-prefix swap (fd00:54::/64 → 2001:db8:54::/64) gated on per-VM IPv6 reachability and skips when the test VMs lack the IPv6 link addresses + routes"
@@ -1608,7 +1608,7 @@ attack_suites:
     name: hot-reload-under-load
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["firewall", "config-reload"]
     notes: "SIGHUP map-swap safety under sustained best-effort load (wrk HTTP + iperf3 TCP, both optional). 6× reload cycle alternating add/remove of a toggle rule at 5 s spacing. Asserts: agent PID stable (no crash + restart), rules_reloads_total{result=success} strictly increments (map generation counter), open FD count stays within +25% / +20 of baseline (proves old map FDs reclaimed - no leak), no panic line in agent log, alert ids unique across the cycle"
@@ -1617,7 +1617,7 @@ attack_suites:
     name: multiwan-failover
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["routing"]
     notes: "Multi-WAN failover-ordering contract: both gateways round-trip /api/v1/routing/gateways sorted primary→secondary by priority, /api/v1/routing/status reports the configured count, ebpfsentinel_routing_gateways gauge equals 2, ebpfsentinel_routing_failovers counter is exposed, and a SIGHUP-driven priority swap re-orders the list deterministically without changing the agent PID. The probe loop marks both unreachable gateways down and raises WAN_ALL_DOWN (routing-wan-all-down), and a gateway added through the API is probed rather than reported healthy for ever. Egress shifting on a real link-down needs the 3-VM transit topology and is not run"
@@ -1626,7 +1626,7 @@ attack_suites:
     name: container-cgroup-enrichment
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["container"]
     notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver); a container created after the agent connected to the Docker socket is named and imaged on its alert, which is the metadata cache being written while the agent runs rather than at startup. The alerts REST surface carries the container identity; Kubernetes pod enrichment is exercised by suite 10. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
@@ -1635,7 +1635,7 @@ attack_suites:
     name: ipv6-full-path-sweep
     topology: 3vm
     lanes: ["local", "2vm", "3vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["firewall", "ids", "ips", "ratelimit", "dns"]
     notes: "IPv6 parity sweep across dataplane features: firewall surfaces IPv6 CIDR rules with the v6 prefix preserved and co-loads matching v4 + v6 rules without conflict; IDS surfaces the v6-scoped signature; IPS blacklist endpoint accepts v6 sources; ratelimit surfaces the per-v6 source rule; mixed v4/v6 burst does not move the packets counter backwards or kill /healthz; DNS parser stays ready under a synthetic AAAA query. A wire-level IPv6 probe fires the tc-ids alert on the local lane, and on the 3-VM lane the agent transit-forwards regular IPv6 with the source prefix unchanged (NPTv6 covered by suite 50)"
@@ -1644,7 +1644,7 @@ attack_suites:
     name: l7-smtp-ftp-smb-edge
     topology: 2vm
     lanes: ["local", "2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["l7"]
     notes: "L7 SMTP/FTP/SMB edge-case sweep: pre-loaded SMTP/FTP/SMB rules round-trip GET /api/v1/firewall/l7-rules with command/is_smb2 matcher fields preserved; POST + DELETE round-trip per protocol; invalid protocol returns 4xx (not 5xx, not silent accept) without crashing the agent; truncated TCP segments on the L7-hooked ports (25/21/445) leave /readyz reporting ebpf_loaded=true. FTP PORT and SMB1 commands fire L7 deny alerts, and real swaks, lftp and smbclient clients drive the same dialogues on the wire (SMTP EHLO recorded on the audit trail, FTP PORT and SMB1 negotiate denied); every alert carries a MITRE technique"
@@ -1662,7 +1662,7 @@ attack_suites:
     name: ssh-brute-force-real
     topology: none
     lanes: ["local"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["ids", "ips"]
     notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. A real hydra credential burst fires the same alert and cracks nothing"
@@ -1671,7 +1671,7 @@ attack_suites:
     name: identity-across-hosts
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["identity", "conntrack"]
     notes: "A TCP connection and UDP datagrams from a named program on the agent's machine to the attacker VM, named on this end by pid and executable and on the far end by nothing"
@@ -1680,7 +1680,7 @@ attack_suites:
     name: encryption-from-another-machine
     topology: 2vm
     lanes: ["2vm"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["ransom", "file_watch"]
     notes: "The attacker VM encrypting a Samba share the agent's machine serves: the verdict names the client by its address through smbd, and neither the session nor smbd is stopped"
@@ -1689,7 +1689,7 @@ attack_suites:
     name: podman-attribution
     topology: none
     lanes: ["runtimes"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["container", "ids"]
     notes: "A rootful and a rootless Podman container named on their alerts by id, name and image, each runtime reported reachable; an IDS rule scoped to one container by name fires on it and not on its neighbour. Podman lives on the vagrant-runtimes VM only, so the agent VM's lane does not run it"
@@ -1698,7 +1698,7 @@ attack_suites:
     name: cri-runtimes-attribution
     topology: none
     lanes: ["runtimes"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["container"]
     notes: "A container containerd and CRI-O start through the CRI, with the systemd cgroup driver, attributed to its id, its runtime and its scope. Both runtimes and crictl live on the vagrant-runtimes VM only"
@@ -1707,7 +1707,7 @@ attack_suites:
     name: start-up-refusals
     topology: none
     lanes: ["local", "runtimes"]
-    kernel_min: "6.12"
+    kernel_min: "6.18"
     profile: nightly
     surfaces: ["startup"]
     notes: "The agent refuses to start where running would promise what the node does not do, and starts with less where it can, saying what it lacks. Needs nothing but the BPF LSM, so both one-machine lanes run it"

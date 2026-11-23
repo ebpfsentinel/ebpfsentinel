@@ -2358,7 +2358,7 @@ pub struct AgentInfo {
     #[serde(default = "default_event_workers")]
     pub event_workers: usize,
 
-    /// BPF token delegation settings (tokens need 6.9, the agent's floor is 6.12). eBPF is loaded
+    /// BPF token delegation settings (tokens need 6.9, the agent's floor is 6.18). eBPF is loaded
     /// **exclusively** through a BPF token created against the delegated
     /// bpffs at `bpffs_path`; there is no capability-based loading path.
     /// The agent's self-bootstrap mounts that bpffs after the warden has

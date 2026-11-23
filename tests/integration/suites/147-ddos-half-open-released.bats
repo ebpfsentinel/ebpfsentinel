@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 147-ddos-half-open-released.bats - The half-open guard counts handshakes in progress
-# Requires: root, kernel >= 6.12, bpftool, ncat, taskset
+# Requires: root, kernel >= 6.18, bpftool, ncat, taskset
 #
 # ddos.connection_tracking.half_open_threshold caps the handshakes one source
 # has in progress. A handshake that completes gives its slot back, so a source

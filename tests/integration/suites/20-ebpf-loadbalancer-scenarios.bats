@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 20-ebpf-loadbalancer-scenarios.bats - Load balancer eBPF scenario tests
-# Requires: root, kernel >= 6.12, bpftool, ncat, python3
+# Requires: root, kernel >= 6.18, bpftool, ncat, python3
 #
 # The spread tests send UDP datagrams from the client namespace to a service
 # on the host side, which the agent rewrites to backends in a second

@@ -68,7 +68,7 @@ pub enum BootstrapError {
 
     #[error(
         "kernel {major}.{minor} lacks BPF_TOKEN_CREATE - eBPFsentinel loads eBPF \
-         only through a BPF token, which needs 6.9, and the agent's floor is 6.12. \
+         only through a BPF token, which needs 6.9, and the agent's floor is 6.18. \
          Upgrade the host kernel."
     )]
     KernelTooOld { major: u32, minor: u32 },
@@ -90,7 +90,7 @@ pub enum BootstrapError {
 ///
 /// # Errors
 /// Returns [`BootstrapError::KernelProbe`] when the kernel cannot be
-/// probed, [`BootstrapError::KernelTooOld`] when it is below 6.12, and
+/// probed, [`BootstrapError::KernelTooOld`] when it is below 6.18, and
 /// [`BootstrapError::TokenCreate`] when `BPF_TOKEN_CREATE` fails (most
 /// commonly because the delegated bpffs has not been mounted).
 pub fn bootstrap(policy: &BpfTokenPolicy) -> Result<BpfLoadingHandle, BootstrapError> {
@@ -108,7 +108,7 @@ pub fn bootstrap_with_kernel(
     policy: &BpfTokenPolicy,
     kernel: KernelFeatures,
 ) -> Result<BpfLoadingHandle, BootstrapError> {
-    // The floor (6.12) is above the kernel that brought BPF tokens (6.9).
+    // The floor (6.18) is above the kernel that brought BPF tokens (6.9).
     if !kernel.meets_minimum() {
         return Err(BootstrapError::KernelTooOld {
             major: kernel.major,
@@ -154,7 +154,7 @@ mod tests {
         // There is no capability fallback: the bootstrap must surface the
         // error instead of silently degrading.
         let policy = BpfTokenPolicy::new("/nonexistent");
-        let err = bootstrap_with_kernel(&policy, features(6, 12)).unwrap_err();
+        let err = bootstrap_with_kernel(&policy, features(6, 18)).unwrap_err();
         assert!(matches!(err, BootstrapError::TokenCreate { .. }));
     }
 }

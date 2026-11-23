@@ -15,7 +15,7 @@
 # The pod shares the node's network, so no CNI is involved and the probe
 # leaves through the inspected veth on egress.
 #
-# Lane: ../vagrant-runtimes. Requires: root, kernel >= 6.12, crictl, and the
+# Lane: ../vagrant-runtimes. Requires: root, kernel >= 6.18, crictl, and the
 # runtime's socket listening; each test skips when its runtime is absent.
 
 load '../lib/helpers'

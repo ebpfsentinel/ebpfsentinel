@@ -63,7 +63,7 @@ test-vm: vagrant-up ## Run all suites inside the VM
 TIERS ?= full,load
 
 .PHONY: test-kernel-matrix
-test-kernel-matrix: ## Run the agent on every kernel of kernels.toml: make test-kernel-matrix [TIERS=full,load] [KERNELS=6.12,7.3]
+test-kernel-matrix: ## Run the agent on every kernel of kernels.toml: make test-kernel-matrix [TIERS=full,load] [KERNELS=6.18,7.3]
 	$(SCRIPT_DIR)/run-kernel-matrix.sh $(if $(KERNELS),--kernels $(KERNELS),--tiers $(TIERS))
 
 .PHONY: test-k8s

@@ -16,7 +16,7 @@
 #     boot clock and the rewrites on the wall clock, so the two are only
 #     paired inside one window when the exec is moved onto the wall clock.
 #
-# Requires: root, kernel >= 6.12, jq, python3, libcrypto.so.3.
+# Requires: root, kernel >= 6.18, jq, python3, libcrypto.so.3.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

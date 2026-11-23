@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(body.shadow.events, 0);
         assert!(body.recent.is_empty());
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let service = RansomService::new(tx, Arc::new(|| HostSources::new(Some((6, 12)))));
+        let service = RansomService::new(tx, Arc::new(|| HostSources::new(Some((6, 18)))));
         let body = mass_encryption_body(Some(&service));
         assert!(body.enabled);
         assert_eq!(body.mode, Some("shadow"));
@@ -684,9 +684,9 @@ mod tests {
 
     #[test]
     fn every_intent_is_listed_with_its_fields() {
-        let body = intents_body(&HostSources::new(Some((6, 12))));
+        let body = intents_body(&HostSources::new(Some((6, 18))));
         assert_eq!(body.intents.len(), Intent::ALL.len());
-        assert_eq!(body.kernel.as_deref(), Some("6.12"));
+        assert_eq!(body.kernel.as_deref(), Some("6.18"));
         let connects = body
             .intents
             .iter()
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn the_sources_present_decide_what_is_served() {
-        let host = HostSources::new(Some((6, 12)))
+        let host = HostSources::new(Some((6, 18)))
             .present(Source::ProcessTracing)
             .absent(Source::FileWatch, "the file watch is not enabled");
         let body = intents_body(&host);
@@ -737,7 +737,7 @@ mod tests {
         );
         assert_eq!(body.applicable, 2);
 
-        let watched = HostSources::new(Some((6, 12)))
+        let watched = HostSources::new(Some((6, 18)))
             .present(Source::ProcessTracing)
             .present(Source::FileWatch);
         let body = intents_body(&watched);
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn an_intent_no_source_feeds_to_the_rules_is_not_applicable_even_when_hooked() {
-        let mut host = HostSources::new(Some((6, 12)));
+        let mut host = HostSources::new(Some((6, 18)));
         for source in [Source::ProcessTracing, Source::SocketAttribution] {
             host = host.present(source);
         }
@@ -787,7 +787,7 @@ mod tests {
                 {"id":"either","when":{"any_of":[{"process.starts":{}},{"process.connects":{}}]}},
                 {"id":"connects","then":["alert","kill_process"],"when":{"process.connects":{"remote_port":4444}}}]"#,
         );
-        let host = HostSources::new(Some((6, 12))).present(Source::ProcessTracing);
+        let host = HostSources::new(Some((6, 18))).present(Source::ProcessTracing);
         let body = rules_body(Some(&service), &host);
         let states: Vec<&str> = body.rules.iter().map(|r| r.state).collect();
         assert_eq!(
@@ -812,7 +812,7 @@ mod tests {
     #[test]
     fn a_rule_written_in_force_carries_no_reading() {
         let service = service(r#"[{"id":"loud","mode":"enforce","when":{"process.starts":{}}}]"#);
-        let host = HostSources::new(Some((6, 12))).present(Source::ProcessTracing);
+        let host = HostSources::new(Some((6, 18))).present(Source::ProcessTracing);
         let body = rules_body(Some(&service), &host);
         assert_eq!(body.rules[0].mode, "enforce");
         assert!(body.rules[0].shadow.is_none());

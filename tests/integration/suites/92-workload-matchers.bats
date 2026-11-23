@@ -19,7 +19,7 @@
 #     a listed resolver, and for nothing before the answer; the resolved
 #     name is listed by the rule.
 #
-# Requires: root, kernel >= 6.12, jq, python3, ncat, sha256sum.
+# Requires: root, kernel >= 6.18, jq, python3, ncat, sha256sum.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

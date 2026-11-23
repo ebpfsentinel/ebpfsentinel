@@ -12,7 +12,7 @@
 # Usage:
 #   run-kernel-matrix.sh                         # full + load tiers (the run that is recorded)
 #   run-kernel-matrix.sh --tiers preview         # the release candidate alone
-#   run-kernel-matrix.sh --kernels 6.12,7.3
+#   run-kernel-matrix.sh --kernels 6.18,7.3
 #   run-kernel-matrix.sh --no-2vm --no-3vm       # local lane only, even on full kernels
 #   run-kernel-matrix.sh --keep                  # leave the VMs up, back on the HWE kernel
 #

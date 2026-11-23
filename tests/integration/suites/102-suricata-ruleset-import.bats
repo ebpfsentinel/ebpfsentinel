@@ -14,7 +14,7 @@
 #     content raises nothing.
 #   * The refused rule raises nothing for traffic it would have matched.
 #
-# Requires: root, kernel >= 6.12, ncat, jq
+# Requires: root, kernel >= 6.18, ncat, jq
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

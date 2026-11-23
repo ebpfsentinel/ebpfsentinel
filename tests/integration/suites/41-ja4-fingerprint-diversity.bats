@@ -6,7 +6,7 @@
 #   - Attacker VM with curl, openssl, python3 (urllib3 / aiohttp), go
 #    ; MHDDoS optional
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.12
+#   - Kernel >= 6.18
 #
 # What's asserted:
 #   1. The agent's JA4 cache count grows monotonically across distinct

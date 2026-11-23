@@ -2,7 +2,7 @@
 # kernel-mainline.sh - choose the kernel the next boot runs.
 #
 # MAINLINE_KERNEL names a kernel.ubuntu.com/mainline build by its directory
-# ("6.12.118", "7.3.5", "7.4-rc4"): that exact build is installed and made the
+# ("6.18.5", "7.3.5", "7.4-rc4"): that exact build is installed and made the
 # default, built from the stable tree with Ubuntu's own configuration, BTF and
 # module BTF included. Empty, the VM goes back to the HWE kernel: the newest
 # kernel that is not a mainline build is pinned, since a mainline kernel left

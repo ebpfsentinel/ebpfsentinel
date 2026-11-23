@@ -23,7 +23,7 @@
 #   * A reachable listener nobody connected to reads exposed_unused, and
 #     exposed_used once a connection was accepted on it.
 #
-# Requires: root, kernel >= 6.12, jq, python3, curl, nft.
+# Requires: root, kernel >= 6.18, jq, python3, curl, nft.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

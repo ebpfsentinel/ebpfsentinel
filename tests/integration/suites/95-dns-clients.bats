@@ -15,7 +15,7 @@
 #     and what a rule on the DNS ports does not see is said in the same
 #     answer.
 #
-# Requires: root, kernel >= 6.12, jq, python3.
+# Requires: root, kernel >= 6.18, jq, python3.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

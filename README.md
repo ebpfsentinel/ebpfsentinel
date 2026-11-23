@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
-  <img src="https://img.shields.io/badge/kernel-6.12%2B-informational" alt="Linux kernel 6.12+">
+  <img src="https://img.shields.io/badge/kernel-6.18%2B-informational" alt="Linux kernel 6.18+">
   <img src="https://img.shields.io/badge/arch-x86__64%20%7C%20aarch64-informational" alt="x86_64 and aarch64">
   <a href="https://docs.ebpfsentinel.io"><img src="https://img.shields.io/badge/docs-docs.ebpfsentinel.io-7c5cff" alt="Documentation"></a>
 </p>
@@ -250,7 +250,7 @@ Details, host requirements and the lab's own addresses are in
 
 ### Install for real
 
-**Requirements:** Linux kernel 6.12+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The floor is the kernel the managed node images (GKE COS, EKS AL2023, Ubuntu HWE) converge on; **BPF token delegation** is what lets the agent load its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
+**Requirements:** Linux kernel 6.18+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The floor is the first release that verifies a signed BPF program, and the kernel of Ubuntu 26.04, Ubuntu 24.04 HWE, Talos 1.12, EKS AL2023, GKE COS 133 and the AKS Ubuntu 26.04 node image; **BPF token delegation** is what lets the agent load its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
 Pick the path that matches the host. The first four install signed release artifacts, and all five run the same two processes: the rootless agent and the warden broker.
 
@@ -475,24 +475,39 @@ The changelog is kept with the releases rather than here, so the whole product's
 
 ## Compatibility
 
-Linux only, kernel **6.12 or later with BTF** (`/sys/kernel/btf/vmlinux`), on x86_64 and aarch64 (the userspace tests run on both in CI). What matters is the running kernel, not the release.
+Linux only, kernel **6.18 or later with BTF** (`/sys/kernel/btf/vmlinux`), on x86_64 and aarch64 (the userspace tests run on both in CI). What matters is the running kernel, not the release.
 
 | Distribution | Kernel it ships | Supported |
 |---|---|---|
-| Debian 13+ | 6.12 | Yes |
-| Debian 12 | 6.1 | With the bookworm-backports kernel (6.12) |
 | Ubuntu 26.04 LTS | 7.0 | Yes |
-| Ubuntu 24.04 | 6.8 (GA), 7.0 (HWE since 24.04.5) | With the HWE kernel |
+| Ubuntu 24.04 LTS | 6.8 (GA), 7.0 (HWE since 24.04.5) | With the HWE kernel (`linux-generic-hwe-24.04`) |
 | Ubuntu 22.04 | 5.15, HWE stops at 6.8 | No |
-| RHEL / Rocky 10+ | 6.12 | Yes |
-| RHEL / Rocky 9 | 5.14 | Only with a 6.12+ kernel (ELRepo `kernel-ml`) |
-| Fedora 41+ | current stable | Yes |
-| Alpine 3.21+ | 6.12 (`linux-lts`) | Yes |
-| Alpine 3.20 and earlier | 6.6 | No |
+| Debian 13 | 6.12, 6.18 and later in trixie-backports | With the backports kernel |
+| Debian 12 | 6.1 | No |
+| Fedora 43+ | 6.19 and later | Yes |
+| openSUSE Tumbleweed | rolling | Yes |
+| SLES 16 / openSUSE Leap 16 | 6.12 | No |
+| RHEL / Rocky / AlmaLinux 10 and 9 | 6.12 / 5.14 for the release's life | No |
+| Alpine 3.23+ | 6.18 (`linux-lts`) | Yes |
+| Alpine 3.22 and earlier | 6.12 or older | No |
 | Arch Linux | rolling | Yes |
-| NixOS 25.05+ | 6.12+ | Yes |
-| Talos 1.9+ | 6.12 | Yes |
-| AKS (Ubuntu 26.04 node image) | 7.0 | Yes; GKE, EKS and the other node images in the full matrix |
+| NixOS 26.05+ | 6.18 | Yes (25.11 with `linuxPackages_6_18`) |
+| Talos 1.12+ | 6.18 | Yes |
+| Flatcar | 6.18 in the releases of 2026 | On a release that runs 6.18 (`uname -r`) |
+
+Managed Kubernetes, where the node kernel is the provider's choice:
+
+| Service | Node image | Kernel | Supported |
+|---|---|---|---|
+| EKS | Amazon Linux 2023 on kernel 6.18 (the AL2023 default since 2026-08-17) | 6.18 | Yes |
+| EKS | Amazon Linux 2023 on kernel 6.1 or 6.12 | 6.1 / 6.12 | No |
+| EKS | Bottlerocket `k8s-1.36` and later, outside FIPS | 6.18 | Yes |
+| EKS | Bottlerocket FIPS variants | 6.12 | No |
+| GKE | Container-Optimized OS 133 and later | 6.18 | Yes |
+| GKE | Container-Optimized OS 125 to 129 | 6.12 | No |
+| AKS | Ubuntu 26.04 node image (Kubernetes 1.36 and later) | 7.0 | Yes |
+| AKS | Ubuntu 24.04 node image, Azure Linux 3.0 | 6.8, 6.6 | No |
+| Scaleway Kapsule | Ubuntu node image | not published | Check `uname -r` on a node |
 
 | Runs as | How |
 |---|---|

@@ -13,7 +13,7 @@
 #   * an interface whose root qdisc is not fq is reported as one where the
 #     shaper stands aside.
 #
-# Requires: root, kernel >= 6.12, jq, python3, tc.
+# Requires: root, kernel >= 6.18, jq, python3, tc.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -17,7 +17,7 @@
 #      userspace drained and then threw away? Those are two different
 #      failures and they are now two different counters.
 #
-# Requires: root, kernel >= 6.12, ncat.
+# Requires: root, kernel >= 6.18, ncat.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

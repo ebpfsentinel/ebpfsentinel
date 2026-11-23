@@ -11,7 +11,7 @@
 #   * the capture ends on its own after `duration_secs` and leaves a pcap
 #     tcpdump reads, holding the source's packets and no other host's.
 #
-# Requires: root, kernel >= 6.12, ncat, jq, tcpdump.
+# Requires: root, kernel >= 6.18, ncat, jq, tcpdump.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

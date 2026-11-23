@@ -2538,7 +2538,7 @@ mod tests {
         use crate::ebpf::capabilities::CATALOGUE;
         use crate::ebpf::capability_report::{Evidence, build};
         let metrics = AgentMetrics::new();
-        let report = build(Some("6.12.48+deb13-amd64".into()), true, None, &|id| {
+        let report = build(Some("6.18.12+deb13-amd64".into()), true, None, &|id| {
             (id == "bpf_lsm").then_some(Evidence::Lsm {
                 active: true,
                 built: Some(true),

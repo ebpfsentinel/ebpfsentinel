@@ -14,7 +14,7 @@
 #   * plain UDP/53 traffic does NOT raise a DoH/DoT alert (false-
 #     positive guard for the encrypted-DNS detector)
 #
-# Requires: 3-VM mode, kernel >= 6.12, openssl on attacker, nginx :443
+# Requires: 3-VM mode, kernel >= 6.18, openssl on attacker, nginx :443
 # and openssl s_server :853 on backend (dot-backend.service shipped by
 # the backend provisioner).
 

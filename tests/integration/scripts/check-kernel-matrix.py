@@ -31,7 +31,7 @@ Other modes serve the runners:
                               kernel.ubuntu.com/mainline built for amd64 (image
                               and modules), else, for a release still under
                               development, its newest candidate, as the
-                              directory name without its `v` (6.12.119, 6.13,
+                              directory name without its `v` (6.18.5, 6.19,
                               7.4-rc4)
 
 Prints the summary line; problems go to stderr and exit 1.

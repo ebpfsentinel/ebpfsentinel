@@ -18,7 +18,7 @@
 #   * A container started after the agent is policed without a reload,
 #     and its rules go when it is removed.
 #
-# Requires: root, kernel >= 6.12, jq, docker, python3, a static busybox.
+# Requires: root, kernel >= 6.18, jq, docker, python3, a static busybox.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

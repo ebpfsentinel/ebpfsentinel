@@ -15,7 +15,7 @@
 #   * The processes command shows the shell the detection named.
 #   * With kill_process on, the reverse shell is stopped once named.
 #
-# Requires: root, kernel >= 6.12, jq, python3, ncat, nft.
+# Requires: root, kernel >= 6.18, jq, python3, ncat, nft.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

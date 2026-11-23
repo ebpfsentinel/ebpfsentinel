@@ -33,7 +33,7 @@ impl KernelVersion {
         minor: MIN_KERNEL_MINOR,
     };
 
-    /// The version a release string such as `6.12.48+deb13-amd64` names, or
+    /// The version a release string such as `6.18.12+deb13-amd64` names, or
     /// `None` when it names none.
     #[must_use]
     pub fn parse(release: &str) -> Option<Self> {
@@ -194,10 +194,7 @@ pub const CATALOGUE: &[Capability] = &[
         id: "immediate_signal",
         unlocks: "a signal that reaches its target at once, even a process making no syscall",
         probe: ProbeKind::Loaded,
-        since: KernelVersion {
-            major: 6,
-            minor: 13,
-        },
+        since: KernelVersion::FLOOR,
         needs_lsm: false,
         fallback: "the signal waits for the target's next syscall, and a target making none \
                    within the window is reported as a survivor",
@@ -410,12 +407,10 @@ mod tests {
                 assert!(condition.contains("lsm="), "{}", c.id);
             }
         }
-        let immediate = find("immediate_signal").expect("entry");
-        assert!(immediate.condition().contains("6.13"));
     }
 
     #[test]
     fn the_floor_is_the_one_the_agent_refuses_below() {
-        assert_eq!(KernelVersion::FLOOR.to_string(), "6.12");
+        assert_eq!(KernelVersion::FLOOR.to_string(), "6.18");
     }
 }

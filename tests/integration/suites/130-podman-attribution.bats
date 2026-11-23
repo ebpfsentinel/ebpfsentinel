@@ -17,7 +17,7 @@
 # Both containers share the node's network, so the probe leaves through the
 # inspected veth on egress where the sending socket's cgroup is readable.
 #
-# Lane: ../vagrant-runtimes. Requires: root, kernel >= 6.12, podman with its
+# Lane: ../vagrant-runtimes. Requires: root, kernel >= 6.18, podman with its
 # rootful socket listening, and for the rootless test a user with lingering
 # and `podman.socket` enabled.
 

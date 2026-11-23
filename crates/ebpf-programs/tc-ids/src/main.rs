@@ -1025,7 +1025,7 @@ fn increment_metric(traced: bool, index: u32) {
 ///
 /// Uses a `bpf_dynptr` (kernel 6.4+ kfunc) to query the full packet size
 /// including fragments without linearization, then falls back to
-/// `ctx.len()` if the dynptr creation fails (should not happen on the 6.12 floor).
+/// `ctx.len()` if the dynptr creation fails (should not happen on the 6.18 floor).
 #[inline(always)]
 fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, seq: u32) {
     // A traced packet is nobody's traffic, so its payload is not captured.
@@ -1039,7 +1039,7 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, seq: u32) {
 
     // Full packet size including non-linear fragments, which `ctx.len()`
     // alone does not count. Falls back to `ctx.len()` if the dynptr cannot
-    // be created (should not happen on the 6.12 floor). Protocol classification is
+    // be created (should not happen on the 6.18 floor). Protocol classification is
     // userspace work: the payload below is what it runs on.
     let pkt_len = unsafe { skb_packet_size(raw_skb(ctx) as *mut _) }
         .map_or(ctx.len() as usize, |total| total as usize);

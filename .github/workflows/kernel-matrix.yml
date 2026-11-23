@@ -1,6 +1,6 @@
 name: Kernel Matrix
 
-# The agent run on every kernel from the 6.12 floor to the newest stable,
+# The agent run on every kernel from the 6.18 floor to the newest stable,
 # listed in tests/integration/kernels.toml.
 #
 #   list     on a hosted runner: the list held to the agent's floor and to
@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       kernels:
-        description: "Comma-separated releases of kernels.toml, as 6.12,7.3 (empty: full and load tiers)"
+        description: "Comma-separated releases of kernels.toml, as 6.18,7.3 (empty: full and load tiers)"
         required: false
         default: ""
   pull_request:

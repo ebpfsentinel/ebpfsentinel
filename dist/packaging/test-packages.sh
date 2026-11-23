@@ -125,14 +125,14 @@ kept_operator_config() {
 
 refused_below_the_floor() {
   local install_cmd="$1"
-  local message="${2:-6.12 or newer is required, this host runs 6.11}"
+  local message="${2:-6.18 or newer is required, this host runs 6.17}"
   # rpm runs a scriptlet with its own PATH whatever the caller's, and Fedora
   # merged /usr/sbin into /usr/bin, so the shim takes the real binary's place
   # for the one install and hands it back after.
   mv /usr/bin/uname /usr/bin/uname.real
   cat >/usr/bin/uname <<'SHIM'
 #!/bin/sh
-[ "${1:-}" = -r ] && { echo 6.11.0-29-generic; exit 0; }
+[ "${1:-}" = -r ] && { echo 6.17.0-14-generic; exit 0; }
 exec /usr/bin/uname.real "$@"
 SHIM
   chmod 0755 /usr/bin/uname
@@ -141,8 +141,8 @@ SHIM
   local out rc=0
   out="$(sh -c "${install_cmd}" 2>&1)" || rc=$?
   mv /usr/bin/uname.real /usr/bin/uname
-  check "an install on a 6.11 kernel fails" [ "${rc}" -ne 0 ]
-  check "the refusal names the 6.12 floor and the running release" \
+  check "an install on a 6.17 kernel fails" [ "${rc}" -ne 0 ]
+  check "the refusal names the 6.18 floor and the running release" \
     sh -c 'printf "%s" "$1" | grep -qF "$2"' _ "${out}" "${message}"
   check "nothing of the refused install is left" sh -c '[ ! -e /usr/bin/ebpfsentinel-agent ] && [ ! -e /usr/local/bin/ebpfsentinel-agent ]'
 }
@@ -268,7 +268,7 @@ SHIM
   local dir=/pkgs/tarball
 
   echo "# tarball: refused below the floor"
-  refused_below_the_floor "${dir}/install.sh" "kernel >= 6.12 is required (found 6.11"
+  refused_below_the_floor "${dir}/install.sh" "kernel >= 6.18 is required (found 6.17"
 
   echo "# tarball: install"
   "${dir}/install.sh" >/tmp/install.log 2>&1 || { cat /tmp/install.log; fail "install.sh"; return; }

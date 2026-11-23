@@ -13,7 +13,7 @@
 #     agent restarted on the same state sends the same one.
 #   * EBPFSENTINEL_TELEMETRY_DISABLE silences the agent entirely.
 #
-# Requires: root, kernel >= 6.12, jq, python3, a lane build carrying the
+# Requires: root, kernel >= 6.18, jq, python3, a lane build carrying the
 # loopback endpoint.
 
 load '../lib/helpers'

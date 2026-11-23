@@ -6,7 +6,7 @@
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM provisioned (MHDDoS at /opt/MHDDoS)
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.12, bpftool on agent side
+#   - Kernel >= 6.18, bpftool on agent side
 #
 # Each per-method test:
 #   1. snapshots the relevant agent metric

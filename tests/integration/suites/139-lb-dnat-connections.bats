@@ -13,7 +13,7 @@
 #   * least_conn sends new connections away from backends holding open ones
 #   * no rewritten packet reaches the backend with a checksum it drops
 #
-# Requires: 3-VM mode (EBPF_3VM_MODE=true), kernel >= 6.12 on the agent,
+# Requires: 3-VM mode (EBPF_3VM_MODE=true), kernel >= 6.18 on the agent,
 # python3 on the backend VM, curl and ncat on the client VM.
 
 load '../lib/helpers'

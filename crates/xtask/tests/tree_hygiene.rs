@@ -428,3 +428,149 @@ fn a_lock_file_is_read_by_its_package_names() {
         "[[package]]\nname = \"rusqlite\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"tokio\"\n";
     assert_eq!(locked_packages(lock), ["rusqlite", "tokio"]);
 }
+
+/// The kernel floor as `kernel_probe.rs` computes it, the one place it is decided.
+fn kernel_floor(root: &Path) -> (u32, u32) {
+    let source = std::fs::read_to_string(root.join("crates/adapters/src/ebpf/kernel_probe.rs"))
+        .expect("kernel_probe.rs is readable");
+    let constant = |name: &str| -> u32 {
+        let prefix = format!("pub const {name}: u32 = ");
+        source
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(prefix.as_str()))
+            .and_then(|rest| rest.trim_end_matches(';').parse().ok())
+            .unwrap_or_else(|| panic!("{name} is declared in kernel_probe.rs"))
+    };
+    (constant("MIN_KERNEL_MAJOR"), constant("MIN_KERNEL_MINOR"))
+}
+
+/// What, written after a kernel release, makes it a claim about the floor
+/// wherever it stands.
+const FLOOR_SUFFIXES: &[&str] = &["%2B", " floor", " minimum", " is required", " required"];
+
+/// What, written before a kernel release, makes it a claim about the floor
+/// wherever it stands.
+const FLOOR_PREFIXES: &[&str] = &["kernel_min: \"", "floor is ", "floor of ", "minimum "];
+
+/// What, written before a kernel release, makes `X.Y+` or `X.Y or later` a
+/// requirement of the agent rather than the release a feature arrived in.
+const REQUIREMENT_PREFIXES: &[&str] =
+    &["Linux kernel ", "Linux kernel **", "kernel **", "Requires "];
+
+/// What, written after a kernel release, says "this or anything later".
+const OPEN_ENDED: &[&str] = &["+", " or later", " or newer"];
+
+/// A release below `floor` that `line` states as what the agent needs.
+fn floor_claim_below(line: &str, floor: (u32, u32)) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts = bytes[i].is_ascii_digit()
+            && (i == 0 || !(bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b'.'));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let major_end = (i..bytes.len())
+            .find(|&j| !bytes[j].is_ascii_digit())
+            .unwrap_or(bytes.len());
+        if bytes.get(major_end) != Some(&b'.') {
+            i = major_end;
+            continue;
+        }
+        let minor_end = (major_end + 1..bytes.len())
+            .find(|&j| !bytes[j].is_ascii_digit())
+            .unwrap_or(bytes.len());
+        if minor_end == major_end + 1 || bytes.get(minor_end) == Some(&b'.') {
+            i = minor_end;
+            continue;
+        }
+        let (Ok(major), Ok(minor)) = (
+            line[i..major_end].parse::<u32>(),
+            line[major_end + 1..minor_end].parse::<u32>(),
+        ) else {
+            i = minor_end;
+            continue;
+        };
+        let release = (major, minor);
+        let after = &line[minor_end..];
+        let before = &line[..i];
+        let claimed = FLOOR_SUFFIXES.iter().any(|s| after.starts_with(s))
+            || FLOOR_PREFIXES.iter().any(|p| before.ends_with(p))
+            || (REQUIREMENT_PREFIXES.iter().any(|p| before.ends_with(p))
+                && OPEN_ENDED
+                    .iter()
+                    .any(|s| after.trim_start_matches("**").starts_with(s)));
+        if (4..=6).contains(&major) && release < floor && claimed {
+            return Some(format!("{major}.{minor}"));
+        }
+        i = minor_end;
+    }
+    None
+}
+
+#[test]
+fn no_tracked_file_states_a_floor_below_the_one_the_agent_computes() {
+    let root = workspace_root();
+    let floor = kernel_floor(&root);
+    let mut offences: Vec<String> = Vec::new();
+
+    for path in tracked_files(&root) {
+        let rel = relative(&root, &path);
+        // dated records keep the kernel they ran on, and this file names the shape
+        if rel.starts_with("tests/integration/records/") || rel.ends_with("tree_hygiene.rs") {
+            continue;
+        }
+        let Some(text) = read_text(&path) else {
+            continue;
+        };
+        for (number, line) in text.lines().enumerate() {
+            if let Some(release) = floor_claim_below(line, floor) {
+                offences.push(format!("{rel}:{}: {release}: {}", number + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "the agent refuses any kernel below {}.{}; a lower floor written elsewhere is \
+         a claim it contradicts at start-up:\n{}",
+        floor.0,
+        floor.1,
+        offences.join("\n")
+    );
+}
+
+#[test]
+fn a_floor_claim_is_told_from_a_fact_about_a_release() {
+    let floor = (6, 18);
+    assert_eq!(
+        floor_claim_below("Linux kernel 6.12+ on x86_64", floor).as_deref(),
+        Some("6.12")
+    );
+    assert_eq!(
+        floor_claim_below("kernel-6.9%2B-informational", floor).as_deref(),
+        Some("6.9")
+    );
+    assert_eq!(
+        floor_claim_below("kernel >= 6.12 is required", floor).as_deref(),
+        Some("6.12")
+    );
+    assert_eq!(
+        floor_claim_below("Linux kernel **5.15 or later**", floor).as_deref(),
+        Some("5.15")
+    );
+    assert_eq!(
+        floor_claim_below("needs the 6.12 floor", floor).as_deref(),
+        Some("6.12")
+    );
+    assert_eq!(floor_claim_below("a kfunc of kernel 6.4+", floor), None);
+    assert_eq!(floor_claim_below("Under TCX (kernel >= 6.6)", floor), None);
+    assert_eq!(
+        floor_claim_below("Linux kernel 6.18+ on x86_64", floor),
+        None
+    );
+    assert_eq!(floor_claim_below("UEK 8 is 6.12", floor), None);
+    assert_eq!(floor_claim_below("version 0.16.12+", floor), None);
+    assert_eq!(floor_claim_below("Ubuntu 22.04+", floor), None);
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 144-connection-ceilings-release.bats - A connection ceiling counts open connections
-# Requires: root, kernel >= 6.12, bpftool, ncat, ss
+# Requires: root, kernel >= 6.18, bpftool, ncat, ss
 #
 # conntrack.max_src_states caps the connections one source holds open, and a
 # rule's max_states caps the connections open through that rule. The datapath
