@@ -1,8 +1,10 @@
 //! The application fields a rule compares as a whole, outside any buffer:
-//! the DNS header's numbers, and the TLS version, handshake state and
-//! certificate dates, each read the way Suricata reads its keyword.
+//! the DNS header's numbers, the TLS version, handshake state and
+//! certificate dates, and the DCE/RPC interface and operation number, each
+//! read the way Suricata reads its keyword.
 
-use super::int::{IntMatch, number};
+use super::int::{IntMatch, IntOp, number};
+use crate::ids::dcerpc::uuid_of;
 use crate::ids::suricata::{Compiled, Refused};
 use crate::ids::tls::{STATE_CLIENT_HELLO, STATE_SERVER_HELLO};
 use crate::ids::tx::{Fields, int_of};
@@ -30,6 +32,14 @@ pub enum FieldCheck {
     Contains { text: String, negated: bool },
     /// The field is the text, case aside.
     Equals(String),
+    /// The call's interface is this UUID, its major version holding the
+    /// condition when there is one.
+    Iface {
+        uuid: [u8; 16],
+        version: Option<IntMatch>,
+    },
+    /// The integer lies within one of the inclusive ranges.
+    Ranges(Vec<(u64, u64)>),
 }
 
 fn refused(keyword: &str, reason: impl Into<String>) -> Refused {
@@ -87,8 +97,50 @@ pub fn compile(keyword: &'static str, argument: &str) -> Compiled<(&'static str,
             "tls.cert_fingerprint",
             FieldCheck::Equals(unquote(arg).to_string()),
         ),
+        "dcerpc.iface" => ("dcerpc.iface", iface(arg)?),
+        "dcerpc.opnum" => ("dcerpc.opnum", opnums(arg)?),
         other => return Err(refused(other, "is not run by the inspection engine")),
     })
+}
+
+/// A UUID, then `any_frag` (which changes nothing: every fragment is
+/// read alike) or a condition on the major version.
+fn iface(arg: &str) -> Compiled<FieldCheck> {
+    let mut parts = arg.split(',').map(str::trim);
+    let text = parts.next().unwrap_or_default();
+    let uuid =
+        uuid_of(text).ok_or_else(|| refused("dcerpc.iface", format!("'{text}' is not a UUID")))?;
+    let mut version = None;
+    for part in parts.filter(|p| *p != "any_frag") {
+        let (op, rest) = match part.as_bytes().first() {
+            Some(b'<') => (IntOp::Lt, &part[1..]),
+            Some(b'>') => (IntOp::Gt, &part[1..]),
+            Some(b'=') => (IntOp::Eq, &part[1..]),
+            Some(b'!') => (IntOp::Ne, &part[1..]),
+            _ => (IntOp::Eq, part),
+        };
+        let a = number(rest.trim()).map_err(|e| refused("dcerpc.iface", e))?;
+        if a > u64::from(u16::MAX) {
+            return Err(refused("dcerpc.iface", format!("'{part}' is above 65535")));
+        }
+        version = Some(IntMatch { op, a, b: 0 });
+    }
+    Ok(FieldCheck::Iface { uuid, version })
+}
+
+/// Operation numbers and inclusive ranges of them, comma separated.
+fn opnums(arg: &str) -> Compiled<FieldCheck> {
+    let mut ranges = Vec::new();
+    for part in arg.split(',').map(str::trim) {
+        let bad = |e: String| refused("dcerpc.opnum", e);
+        let (low, high) = part.split_once('-').unwrap_or((part, part));
+        let range = (
+            number(low.trim()).map_err(bad)?,
+            number(high.trim()).map_err(bad)?,
+        );
+        ranges.push(range);
+    }
+    Ok(FieldCheck::Ranges(ranges))
 }
 
 fn unquote(text: &str) -> &str {
@@ -240,6 +292,17 @@ impl FieldCheck {
             Self::Equals(text) => fields
                 .get(name, 0)
                 .is_some_and(|value| value.eq_ignore_ascii_case(text.as_bytes())),
+            Self::Iface { uuid, version } => fields.get(name, 0).is_some_and(|value| {
+                value.get(..16) == Some(&uuid[..])
+                    && version.is_none_or(|condition| {
+                        value.get(16..18).is_some_and(|v| {
+                            condition.matches(u64::from(u16::from_be_bytes([v[0], v[1]])))
+                        })
+                    })
+            }),
+            Self::Ranges(ranges) => {
+                int(name).is_some_and(|v| ranges.iter().any(|&(low, high)| low <= v && v <= high))
+            }
         }
     }
 
@@ -253,6 +316,42 @@ impl FieldCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_interface_matches_its_uuid_and_major_version() {
+        let mut f = Fields::default();
+        let mut value = uuid_of("4b324fc8-1670-01d3-1278-5a47bf6ee188")
+            .unwrap()
+            .to_vec();
+        value.extend_from_slice(&[0, 3, 0, 0]);
+        f.put("dcerpc.iface", value);
+        let check = |arg: &str| {
+            let (name, check) = compile("dcerpc.iface", arg).unwrap();
+            check.holds(name, &f, 0)
+        };
+        assert!(check("4b324fc8-1670-01d3-1278-5a47bf6ee188"));
+        assert!(check("4B324FC8-1670-01D3-1278-5A47BF6EE188,any_frag"));
+        assert!(check("4b324fc8-1670-01d3-1278-5a47bf6ee188,=3"));
+        assert!(!check("4b324fc8-1670-01d3-1278-5a47bf6ee188,>3"));
+        assert!(check("4b324fc8-1670-01d3-1278-5a47bf6ee188,!2,any_frag"));
+        assert!(!check("12345778-1234-abcd-ef00-0123456789ac"));
+        assert!(compile("dcerpc.iface", "not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn the_operation_number_matches_a_list_or_a_range() {
+        let mut f = Fields::default();
+        f.put_int("dcerpc.opnum", 31);
+        let check = |arg: &str| {
+            let (name, check) = compile("dcerpc.opnum", arg).unwrap();
+            check.holds(name, &f, 0)
+        };
+        assert!(check("31"));
+        assert!(check("5,31"));
+        assert!(check("30-32"));
+        assert!(!check("7"));
+        assert!(!Fields::default().has("dcerpc.opnum"));
+    }
 
     #[test]
     fn dates_are_read_to_the_second() {

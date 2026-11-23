@@ -31,7 +31,9 @@
 //!   not opening a version 5 header, an SMB one not opening a session
 //!   message.
 //!
-//! A rule naming DCE/RPC also reads SMB flows, which carry it.
+//! A rule naming DCE/RPC also reads SMB flows, which carry it: the calls in
+//! a connection's named pipes are read by [`Smb`], straight DCE/RPC by
+//! [`Dcerpc`].
 //!
 //! A protocol whose parser asks for it has its side's stream inspected on
 //! that side's next packet, without waiting for a chunk or a close: HTTP
@@ -43,11 +45,14 @@
 //! moved to TLS.
 //!
 //! These rules are held to Suricata by
-//! `tests/fixtures/suricata/applayer-verdicts.txt` and
-//! `tests/fixtures/suricata/windows-verdicts.txt`.
+//! `tests/fixtures/suricata/applayer-verdicts.txt`,
+//! `tests/fixtures/suricata/windows-verdicts.txt` and
+//! `tests/fixtures/suricata/dcerpc-verdicts.txt`.
 
+use super::dcerpc::Dcerpc;
 use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
+use super::smb::Smb;
 use super::tls::Tls;
 
 /// An application protocol the agent finds, or the verdict that none was.
@@ -189,6 +194,22 @@ fn smb(head: &[u8], server_port: u16) -> Verdict {
         Some(_) => Verdict::None,
         None => Verdict::Wait,
     }
+}
+
+/// On the SMB ports, what follows the session service records that open
+/// a direction (a session request, its answer, keepalives), `None` while one
+/// is incomplete. Elsewhere the bytes as they are.
+fn session_records(raw: &[u8], server_port: u16, udp: bool) -> Option<&[u8]> {
+    let mut rest = raw;
+    if udp || !matches!(server_port, 139 | 445) {
+        return Some(rest);
+    }
+    while rest.first().is_some_and(|k| (0x81..=0x85).contains(k)) {
+        let head = rest.get(..4)?;
+        let len = usize::from(head[1] & 1) << 16 | usize::from(head[2]) << 8 | usize::from(head[3]);
+        rest = rest.get(4 + len..)?;
+    }
+    Some(rest)
 }
 
 /// A connectionless DCE/RPC request: version 4, packet type 0, and a whole
@@ -439,6 +460,10 @@ pub struct AppLayer {
     dns: Option<Box<Dns>>,
     /// The TLS parser, once the flow speaks it.
     tls: Option<Box<Tls>>,
+    /// The DCE/RPC parser, once the flow speaks it.
+    dcerpc: Option<Box<Dcerpc>>,
+    /// The SMB pipe reader, once the flow speaks SMB.
+    smb: Option<Box<Smb>>,
 }
 
 /// What the application layer says of one packet.
@@ -476,6 +501,8 @@ impl AppLayer {
             http: None,
             dns: None,
             tls: None,
+            dcerpc: None,
+            smb: None,
         }
     }
 
@@ -488,6 +515,14 @@ impl AppLayer {
             dirs: [self.dirs[0].proto, self.dirs[1].proto],
             announced,
         }
+    }
+
+    /// Whether the flow's transactions are read beside its stream: not
+    /// those an SMB conversation carries, for which Suricata inspects no
+    /// stream.
+    #[must_use]
+    pub fn windows(&self) -> bool {
+        self.flow != Some(AppProto::Smb)
     }
 
     /// Whether a packet of `side`, before its bytes are handed over,
@@ -536,7 +571,16 @@ impl AppLayer {
                 Some(known) => (Some(known), !taken(known)),
                 None => {
                     match detect_datagram(self.udp, self.server_port, bytes).unwrap_or_else(|| {
-                        detect(side, &self.dirs[side].head, self.server_port, self.udp)
+                        let dir = &self.dirs[side];
+                        match session_records(&dir.raw, self.server_port, self.udp) {
+                            Some(rest) => detect(
+                                side,
+                                &rest[..rest.len().min(HEAD)],
+                                self.server_port,
+                                self.udp,
+                            ),
+                            None => Verdict::Wait,
+                        }
                     }) {
                         Verdict::Found(found) => {
                             self.flow = Some(found);
@@ -614,6 +658,17 @@ impl AppLayer {
             }
             Some(AppProto::Tls) if !self.udp => {
                 self.tls.get_or_insert_with(Box::default).feed(side, bytes)
+            }
+            Some(AppProto::Dcerpc) => {
+                let rpc = self.dcerpc.get_or_insert_with(Box::default);
+                if self.udp {
+                    rpc.datagram(side, bytes)
+                } else {
+                    rpc.feed(side, bytes)
+                }
+            }
+            Some(AppProto::Smb) if !self.udp => {
+                self.smb.get_or_insert_with(Box::default).feed(side, bytes)
             }
             _ => Vec::new(),
         }

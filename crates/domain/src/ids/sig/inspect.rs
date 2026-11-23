@@ -142,9 +142,80 @@ const RESPONSE_ONLY: &[&str] = &[
     "http.response_body",
 ];
 
-/// Whether a buffer is one an HTTP, DNS or TLS transaction fills.
+/// Whether a buffer is one an HTTP, DNS, TLS or DCE/RPC transaction fills.
 fn transaction_buffer(name: &str) -> bool {
-    name == "file.data" || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns" | "tls"))
+    name == "file.data"
+        || is_dcerpc(name)
+        || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns" | "tls"))
+}
+
+/// Whether a sticky buffer or a field keyword belongs to DCE/RPC.
+fn is_dcerpc(name: &str) -> bool {
+    name.starts_with("dcerpc.")
+}
+
+/// The sides a rule reading DCE/RPC buffers or fields is inspected on: the
+/// request's under `flow:to_server`, the response's under
+/// `flow:to_client`, else both. Suricata loads such a rule beside payload
+/// matches, which then read the stream, and on `dcerpc`, `smb` and the
+/// transport protocols.
+fn dcerpc_transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    names: &[&'static str],
+    keywords: &[&'static str],
+    first: &'static str,
+) -> Compiled<Option<[bool; 2]>> {
+    if let Some(other) = names.iter().chain(keywords).find(|n| !is_dcerpc(n)) {
+        return Err(refused(
+            *other,
+            "is a buffer of another protocol beside a DCE/RPC one, which no transaction holds together",
+        ));
+    }
+    match &signature.header.proto {
+        RuleProto::App(name) if !matches!(name.as_str(), "dcerpc" | "smb") => {
+            return Err(refused(
+                first,
+                format!("is a DCE/RPC buffer, which Suricata refuses on {name}"),
+            ));
+        }
+        RuleProto::App(_)
+        | RuleProto::Ip
+        | RuleProto::Ipv4
+        | RuleProto::Ipv6
+        | RuleProto::Tcp
+        | RuleProto::Udp => {}
+        _ => {
+            return Err(refused(
+                first,
+                "is read on DCE/RPC over TCP, UDP and SMB, not yet with this rule protocol",
+            ));
+        }
+    }
+    if lists
+        .iter()
+        .any(|l| matches!(l.source, Source::Sticky(name) if !is_dcerpc(name)))
+    {
+        return Err(refused(
+            first,
+            "is not yet read beside a buffer of another protocol",
+        ));
+    }
+    if !headers.is_empty() {
+        return Err(refused(
+            first,
+            "is not yet read beside a packet header keyword",
+        ));
+    }
+    let flow = &signature.flow;
+    Ok(Some(if flow.to_server {
+        [true, false]
+    } else if flow.to_client {
+        [false, true]
+    } else {
+        [true, true]
+    }))
 }
 
 /// Whether a sticky buffer or a field keyword belongs to TLS.
@@ -372,6 +443,29 @@ fn tls_transaction(
 /// with `flow:to_client`, a response buffer with `flow:to_server` (but for
 /// the response body, which it then inspects on the response), the raw
 /// header without a direction, and a host matched on uppercase letters.
+/// A transaction rule read on TLS, DCE/RPC or DNS, when it is one.
+fn other_transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    names: &[&'static str],
+    keywords: &[&'static str],
+    first: &'static str,
+) -> Option<Compiled<Option<[bool; 2]>>> {
+    if names.iter().chain(keywords).any(|n| is_tls(n)) {
+        return Some(tls_transaction(
+            signature, lists, headers, names, keywords, first,
+        ));
+    }
+    if names.iter().chain(keywords).any(|n| is_dcerpc(n)) {
+        return Some(dcerpc_transaction(
+            signature, lists, headers, names, keywords, first,
+        ));
+    }
+    let dns = !keywords.is_empty() || names.iter().any(|n| n.starts_with("dns."));
+    dns.then(|| dns_transaction(signature, lists, headers, names, first))
+}
+
 fn transaction(
     signature: &Signature,
     lists: &[List],
@@ -389,12 +483,8 @@ fn transaction(
     let Some(first) = names.first().copied().or(keywords.first().copied()) else {
         return Ok(None);
     };
-    if names.iter().chain(keywords).any(|n| is_tls(n)) {
-        return tls_transaction(signature, lists, headers, &names, keywords, first);
-    }
-    let dns = !keywords.is_empty() || names.iter().any(|n| n.starts_with("dns."));
-    if dns {
-        return dns_transaction(signature, lists, headers, &names, first);
+    if let Some(other) = other_transaction(signature, lists, headers, &names, keywords, first) {
+        return other;
     }
     if let RuleProto::App(name) = &signature.header.proto
         && !matches!(name.as_str(), "http" | "http1")

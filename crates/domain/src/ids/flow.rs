@@ -198,7 +198,7 @@ struct Session {
     /// Each side's transaction sides inspected since its stream was last
     /// inspected, and the latest one before, which a rule reading the
     /// stream beside a transaction's buffers reads with the next window.
-    open: [Vec<Ready>; 2],
+    open: [Open; 2],
     /// The rules that alerted on a transaction side: transaction, side,
     /// rule.
     alerted: HashSet<(u64, usize, usize)>,
@@ -208,6 +208,11 @@ struct Session {
 }
 
 impl Session {
+    /// Whether the flow's transactions are read beside its stream windows.
+    fn windows(&self) -> bool {
+        self.app.as_deref().is_some_and(AppLayer::windows)
+    }
+
     fn seen(&self, side: usize, now: u64, established: bool) -> Seen {
         Seen {
             to_server: side == 0,
@@ -290,22 +295,48 @@ struct Window {
     count: u32,
 }
 
+/// A side's transaction sides a stream window is read beside.
+#[derive(Debug, Clone, Default)]
+struct Open {
+    txs: Vec<Ready>,
+    /// The one kept from the last window, which read it already.
+    read: Option<u64>,
+}
+
 /// Add the transaction sides a packet inspects to those its side's stream
 /// windows are read beside, each in its latest state, and hand them over
-/// when the packet inspects a window: the next window is then read beside
-/// the latest one alone, until more arrive.
-fn hold_open(open: &mut Vec<Ready>, txs: &[Ready], window: bool) -> Vec<Ready> {
+/// when the packet inspects a window: those not read by a window yet, or
+/// the one the last window read when no other came. The next window is
+/// then read beside the latest one alone, until more arrive. A flow whose
+/// transactions are not `held` beside its stream hands none over.
+fn hold_open(open: &mut Open, txs: &[Ready], window: bool, held: bool) -> Vec<Ready> {
+    if !held {
+        return Vec::new();
+    }
     for tx in txs {
-        open.retain(|t| t.id != tx.id);
-        open.push(tx.clone());
+        open.txs.retain(|t| t.id != tx.id);
+        open.txs.push(tx.clone());
+        if open.read == Some(tx.id) {
+            open.read = None;
+        }
     }
     if !window {
         return Vec::new();
     }
-    let handed = open.clone();
-    if let Some(latest) = open.pop() {
-        open.clear();
-        open.push(latest);
+    let read = open.read;
+    let handed = if open.txs.iter().any(|t| Some(t.id) != read) {
+        open.txs
+            .iter()
+            .filter(|t| Some(t.id) != read)
+            .cloned()
+            .collect()
+    } else {
+        open.txs.clone()
+    };
+    if let Some(latest) = open.txs.pop() {
+        open.txs.clear();
+        open.read = Some(latest.id);
+        open.txs.push(latest);
     }
     handed
 }
@@ -390,7 +421,7 @@ impl FlowTable {
                 .then(|| Box::new(AppLayer::new(wire.tcp_flags.is_none(), event.dst_port))),
                 last: [None; 2],
                 txs: [Vec::new(), Vec::new()],
-                open: [Vec::new(), Vec::new()],
+                open: [Open::default(), Open::default()],
                 alerted: HashSet::new(),
                 closed: HashSet::new(),
             }
@@ -461,11 +492,8 @@ impl FlowTable {
         for tx in txs.iter().filter(|t| t.last) {
             session.closed.insert((tx.id, tx.side));
         }
-        let open = if session.app.is_some() && session.streams.is_some() {
-            hold_open(&mut session.open[side], &txs, !blocks.is_empty())
-        } else {
-            Vec::new()
-        };
+        let held = session.windows() && session.streams.is_some();
+        let open = hold_open(&mut session.open[side], &txs, !blocks.is_empty(), held);
         Observation {
             seen,
             blocks,
@@ -525,7 +553,7 @@ impl FlowTable {
                 else {
                     continue;
                 };
-                let open = hold_open(&mut open[side], &txs, !blocks.is_empty());
+                let open = hold_open(&mut open[side], &txs, !blocks.is_empty(), session.windows());
                 ended.push(Ended {
                     event,
                     seen: session.seen(side, flow.last, established),

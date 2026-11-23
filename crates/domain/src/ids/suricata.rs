@@ -1285,42 +1285,42 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "smb.named_pipe",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "smb_named_pipe",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "smb.share",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "smb_share",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "smb.ntlmssp_user",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "smb.ntlmssp_domain",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "dcerpc.stub_data",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        support: Support::Compiled,
+        note: "The stub of a DCE/RPC request or response: what follows its header to the end of the PDU, an authentication verifier included, each fragment alone. Read over TCP, in the named pipes of SMB and over UDP.",
     },
     KeywordSupport {
         keyword: "dce_stub_data",
-        support: Support::Pending,
-        note: "The older name of `dcerpc.stub_data`. Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        support: Support::Compiled,
+        note: "The older name of `dcerpc.stub_data`, read alike.",
     },
     KeywordSupport {
         keyword: "krb5_cname",
@@ -1824,18 +1824,18 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "dcerpc.iface",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        support: Support::Compiled,
+        note: "The interface a DCE/RPC request's context was bound to, once the server accepted the binding, and its major version; `any_frag` changes nothing, every fragment is read alike. Read over TCP and in the named pipes of SMB; over UDP Suricata matches it on no request, nor does this engine.",
     },
     KeywordSupport {
         keyword: "dcerpc.opnum",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        support: Support::Compiled,
+        note: "The operation number of a DCE/RPC request, on the request's side and the response's. Read over TCP and in the named pipes of SMB; over UDP Suricata matches it on no request, nor does this engine.",
     },
     KeywordSupport {
         keyword: "smb.version",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the SMB and DCE/RPC parsers expose their buffers.",
+        note: "Parsed and checked; a rule carrying it is refused until the SMB parser exposes its fields.",
     },
     KeywordSupport {
         keyword: "krb5_err_code",

@@ -620,14 +620,12 @@ impl IdsEngine {
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
-                if program.inspect() != Inspect::TransactionStream {
-                    return None;
-                }
-                let tx = open
-                    .iter()
-                    .rev()
-                    .find(|tx| program.matches_transaction(tx.side, &tx.fields, block, now))?;
-                Some((idx, rule, tx))
+                (program.inspect() == Inspect::TransactionStream).then_some((idx, rule, program))
+            })
+            .flat_map(|(idx, rule, program)| {
+                open.iter()
+                    .filter(move |tx| program.matches_transaction(tx.side, &tx.fields, block, now))
+                    .map(move |tx| (idx, rule, tx))
             })
             .collect();
         if matched.is_empty() {

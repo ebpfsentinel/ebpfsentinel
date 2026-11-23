@@ -1,5 +1,6 @@
 pub mod applayer;
 pub mod capture;
+pub mod dcerpc;
 pub mod dns;
 pub mod engine;
 pub mod entity;
@@ -9,6 +10,7 @@ pub mod http1;
 pub mod packet;
 pub mod prefilter;
 pub mod sig;
+pub mod smb;
 pub mod stream;
 pub mod suricata;
 pub mod tls;

@@ -26,6 +26,7 @@ const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt")
 const TLS: &str = include_str!("../../tests/fixtures/suricata/tls-verdicts.txt");
 const WINDOWS: &str = include_str!("../../tests/fixtures/suricata/windows-verdicts.txt");
 const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payload-verdicts.txt");
+const DCERPC: &str = include_str!("../../tests/fixtures/suricata/dcerpc-verdicts.txt");
 
 /// The second the conversation fixtures' captures start at, which their
 /// packet times count from: the time Suricata read a certificate's validity
@@ -266,6 +267,11 @@ fn tls_rules_alert_on_the_packets_suricata_alerts_on() {
 #[test]
 fn rdp_smb_dcerpc_and_telnet_rules_alert_on_the_packets_suricata_alerts_on() {
     replay(WINDOWS, 60);
+}
+
+#[test]
+fn dcerpc_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(DCERPC, 150);
 }
 
 #[test]
