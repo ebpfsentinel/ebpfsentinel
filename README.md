@@ -69,9 +69,9 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | Feature | Summary |
 |---------|---------|
 | **IDS / IPS** | Kernel-side pattern matching with automatic blocking |
-| **Threat Intelligence** | Feeds fetched by URL (STIX 2.1 bundles, CSV, JSON, plain lists) and a CrowdSec local API, matched in real time on addresses, domains and URLs. Pulling from a MISP or TAXII server is Enterprise |
-| **DLP** | Built-in PCI, PII and credential patterns on TLS plaintext, read by a uprobe in the process's shared OpenSSL or BoringSSL library, detect and alert. Custom patterns, blocking, and Go, Java or statically linked TLS are Enterprise |
-| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring, DoH/DoT detection. Blocking DoH/DoT by policy is Enterprise |
+| **Threat Intelligence** | Feeds fetched by URL (STIX 2.1 bundles, CSV, JSON, plain lists) and a CrowdSec local API, matched in real time on addresses, domains and URLs. Pulling from a MISP or TAXII server is in the Enterprise tier |
+| **DLP** | Built-in PCI, PII and credential patterns on TLS plaintext, read by a uprobe in the process's shared OpenSSL or BoringSSL library, detect and alert. Custom patterns and blocking are in the paid tiers from Professional, Go, Java and statically linked TLS from Enterprise |
+| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring, DoH/DoT detection |
 | **Host Rules** | Rules written as intentions (`process.connects`, `file.changes`, `bpf.foreign_program`), each served by whichever hook the host's kernel offers, in shadow before they alert |
 | **Process Table** | Every fork, exec and exit, with the container and the chain of ancestors, so a pid becomes a name |
 | **Process Detections** | Reverse shells, binaries with no file on disk, and a server's unexpected descendant, read off the process tree where it holds a connection |
@@ -85,7 +85,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **JA4 Fingerprinting** | TLS client fingerprinting for C2 and malware detection, following the JA4 method by FoxIO (BSD 3-Clause) |
 | **Network Cryptography** | Which flows negotiate a post-quantum hybrid, a classical curve or less than TLS 1.2, read off the handshakes without decrypting |
 | **GeoIP Enforcement** | MaxMind country resolution shared across all engines |
-| **Automated Response** | Time-bounded block and throttle, manual or on up to three policies matching severity and component, expiring on their own. MITRE conditions, flow isolation, cooldowns and unlimited policies are Enterprise |
+| **Automated Response** | Time-bounded block and throttle, manual or on up to three policies matching severity and component, expiring on their own. MITRE conditions, flow isolation, cooldowns and unlimited policies are in the Enterprise tier |
 
 ### Operations
 
@@ -103,9 +103,9 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) |
 | **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
 | **Audit Trail** | Rule change history with before/after diff and actor tracking |
-| **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert, one capture at a time, 60 s when an alert starts it. Concurrent captures and the forensics API are Enterprise |
+| **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert, one capture at a time, 60 s when an alert starts it. Concurrent captures and the forensics API are in the Enterprise tier |
 | **CLI** | Forty-six subcommands with `--output table\|json` and `--token` auth, every API route reachable |
-| **Authentication** | JWT, OIDC, and API keys, with three fixed roles (admin, operator, viewer). Custom roles are Enterprise |
+| **Authentication** | JWT, OIDC, and API keys, with three fixed roles (admin, operator, viewer). Custom roles are in the paid tiers from Professional |
 | **TLS 1.3** | rustls + aws_lc_rs, post-quantum hybrid key exchange (X25519MLKEM768) |
 
 ## Architecture
@@ -522,34 +522,34 @@ it to an auditor. It comes in three tiers, each containing the one before it:
 | | OSS | Professional | Enterprise | Critical |
 | --- | :---: | :---: | :---: | :---: |
 | *Built for* | *Anyone* | *A platform team on Kubernetes* | *A team running a SOC* | *Regulated estates, providers* |
-| **Every engine of the agent**, unlimited hosts | ✓ | ✓ | ✓ | ✓ |
-| Commercial licence instead of AGPL obligations |  | ✓ | ✓ | ✓ |
-| Web console: entity pages, process tree, fleet service map, rule replay |  | ✓ | ✓ | ✓ |
-| Kubernetes operator |  | ✓ | ✓ | ✓ |
-| Fleet inventory, drift and exposure across nodes |  | ✓ | ✓ | ✓ |
-| Advanced RBAC, offline licence activation |  | ✓ | ✓ | ✓ |
-| Advanced DLP (Vectorscan, custom patterns, block mode) |  | ✓ | ✓ | ✓ |
-| Application attack detection, per-protocol policies |  | ✓ | ✓ | ✓ |
-| Signed detection content, with a rollback |  | ✓ | ✓ | ✓ |
-| Scanner findings ranked by what the host runs and exposes |  | ✓ | ✓ | ✓ |
-| Compliance reports (PCI-DSS, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |  | ✓ | ✓ | ✓ |
-| Bare-metal LoadBalancer over ARP or BGP |  | ✓ | ✓ | ✓ |
-| Cases, hunting, false-positive suppressions |  |  | ✓ | ✓ |
-| SIEM connectors (10) and Sigma rules |  |  | ✓ | ✓ |
-| TAXII 2.1 and MISP feeds, retroactive matching |  |  | ✓ | ✓ |
-| ML anomaly detection with a signed base model |  |  | ✓ | ✓ |
-| TLS intelligence and post-quantum readiness |  |  | ✓ | ✓ |
-| Extended TLS libraries and L7 parsers |  |  | ✓ | ✓ |
-| AI, LLM and MCP traffic security |  |  | ✓ | ✓ |
-| Response orchestration, process response, workload quarantine |  |  | ✓ | ✓ |
-| Tamper-protected agent, stopped only by a signed order |  |  | ✓ | ✓ |
-| Network forensics and incident evidence pack |  |  | ✓ | ✓ |
-| Multi-cluster federation |  |  | ✓ | ✓ |
-| NIS2 and DORA notification drafts |  |  |  | ✓ |
-| Controls proven continuously, attested nodes, sealed audit record |  |  |  | ✓ |
-| High availability, active-active |  |  |  | ✓ |
-| Multi-tenancy for providers |  |  |  | ✓ |
-| Air-gapped deployment |  |  |  | ✓ |
+| **Every engine of the agent**, unlimited hosts | Yes | Yes | Yes | Yes |
+| Commercial licence instead of AGPL obligations |  | Yes | Yes | Yes |
+| Web console: entity pages, process tree, fleet service map, rule replay |  | Yes | Yes | Yes |
+| Kubernetes operator |  | Yes | Yes | Yes |
+| Fleet inventory, drift and exposure across nodes |  | Yes | Yes | Yes |
+| Advanced RBAC, offline licence activation |  | Yes | Yes | Yes |
+| Advanced DLP (Vectorscan, custom patterns, block mode) |  | Yes | Yes | Yes |
+| Application attack detection, per-protocol policies |  | Yes | Yes | Yes |
+| Signed detection content, with a rollback |  | Yes | Yes | Yes |
+| Scanner findings ranked by what the host runs and exposes |  | Yes | Yes | Yes |
+| Compliance reports (PCI-DSS, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |  | Yes | Yes | Yes |
+| Bare-metal LoadBalancer over ARP or BGP |  | Yes | Yes | Yes |
+| Cases, hunting, false-positive suppressions |  |  | Yes | Yes |
+| SIEM connectors (10) and Sigma rules |  |  | Yes | Yes |
+| TAXII 2.1 and MISP feeds, retroactive matching |  |  | Yes | Yes |
+| ML anomaly detection with a signed base model |  |  | Yes | Yes |
+| TLS intelligence and post-quantum readiness |  |  | Yes | Yes |
+| Extended TLS libraries and L7 parsers |  |  | Yes | Yes |
+| AI, LLM and MCP traffic security |  |  | Yes | Yes |
+| Response orchestration, process response, workload quarantine |  |  | Yes | Yes |
+| Tamper-protected agent, stopped only by a signed order |  |  | Yes | Yes |
+| Network forensics and incident evidence pack |  |  | Yes | Yes |
+| Multi-cluster federation |  |  | Yes | Yes |
+| NIS2 and DORA notification drafts |  |  |  | Yes |
+| Controls proven continuously, attested nodes, sealed audit record |  |  |  | Yes |
+| High availability, active-active |  |  |  | Yes |
+| Multi-tenancy for providers |  |  |  | Yes |
+| Air-gapped deployment |  |  |  | Yes |
 
 Prices are per node and published, and every paid tier is bought online:
 [ebpfsentinel.io/pricing](https://ebpfsentinel.io/pricing). The row-by-row
