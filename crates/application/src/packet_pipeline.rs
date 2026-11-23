@@ -996,23 +996,32 @@ impl EventDispatcher {
         }
 
         let src_country = svc.resolve_country(header.src_addr, header.is_ipv6());
-        let Some((idx, rule)) =
-            svc.evaluate_payload_with_context(header, payload, src_country.as_deref())
-        else {
-            return;
-        };
+        let matches = svc.evaluate_payload_with_context(header, payload, src_country.as_deref());
 
-        // The header the capture carries describes an L7 event: its
-        // `rule_id` holds the captured length, and its type says L7. The
-        // alert names an IDS rule, so it travels on an event that says so.
-        let event = PacketEvent {
-            event_type: EVENT_TYPE_IDS,
-            rule_id: idx as u32,
-            ..*header
-        };
-        self.metrics
-            .record_packet("ids", action_label(event.action));
-        self.report_ids_match(&event, &svc, idx, rule, None, src_country.as_deref(), true);
+        // Every matching rule raises its own alert, as in Suricata; the
+        // segment counts once toward the IPS auto-blacklist however many
+        // rules it matched.
+        for (nth, (idx, rule)) in matches.into_iter().enumerate() {
+            // The header the capture carries describes an L7 event: its
+            // `rule_id` holds the captured length, and its type says L7. The
+            // alert names an IDS rule, so it travels on an event that says so.
+            let event = PacketEvent {
+                event_type: EVENT_TYPE_IDS,
+                rule_id: idx as u32,
+                ..*header
+            };
+            self.metrics
+                .record_packet("ids", action_label(event.action));
+            self.report_ids_match(
+                &event,
+                &svc,
+                idx,
+                rule,
+                None,
+                src_country.as_deref(),
+                nth == 0,
+            );
+        }
     }
 
     /// Feed a rule match into the IPS auto-blacklist counter.

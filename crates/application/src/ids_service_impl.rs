@@ -434,13 +434,13 @@ impl IdsAppService {
     }
 
     /// Evaluate the captured payload of a TCP segment against the content
-    /// rules. Returns `(rule_index, rule)` on match.
+    /// rules. Returns `(rule_index, rule)` for every rule that matches.
     pub fn evaluate_payload_with_context<'a>(
         &'a self,
         event: &PacketEvent,
         payload: &[u8],
         src_country: Option<&str>,
-    ) -> Option<(usize, &'a IdsRule)> {
+    ) -> Vec<(usize, &'a IdsRule)> {
         self.engine
             .evaluate_payload_with_context(event, payload, src_country)
     }

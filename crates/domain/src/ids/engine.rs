@@ -305,7 +305,8 @@ impl IdsEngine {
     }
 
     /// Match the captured payload of a TCP segment against the content
-    /// rules, returning the first rule whose pattern matches.
+    /// rules, returning every rule whose pattern matches, in rule order:
+    /// as in Suricata, each matching rule raises its own alert.
     ///
     /// `event` is the header of the captured segment: its ports select the
     /// rules that apply, and its addresses feed the sampling decision. Payload
@@ -319,15 +320,15 @@ impl IdsEngine {
         event: &PacketEvent,
         payload: &[u8],
         src_country: Option<&str>,
-    ) -> Option<(usize, &IdsRule)> {
+    ) -> Vec<(usize, &IdsRule)> {
         if payload.is_empty() {
-            return None;
+            return Vec::new();
         }
         if !self
             .sampling
             .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
         {
-            return None;
+            return Vec::new();
         }
 
         self.rules
@@ -335,7 +336,7 @@ impl IdsEngine {
             .zip(self.compiled_patterns.iter())
             .zip(self.compiled_also_patterns.iter())
             .enumerate()
-            .find(|(_, ((rule, pattern), also))| {
+            .filter(|(_, ((rule, pattern), also))| {
                 let Some(pattern) = pattern else {
                     return false;
                 };
@@ -351,6 +352,7 @@ impl IdsEngine {
                     && also.iter().all(|re| re.is_match(payload))
             })
             .map(|(idx, ((rule, _), _))| (idx, rule))
+            .collect()
     }
 
     /// Check whether an alert for the matched rule should be emitted
@@ -823,6 +825,8 @@ mod tests {
             .unwrap();
         let (idx, matched) = engine
             .evaluate_payload_with_context(&make_event(0), b"GET /admin HTTP/1.1\r\n", None)
+            .first()
+            .copied()
             .unwrap();
         assert_eq!(idx, 0);
         assert_eq!(matched.id.0, "ids-001");
@@ -837,7 +841,7 @@ mod tests {
         assert!(
             engine
                 .evaluate_payload_with_context(&make_event(0), b"GET / HTTP/1.1\r\n", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -850,10 +854,30 @@ mod tests {
             .add_rule(rule_with_pattern("ids-001", r"(?-u)\x90{4}"))
             .unwrap();
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&make_event(0), &[0x90, 0x90, 0x90, 0x90], None)
-                .is_some()
+                .is_empty()
         );
+    }
+
+    #[test]
+    fn every_content_rule_a_payload_matches_is_returned() {
+        let mut engine = IdsEngine::new();
+        engine
+            .add_rule(rule_with_pattern("ids-001", "GET /admin"))
+            .unwrap();
+        engine
+            .add_rule(rule_with_pattern("ids-002", "HTTP/1"))
+            .unwrap();
+        engine
+            .add_rule(rule_with_pattern("ids-003", "POST"))
+            .unwrap();
+        let matched: Vec<&str> = engine
+            .evaluate_payload_with_context(&make_event(0), b"GET /admin HTTP/1.1\r\n", None)
+            .into_iter()
+            .map(|(_, rule)| rule.id.0.as_str())
+            .collect();
+        assert_eq!(matched, ["ids-001", "ids-002"]);
     }
 
     #[test]
@@ -869,7 +893,7 @@ mod tests {
         assert!(
             engine
                 .evaluate_payload_with_context(&other_port, b"GET /admin HTTP/1.1\r\n", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -885,7 +909,7 @@ mod tests {
         assert!(
             engine
                 .evaluate_payload_with_context(&make_event(0), b"GET /admin HTTP/1.1\r\n", None)
-                .is_none()
+                .is_empty()
         );
     }
 

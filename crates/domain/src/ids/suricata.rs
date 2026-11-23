@@ -139,12 +139,12 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "distance",
         support: Support::Compiled,
-        note: "Relative to the previous content. A negative distance is refused.",
+        note: "Relative to the previous content. A negative distance is refused, and so is a distance relative to a pcre.",
     },
     KeywordSupport {
         keyword: "within",
         support: Support::Compiled,
-        note: "Relative to the previous content. A window shorter than the content is refused.",
+        note: "Relative to the previous content. A window shorter than the content is refused, and so is a window relative to a pcre.",
     },
     KeywordSupport {
         keyword: "startswith",
@@ -1411,6 +1411,7 @@ fn gap(low: usize, high: Option<usize>) -> String {
 fn build_groups(matchers: Vec<Matcher>) -> Compiled<Vec<String>> {
     let mut groups: Vec<String> = Vec::new();
     let mut open: Option<(String, bool)> = None;
+    let mut after_pcre = false;
     for matcher in matchers {
         match matcher {
             Matcher::Pcre(expression) => {
@@ -1418,9 +1419,22 @@ fn build_groups(matchers: Vec<Matcher>) -> Compiled<Vec<String>> {
                     groups.push(group);
                 }
                 groups.push(expression);
+                after_pcre = true;
             }
             Matcher::Content(content) => {
                 let len = content.bytes.len();
+                // Suricata counts a relative content from the end of the pcre
+                // match before it; each expression here matches on its own,
+                // so that position is not known.
+                if content.is_relative() && after_pcre {
+                    let keyword = if content.distance.is_some() {
+                        "distance"
+                    } else {
+                        "within"
+                    };
+                    return Err(Refused::new(keyword, "counts from the end of a pcre match"));
+                }
+                after_pcre = false;
                 if content.is_relative() && (content.offset.is_some() || content.depth.is_some()) {
                     return Err(Refused::new(
                         "distance",
@@ -1743,22 +1757,22 @@ mod tests {
         let engine = engine(rules);
         let from_outside = event(OUTSIDE, 40000, INSIDE, 25);
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&from_outside, b"EXPN   root\r\n", None)
-                .is_some()
+                .is_empty()
         );
         // The pcre is anchored to the start of a line, so the words alone do not match.
         assert!(
             engine
                 .evaluate_payload_with_context(&from_outside, b"HELO root expn\r\n", None)
-                .is_none()
+                .is_empty()
         );
         // The source must be outside the home networks.
         let from_inside = event([10, 9, 9, 9], 40000, INSIDE, 25);
         assert!(
             engine
                 .evaluate_payload_with_context(&from_inside, b"expn root\r\n", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1773,15 +1787,15 @@ mod tests {
         let engine = engine(rules);
         let reply = event(INSIDE, 5632, OUTSIDE, 50000);
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&reply, b"\x00\x00Invalid login\r\n", None)
-                .is_some()
+                .is_empty()
         );
         // depth 16 from offset 0: the content must start within the first 3 bytes.
         assert!(
             engine
                 .evaluate_payload_with_context(&reply, b"0123456789Invalid login", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1791,22 +1805,22 @@ mod tests {
         let to_smb = event(OUTSIDE, 50000, INSIDE, 445);
         let near = b"\x00\x00\x00\x00\xffSMBxx PowerShell.exe -w   Hidden";
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&to_smb, near, None)
-                .is_some()
+                .is_empty()
         );
         let far = b"\x00\x00\x00\x00\xffSMBxx PowerShell.exe -w                     hidden";
         assert!(
             engine
                 .evaluate_payload_with_context(&to_smb, far, None)
-                .is_none()
+                .is_empty()
         );
         // SMB past depth 8 does not anchor the chain.
         let late = b"0123456789SMB powershell -w hidden";
         assert!(
             engine
                 .evaluate_payload_with_context(&to_smb, late, None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1820,15 +1834,15 @@ mod tests {
         let to_rdp = event(OUTSIDE, 50000, INSIDE, 3389);
         let hit = b"\x03\x00\x00\x2b\x26\xe0\x00\x00\x00\x00\x00COOKIE: MSTSHASH=EDC\r\n";
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&to_rdp, hit, None)
-                .is_some()
+                .is_empty()
         );
         let wrong_gap = b"\x03\x00\x00\x2b\x26\x26\xe0\x00\x00\x00\x00\x00Cookie: mstshash=edc\r\n";
         assert!(
             engine
                 .evaluate_payload_with_context(&to_rdp, wrong_gap, None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1907,6 +1921,11 @@ mod tests {
             ),
             ("content:\"abc\"; flow:only_stream;", "flow"),
             ("content:\"abc\"; gid:3;", "gid"),
+            ("pcre:\"/a+b/\"; content:\"c\"; distance:0;", "distance"),
+            (
+                "content:\"x\"; pcre:\"/a+b/\"; content:\"c\"; within:4;",
+                "within",
+            ),
         ];
         for (options, keyword) in cases {
             let rule = format!("alert tcp any any -> any 80 (msg:\"x\"; {options} sid:7;)");
@@ -1923,19 +1942,19 @@ mod tests {
         let engine = engine(rules);
         let e = event(OUTSIDE, 1, INSIDE, 80);
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&e, b"GET /now!", None)
-                .is_some()
+                .is_empty()
         );
         assert!(
             engine
                 .evaluate_payload_with_context(&e, b" GET /now!", None)
-                .is_none()
+                .is_empty()
         );
         assert!(
             engine
                 .evaluate_payload_with_context(&e, b"GET /now!.", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1946,14 +1965,14 @@ mod tests {
         ));
         let e = event(OUTSIDE, 1, INSIDE, 80);
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&e, b"beta..alpha", None)
-                .is_some()
+                .is_empty()
         );
         assert!(
             engine
                 .evaluate_payload_with_context(&e, b"alpha only", None)
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1969,9 +1988,9 @@ mod tests {
         let engine = engine(rules);
         let into_home = event(INSIDE, 1, [198, 51, 100, 7], 25);
         assert!(
-            engine
+            !engine
                 .evaluate_payload_with_context(&into_home, b"expn root", None)
-                .is_some()
+                .is_empty()
         );
     }
 
