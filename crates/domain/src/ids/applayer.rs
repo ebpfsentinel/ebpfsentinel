@@ -35,7 +35,7 @@
 //!
 //! A protocol whose parser asks for it has its side's stream inspected on
 //! that side's next packet, without waiting for a chunk or a close: HTTP
-//! once a message's header is whole, TLS, SSH, SMTP and DNS with each
+//! once a message is whole, its body read to the end, TLS, SSH, SMTP and DNS with each
 //! piece of data, RDP with each X.224 connection request and confirm,
 //! DCE/RPC with each bind and alter context, each request carrying stub
 //! data or followed by more bytes, and each bind acknowledgement from the
@@ -414,8 +414,6 @@ struct Direction {
     head: Vec<u8>,
     /// Whether the next packet of this direction announces its detection.
     announce: bool,
-    /// The last bytes seen, to find a message header's end across packets.
-    tail: Vec<u8>,
     /// Where the direction stands in its protocol's messages, for a
     /// protocol that asks for inspection only on some of them.
     framer: Framer,
@@ -522,8 +520,6 @@ impl AppLayer {
         }
         let dir = &mut self.dirs[side];
         dir.fed = dir.fed.saturating_add(bytes.len() as u64);
-        let mut tail = std::mem::take(&mut dir.tail);
-        tail.extend_from_slice(bytes);
         let known = dir.proto.is_some();
         if !known {
             let room = RAW_LIMIT.saturating_sub(dir.raw.len());
@@ -565,23 +561,30 @@ impl AppLayer {
             }
         }
         if let Some(proto) = self.dirs[side].proto.filter(|p| p.triggers()) {
-            fed.inspect = proto != AppProto::Http || tail.windows(4).any(|w| w == b"\r\n\r\n");
+            fed.inspect = proto != AppProto::Http;
         }
-        let keep = tail.len().saturating_sub(3);
-        self.dirs[side].tail = tail.split_off(keep);
         if known {
             fed.inspect |= self.frame(side, bytes);
             fed.txs = self.parse(side, bytes);
+            fed.inspect |= self.whole(side, &fed.txs);
         }
         for d in 0..2 {
             if self.dirs[d].proto.is_some() && !self.dirs[d].raw.is_empty() {
                 let raw = std::mem::take(&mut self.dirs[d].raw);
                 let asks = self.frame(d, &raw);
-                fed.inspect |= asks && d == side;
-                fed.txs.extend(self.parse(d, &raw));
+                let txs = self.parse(d, &raw);
+                fed.inspect |= (asks || self.whole(d, &txs)) && d == side;
+                fed.txs.extend(txs);
             }
         }
         fed
+    }
+
+    /// Whether an HTTP message of the direction ended among these
+    /// transaction sides, which asks for its stream to be inspected.
+    fn whole(&self, side: usize, txs: &[Ready]) -> bool {
+        self.dirs[side].proto == Some(AppProto::Http)
+            && txs.iter().any(|t| t.side == side && t.whole)
     }
 
     /// Follow a direction's messages, for a protocol that asks for
@@ -723,13 +726,22 @@ mod tests {
     }
 
     #[test]
-    fn http_asks_for_inspection_once_a_header_is_whole() {
+    fn http_asks_for_inspection_once_a_message_is_whole() {
         let mut app = AppLayer::new(false, 80);
         assert!(
             !app.feed(CLIENT, b"GET / HTTP/1.1\r\nHost: a\r\n\r", SERVER)
                 .inspect
         );
         assert!(app.feed(CLIENT, b"\n", SERVER).inspect);
+        assert!(
+            !app.feed(
+                CLIENT,
+                b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n",
+                SERVER
+            )
+            .inspect
+        );
+        assert!(app.feed(CLIENT, b"ab", SERVER).inspect);
         let mut ftp = AppLayer::new(false, 21);
         assert!(!ftp.feed(CLIENT, b"USER a\r\n", SERVER).inspect);
     }

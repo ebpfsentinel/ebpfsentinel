@@ -362,13 +362,13 @@ impl Http1 {
     fn step(&mut self, side: usize, ready: &mut Vec<Ready>) -> bool {
         match self.dirs[side].state {
             State::Lost => false,
-            State::Line => self.start_line(side),
+            State::Line => self.start_line(side, ready),
             State::Headers => self.headers(side, ready),
             State::Body(framing) => self.body(side, framing, ready),
         }
     }
 
-    fn start_line(&mut self, side: usize) -> bool {
+    fn start_line(&mut self, side: usize, ready: &mut Vec<Ready>) -> bool {
         let dir = &mut self.dirs[side];
         // Empty lines before a start line are skipped.
         while let Some(rest) = dir
@@ -388,6 +388,26 @@ impl Http1 {
         dir.line_end = dir.pending[at..at + len].to_vec();
         dir.pending.drain(..at + len);
         dir.state = State::Headers;
+        if side == 0 {
+            // The request line's buffers are read as soon as it is whole,
+            // before the header that follows it.
+            let (method, target, protocol) = split_request_line(&dir.line);
+            let mut fields = Fields::default();
+            fields.put("http.method", method.to_vec());
+            fields.put("http.uri.raw", target.to_vec());
+            fields.put("http.uri", uri::normalized(target));
+            fields.put("http.request_line", dir.line.clone());
+            fields.put("http.protocol", protocol.to_vec());
+            ready.push(Ready {
+                id: self.next_tx,
+                side,
+                fields: Arc::new(fields),
+                payload: Arc::default(),
+                whole: false,
+                latest: false,
+                last: false,
+            });
+        }
         true
     }
 
@@ -518,6 +538,7 @@ impl Http1 {
                 side: 1,
                 fields: Arc::new(fields),
                 payload: Arc::default(),
+                whole: false,
                 latest: false,
                 last: false,
             });
@@ -584,6 +605,7 @@ impl Http1 {
                 side,
                 fields: Arc::new(dir.fields.clone()),
                 payload: Arc::default(),
+                whole: false,
                 latest: false,
                 last: false,
             });
@@ -711,6 +733,7 @@ impl Http1 {
             side,
             fields: Arc::new(fields),
             payload: Arc::default(),
+            whole: true,
             latest: false,
             last: false,
         });
@@ -733,7 +756,11 @@ mod tests {
             0,
             b"GET /a/../b%41?x=1 HTTP/1.1\r\nHost: Example.COM:8080\r\nUser-Agent:  curl \r\nCookie: a=1\r\nX-A: v1\r\nx-a: v2\r\n\r\n",
         );
-        assert_eq!(ready.len(), 1);
+        // The request line is read first, then the whole request.
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].fields.get("http.uri", 0), Some(&b"/bA?x=1"[..]));
+        assert!(!ready[0].fields.has("http.header") && !ready[0].whole);
+        assert!(ready[1].whole);
         let f = last(&ready);
         assert_eq!(f.get("http.method", 0), Some(&b"GET"[..]));
         assert_eq!(f.get("http.uri", 0), Some(&b"/bA?x=1"[..]));

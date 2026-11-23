@@ -495,7 +495,7 @@ impl IdsEngine {
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, &seen)?;
                 let on_packet = match program.inspect() {
-                    Inspect::Transaction => false,
+                    Inspect::Transaction | Inspect::TransactionStream => false,
                     Inspect::Stream => !streamed,
                     Inspect::Packet | Inspect::Both => true,
                 };
@@ -504,6 +504,7 @@ impl IdsEngine {
             .collect();
         for block in &observed.blocks {
             matched.extend(self.stream_matches(event, ports, &seen, block));
+            matched.extend(self.window_matches(event, ports, &seen, block, &observed.open));
         }
         for tx in &observed.txs {
             matched.extend(self.transaction_matches(event, ports, &seen, tx));
@@ -541,6 +542,7 @@ impl IdsEngine {
             let mut matched = Vec::new();
             for block in &end.blocks {
                 matched.extend(self.stream_matches(&end.event, ports, &end.seen, block));
+                matched.extend(self.window_matches(&end.event, ports, &end.seen, block, &end.open));
             }
             for tx in &end.txs {
                 matched.extend(self.transaction_matches(&end.event, ports, &end.seen, tx));
@@ -592,6 +594,51 @@ impl IdsEngine {
                     && program.matches_stream(block))
                 .then_some((idx, rule))
             })
+            .collect()
+    }
+
+    /// The rules reading an HTTP transaction's buffers beside the payload
+    /// that match a window of the sender's stream with one of the
+    /// transaction sides it is read beside, the latest first, each raised
+    /// once per transaction side.
+    fn window_matches(
+        &self,
+        event: &PacketEvent,
+        ports: Option<(u16, u16)>,
+        seen: &Seen,
+        block: &[u8],
+        open: &[Ready],
+    ) -> Vec<(usize, &IdsRule)> {
+        if open.is_empty() {
+            return Vec::new();
+        }
+        let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
+        let now = event.timestamp_ns / 1_000_000_000;
+        let matched: Vec<(usize, &IdsRule, &Ready)> = self
+            .prefilter()
+            .candidates(&keys, block)
+            .into_iter()
+            .filter_map(|idx| {
+                let (rule, program) = self.imported(idx, event, ports, seen)?;
+                if program.inspect() != Inspect::TransactionStream {
+                    return None;
+                }
+                let tx = open
+                    .iter()
+                    .rev()
+                    .find(|tx| program.matches_transaction(tx.side, &tx.fields, block, now))?;
+                Some((idx, rule, tx))
+            })
+            .collect();
+        if matched.is_empty() {
+            return Vec::new();
+        }
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        let packet = Packet::of(event);
+        matched
+            .into_iter()
+            .filter(|(idx, _, tx)| flows.first_alert(&packet, tx.id, tx.side, *idx))
+            .map(|(idx, rule, _)| (idx, rule))
             .collect()
     }
 

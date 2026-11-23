@@ -195,6 +195,10 @@ struct Session {
     /// Transaction sides parsed and waiting for the next packet their
     /// sender sends, which inspects them, client first.
     txs: [Vec<Ready>; 2],
+    /// Each side's transaction sides inspected since its stream was last
+    /// inspected, and the latest one before, which a rule reading the
+    /// stream beside a transaction's buffers reads with the next window.
+    open: [Vec<Ready>; 2],
     /// The rules that alerted on a transaction side: transaction, side,
     /// rule.
     alerted: HashSet<(u64, usize, usize)>,
@@ -264,6 +268,8 @@ pub struct Ended {
     pub blocks: Vec<Vec<u8>>,
     /// The side's transactions not inspected yet.
     pub txs: Vec<Ready>,
+    /// The side's transactions a window of its stream is read beside.
+    pub open: Vec<Ready>,
 }
 
 /// What the session says of one packet and hands it to inspect.
@@ -274,12 +280,34 @@ pub struct Observation {
     pub blocks: Vec<Vec<u8>>,
     /// The sender's transaction sides the packet inspects.
     pub txs: Vec<Ready>,
+    /// The sender's transaction sides its windows are read beside.
+    pub open: Vec<Ready>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Window {
     start: u64,
     count: u32,
+}
+
+/// Add the transaction sides a packet inspects to those its side's stream
+/// windows are read beside, each in its latest state, and hand them over
+/// when the packet inspects a window: the next window is then read beside
+/// the latest one alone, until more arrive.
+fn hold_open(open: &mut Vec<Ready>, txs: &[Ready], window: bool) -> Vec<Ready> {
+    for tx in txs {
+        open.retain(|t| t.id != tx.id);
+        open.push(tx.clone());
+    }
+    if !window {
+        return Vec::new();
+    }
+    let handed = open.clone();
+    if let Some(latest) = open.pop() {
+        open.clear();
+        open.push(latest);
+    }
+    handed
 }
 
 /// The state every flow, host and pair holds for the rules, and the
@@ -362,6 +390,7 @@ impl FlowTable {
                 .then(|| Box::new(AppLayer::new(wire.tcp_flags.is_none(), event.dst_port))),
                 last: [None; 2],
                 txs: [Vec::new(), Vec::new()],
+                open: [Vec::new(), Vec::new()],
                 alerted: HashSet::new(),
                 closed: HashSet::new(),
             }
@@ -432,7 +461,17 @@ impl FlowTable {
         for tx in txs.iter().filter(|t| t.last) {
             session.closed.insert((tx.id, tx.side));
         }
-        Observation { seen, blocks, txs }
+        let open = if session.app.is_some() && session.streams.is_some() {
+            hold_open(&mut session.open[side], &txs, !blocks.is_empty())
+        } else {
+            Vec::new()
+        };
+        Observation {
+            seen,
+            blocks,
+            txs,
+            open,
+        }
     }
 
     /// Hand over the stream bytes of the flows idle past their timeout, at
@@ -469,6 +508,7 @@ impl FlowTable {
                 continue;
             };
             let mut txs = std::mem::take(&mut session.txs);
+            let mut open = std::mem::take(&mut session.open);
             if let Some(app) = session.app.as_mut() {
                 for tx in app.end() {
                     txs[tx.side].push(tx);
@@ -485,11 +525,13 @@ impl FlowTable {
                 else {
                     continue;
                 };
+                let open = hold_open(&mut open[side], &txs, !blocks.is_empty());
                 ended.push(Ended {
                     event,
                     seen: session.seen(side, flow.last, established),
                     blocks,
                     txs,
+                    open,
                 });
             }
         }

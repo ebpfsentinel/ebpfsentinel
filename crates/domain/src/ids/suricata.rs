@@ -3591,7 +3591,10 @@ mod tests {
     fn refuses_options_outside_the_subset() {
         let cases = [
             ("content:\"abcdef\"; depth:3;", "depth"),
-            ("content:\"abc\"; http.uri; content:\"def\";", "http.uri"),
+            (
+                "http.uri; content:\"def\"; dns.query; content:\"abc\";",
+                "http.uri",
+            ),
             ("content:\"abc\"; frobnicate;", "frobnicate"),
             (
                 "content:\"abc\"; threshold: type limit, track by_rule, count 1, seconds 5;",

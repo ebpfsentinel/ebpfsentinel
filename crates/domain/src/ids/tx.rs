@@ -61,6 +61,9 @@ pub struct Ready {
     /// payload beside the transaction's buffers; empty where the protocol
     /// offers no such reading.
     pub payload: Arc<[u8]>,
+    /// Whether the message is whole, its body read to the end: an HTTP
+    /// message then has its sender's stream inspected.
+    pub whole: bool,
     /// Whether this side holds everything an earlier one of the same
     /// transaction held, so that it takes that one's place while both wait
     /// for inspection: the state of a protocol inspected as it stands

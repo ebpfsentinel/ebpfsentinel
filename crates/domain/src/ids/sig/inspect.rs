@@ -68,6 +68,7 @@ fn inspect(
     headers: &[HeaderCheck],
     session: &Session,
     tx: Option<[bool; 2]>,
+    keywords: &[&'static str],
 ) -> Inspect {
     let flow = &signature.flow;
     let stream_proto = signature.header.proto == RuleProto::TcpStream;
@@ -76,7 +77,19 @@ fn inspect(
             .iter()
             .all(|l| matches!(l.source, Source::Payload | Source::Decoded));
     if tx.is_some() {
-        return Inspect::Transaction;
+        let payload = lists
+            .iter()
+            .any(|l| matches!(l.source, Source::Payload | Source::Decoded));
+        let http = !keywords.iter().any(|n| is_tls(n) || n.starts_with("dns."))
+            && lists.iter().all(|l| match l.source {
+                Source::Sticky(name) => !is_tls(name) && !name.starts_with("dns."),
+                Source::Payload | Source::Decoded => true,
+            });
+        return if payload && http {
+            Inspect::TransactionStream
+        } else {
+            Inspect::Transaction
+        };
     }
     if !matches!(
         signature.header.proto,
@@ -393,11 +406,11 @@ fn transaction(
     }
     if lists
         .iter()
-        .any(|l| !matches!(l.source, Source::Sticky(name) if transaction_buffer(name)))
+        .any(|l| matches!(l.source, Source::Sticky(name) if !transaction_buffer(name)))
     {
         return Err(refused(
             first,
-            "is not yet read beside the payload or a buffer of another protocol",
+            "is not yet read beside a buffer of another protocol",
         ));
     }
     if !headers.is_empty() {
@@ -505,6 +518,10 @@ pub enum Inspect {
     /// On the HTTP transactions of the connection, each side once, on the
     /// buffers the parser fills.
     Transaction,
+    /// On an HTTP transaction side and a window of its stream together,
+    /// when the stream is inspected: a rule reading HTTP buffers beside the
+    /// payload, whose payload matches run over the window.
+    TransactionStream,
 }
 
 /// What the rule asks of the flow's session: `flow`, its counters, the
@@ -1008,7 +1025,7 @@ impl Program {
         stream_alone(signature, &lists, &headers, &session)?;
         let (fields, keywords) = transaction_fields(signature)?;
         let tx = transaction(signature, &lists, &headers, &keywords, &mut session)?;
-        let inspect = inspect(signature, &lists, &headers, &session, tx);
+        let inspect = inspect(signature, &lists, &headers, &session, tx, &keywords);
         Ok(Self {
             lists,
             headers,

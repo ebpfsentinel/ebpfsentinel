@@ -321,6 +321,7 @@ impl Tls {
             side,
             fields: Arc::new(fields),
             payload: Arc::from(dir.payload.as_slice()),
+            whole: false,
             latest: true,
             last: self.finished[side],
         }
