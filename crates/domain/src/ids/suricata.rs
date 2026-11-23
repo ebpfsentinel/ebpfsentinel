@@ -279,13 +279,13 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "flowvar",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until pcre captures are kept on the flow.",
+        support: Support::Compiled,
+        note: "Holds when the flow's variable contains the bytes, anywhere in it. The variable is what a `pcre` capture `flow_name` (or `flow:name` after its flags) took on the last match of a rule that held, on either side of the flow; it is set before the rules that read it run on the same packet.",
     },
     KeywordSupport {
         keyword: "pktvar",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until pcre captures are kept on the packet.",
+        support: Support::Compiled,
+        note: "Holds when the packet's variable contains the bytes: what a `pcre` capture `pkt_name` took on that packet, read by any rule matching it and forgotten after. An `alert_name` capture, which only decorates Suricata's alert record, is accepted and kept nowhere.",
     },
     KeywordSupport {
         keyword: "noalert",
@@ -3489,6 +3489,34 @@ mod tests {
         assert!(hit(&oracle, &to_sql, call));
         let other = b"DBMS_REPCAT.ADD_COLUMN_GROUP_TO_FLAVOR v := 'aaaaaaaaaaaa'; gname => w";
         assert!(!hit(&oracle, &to_sql, other));
+    }
+
+    #[test]
+    fn a_capture_no_group_takes_is_a_refused_rule() {
+        let refused = refusal(
+            r#"alert tcp any any -> any any (msg:"x"; pcre:"/user=\w+/,flow:who"; sid:1;)"#,
+        );
+        assert_eq!(refused.keyword, "pcre");
+        assert!(refused.reason.contains("flow:who"), "{}", refused.reason);
+        // The same capture with its group loads.
+        compile(r#"alert tcp any any -> any any (msg:"x"; pcre:"/user=(\w+)/,flow:who"; sid:1;)"#);
+        compile(
+            r#"alert tcp any any -> any any (msg:"x"; pcre:"/user=(?P<alert_who>\w+)/"; sid:1;)"#,
+        );
+    }
+
+    #[test]
+    fn a_pktvar_is_read_on_the_packet_it_was_kept_on() {
+        let rules = [
+            r#"alert tcp any any -> any 22 (msg:"keep"; pcre:"/user=(?P<pkt_who>\w+)/"; noalert; sid:1;)"#,
+            r#"alert tcp any any -> any 22 (msg:"read"; pktvar:who,"li"; sid:2;)"#,
+        ];
+        let engine = engine(rules.iter().flat_map(|r| compile(r)).collect());
+        let to_ssh = event(OUTSIDE, 50000, INSIDE, 22);
+        assert!(said(&engine, &to_ssh, b"user=alice"));
+        assert!(!said(&engine, &to_ssh, b"user=bob"));
+        // Nothing kept on this packet: the earlier one is forgotten.
+        assert!(!said(&engine, &to_ssh, b"hello"));
     }
 
     #[test]

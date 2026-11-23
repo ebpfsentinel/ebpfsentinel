@@ -36,8 +36,8 @@ use ebpf_common::event::PacketEvent;
 use super::applayer::{AppLayer, AppView};
 use super::http1::Ready;
 use super::sig::model::{
-    BitOp, BitScope, Bits, Check, Flowint, FlowintOp, PortSide, Signature, Threshold,
-    ThresholdKind, Track, Value,
+    BitOp, BitScope, Bits, Captured, Check, Flowint, FlowintOp, Match, PortSide, Signature,
+    Threshold, ThresholdKind, Track, Value,
 };
 use super::stream::{Segment, Streams};
 use super::suricata::{Compiled, Refused};
@@ -138,6 +138,8 @@ struct Flow {
     last: u64,
     bits: HashSet<String>,
     ints: HashMap<String, i64>,
+    /// What `pcre` captures kept on the flow, by name.
+    vars: HashMap<String, Vec<u8>>,
     session: Option<Session>,
     /// A `pass`, `drop` or `reject` reached the flow: it is inspected no
     /// further.
@@ -738,6 +740,12 @@ enum Test {
         name: String,
         set: bool,
     },
+    /// `flowvar` or `pktvar`: the variable is set and holds the bytes.
+    Var {
+        packet: bool,
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -753,7 +761,13 @@ enum Write {
         op: Arith,
         value: Operand,
     },
+    /// Keep what a `pcre` captured into the variable.
+    Keep { packet: bool, name: String },
 }
+
+/// The variables kept on the packet being inspected, by name: what one
+/// rule's `pcre` captured there, for another's `pktvar` to read.
+pub type PacketVars = HashMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Filter {
@@ -790,7 +804,30 @@ impl State {
             match check {
                 Check::Bits(bits) => state.bits(bits)?,
                 Check::Flowint(int) => state.flowint(int),
+                Check::Var {
+                    keyword,
+                    name,
+                    bytes,
+                } => state.tests.push(Test::Var {
+                    packet: *keyword == "pktvar",
+                    name: name.clone(),
+                    bytes: bytes.clone(),
+                }),
                 _ => {}
+            }
+        }
+        for list in &signature.lists {
+            for m in &list.matches {
+                let Match::Pcre(p) = m else { continue };
+                for c in p.captures.iter().filter(|c| c.scope != "alert") {
+                    let keep = Write::Keep {
+                        packet: c.scope == "pkt",
+                        name: c.name.clone(),
+                    };
+                    if !state.writes.contains(&keep) {
+                        state.writes.push(keep);
+                    }
+                }
             }
         }
         let empty = state.tests.is_empty()
@@ -895,12 +932,38 @@ impl State {
     /// test holds, then, if so, its writes. Returns whether the rule
     /// alerts: its tests held, it carries no `noalert`, and its
     /// `detection_filter`, if any, has counted past its count.
-    pub fn run(&self, table: &mut FlowTable, packet: &Packet, rule: usize) -> bool {
-        if !self.tests.iter().all(|t| test(t, table, packet)) {
+    pub fn run(
+        &self,
+        table: &mut FlowTable,
+        packet: &Packet,
+        rule: usize,
+        captured: &[Captured],
+        vars: &mut PacketVars,
+    ) -> bool {
+        if !self.tests.iter().all(|t| test(t, table, packet, vars)) {
             return false;
         }
         for w in &self.writes {
-            write(w, table, packet);
+            if let Write::Keep {
+                packet: on_packet,
+                name,
+            } = w
+            {
+                let Some(c) = captured
+                    .iter()
+                    .find(|c| c.packet == *on_packet && c.name == *name)
+                else {
+                    continue;
+                };
+                let kept = if *on_packet {
+                    &mut *vars
+                } else {
+                    &mut table.flow(packet).vars
+                };
+                kept.insert(name.clone(), c.bytes.clone());
+            } else {
+                write(w, table, packet);
+            }
         }
         if self.noalert {
             return false;
@@ -971,7 +1034,7 @@ fn operand(value: &Operand, flow: &Flow) -> i64 {
     }
 }
 
-fn test(t: &Test, table: &mut FlowTable, packet: &Packet) -> bool {
+fn test(t: &Test, table: &mut FlowTable, packet: &Packet, vars: &PacketVars) -> bool {
     match t {
         // One name, or the names of `a|b`: `isset` holds when any is set,
         // `isnotset` when any is not.
@@ -994,6 +1057,22 @@ fn test(t: &Test, table: &mut FlowTable, packet: &Packet) -> bool {
             }
         }
         Test::IntSet { name, set } => table.flow(packet).ints.contains_key(name) == *set,
+        // Holds when the bytes appear anywhere in the value, as Suricata
+        // searches it.
+        Test::Var {
+            packet: on_packet,
+            name,
+            bytes,
+        } => {
+            let kept = if *on_packet {
+                vars.get(name)
+            } else {
+                table.flow(packet).vars.get(name)
+            };
+            kept.is_some_and(|value| {
+                bytes.is_empty() || value.windows(bytes.len()).any(|w| w == bytes.as_slice())
+            })
+        }
     }
 }
 
@@ -1053,6 +1132,8 @@ fn write(w: &Write, table: &mut FlowTable, packet: &Packet) {
             };
             flow.ints.insert(name.clone(), next);
         }
+        // Kept by `State::run`, which holds what the match captured.
+        Write::Keep { .. } => {}
     }
 }
 
@@ -1127,9 +1208,27 @@ mod tests {
             .expect("compiles")
             .expect("state");
         let mut table = FlowTable::default();
-        assert!(set.run(&mut table, &packet(1, 1000, 0), 0));
-        assert!(isset.run(&mut table, &packet(1, 1000, 600), 1));
-        assert!(!isset.run(&mut table, &packet(1, 1000, 1201), 1));
+        assert!(set.run(
+            &mut table,
+            &packet(1, 1000, 0),
+            0,
+            &[],
+            &mut PacketVars::new()
+        ));
+        assert!(isset.run(
+            &mut table,
+            &packet(1, 1000, 600),
+            1,
+            &[],
+            &mut PacketVars::new()
+        ));
+        assert!(!isset.run(
+            &mut table,
+            &packet(1, 1000, 1201),
+            1,
+            &[],
+            &mut PacketVars::new()
+        ));
     }
 
     #[test]
@@ -1142,18 +1241,38 @@ mod tests {
         let total = u32::try_from(MAX_ENTRIES).expect("fits");
         for n in 0..total {
             let sport = u16::try_from(n % 60_000).expect("fits");
-            set.run(&mut table, &packet(n / 60_000 + 1, sport, u64::from(n)), 0);
+            set.run(
+                &mut table,
+                &packet(n / 60_000 + 1, sport, u64::from(n)),
+                0,
+                &[],
+                &mut PacketVars::new(),
+            );
         }
         assert_eq!(table.flows.len(), MAX_ENTRIES);
-        set.run(&mut table, &packet(100, 1, u64::from(total)), 0);
+        set.run(
+            &mut table,
+            &packet(100, 1, u64::from(total)),
+            0,
+            &[],
+            &mut PacketVars::new(),
+        );
         assert!(table.flows.len() <= MAX_ENTRIES / 2 + 1);
-        assert!(isset.run(&mut table, &packet(100, 1, u64::from(total)), 1));
+        assert!(isset.run(
+            &mut table,
+            &packet(100, 1, u64::from(total)),
+            1,
+            &[],
+            &mut PacketVars::new()
+        ));
         let last = total - 1;
         let sport = u16::try_from(last % 60_000).expect("fits");
         assert!(isset.run(
             &mut table,
             &packet(last / 60_000 + 1, sport, u64::from(total)),
-            1
+            1,
+            &[],
+            &mut PacketVars::new()
         ));
     }
 
@@ -1163,9 +1282,9 @@ mod tests {
             .expect("compiles")
             .expect("state");
         let mut table = FlowTable::default();
-        assert!(!filter.run(&mut table, &packet(1, 1, 0), 0));
-        assert!(filter.run(&mut table, &packet(1, 1, 1), 0));
+        assert!(!filter.run(&mut table, &packet(1, 1, 0), 0, &[], &mut PacketVars::new()));
+        assert!(filter.run(&mut table, &packet(1, 1, 1), 0, &[], &mut PacketVars::new()));
         table.forget_filters();
-        assert!(!filter.run(&mut table, &packet(1, 1, 2), 0));
+        assert!(!filter.run(&mut table, &packet(1, 1, 2), 0, &[], &mut PacketVars::new()));
     }
 }

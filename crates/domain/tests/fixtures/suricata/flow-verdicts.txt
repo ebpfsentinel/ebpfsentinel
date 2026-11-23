@@ -1,4 +1,4 @@
-# This is Suricata version 8.0.8 RELEASE, run by make-flow-verdicts.py; do not edit by hand.
+# This is Suricata version 8.0.8 RELEASE, run by make-flow-verdicts.py flow; do not edit by hand.
 # 'rule SID loaded|refused RULE', then 'packet NS SRC SPORT DST DPORT HEX SIDS'
 # per packet, NS its time in nanoseconds and SIDS the alerted rules or '-'.
 rule 3000 loaded alert tcp any any -> any 21001 (msg:"case 3000"; flowbits:set,auth; flowbits:noalert; content:"LOGIN"; sid:3000;)
@@ -48,6 +48,29 @@ rule 3043 loaded alert tcp any any -> any 21016 (msg:"case 3043"; hostbits:set,h
 rule 3044 loaded alert tcp any 21016 -> any any (msg:"case 3044"; hostbits:isset,host,dst; content:"HGET"; sid:3044;)
 rule 3045 loaded alert tcp any 21016 -> any any (msg:"case 3045"; xbits:isset,host,track ip_dst; content:"XGET"; sid:3045;)
 rule 3046 loaded alert tcp any any -> any 21017 (msg:"case 3046"; detection_filter:track by_src, count 2, seconds 10; content:"FLOOD"; sid:3046;)
+rule 3047 loaded alert tcp any any -> any 21018 (msg:"case 3047"; pcre:"/user=(?P<flow_user>[a-z]+)/"; sid:3047;)
+rule 3048 loaded alert tcp any any -> any 21018 (msg:"case 3048"; flowvar:user,"bob"; content:"CHECK"; sid:3048;)
+rule 3049 loaded alert tcp any any -> any 21019 (msg:"case 3049"; pcre:"/name=(?P<flow_name>[a-z]+)/"; sid:3049;)
+rule 3050 loaded alert tcp any any -> any 21019 (msg:"case 3050"; flowvar:name,"li"; content:"PART"; sid:3050;)
+rule 3051 loaded alert tcp any any -> any 21019 (msg:"case 3051"; flowvar:name,"alice"; content:"WHOLE"; sid:3051;)
+rule 3052 loaded alert tcp any any -> any 21019 (msg:"case 3052"; flowvar:name,"alicex"; content:"LONGER"; sid:3052;)
+rule 3053 loaded alert tcp any any -> any 21020 (msg:"case 3053"; pcre:"/id=([0-9]+)/,flow:ident"; sid:3053;)
+rule 3054 loaded alert tcp any any -> any 21020 (msg:"case 3054"; flowvar:ident,"42"; content:"IDCHK"; sid:3054;)
+rule 3055 loaded alert tcp any any -> any 21021 (msg:"case 3055"; pcre:"/tok=(?P<flow_tok>[a-z]+)/"; content:"NEVER"; sid:3055;)
+rule 3056 loaded alert tcp any any -> any 21021 (msg:"case 3056"; flowvar:tok,"abc"; content:"TCHK"; sid:3056;)
+rule 3057 loaded alert tcp any any -> any 21022 (msg:"case 3057"; pcre:"/v=(?P<flow_v>[a-z]+)/"; sid:3057;)
+rule 3058 loaded alert tcp any any -> any 21022 (msg:"case 3058"; flowvar:v,"one"; content:"VONE"; sid:3058;)
+rule 3059 loaded alert tcp any any -> any 21022 (msg:"case 3059"; flowvar:v,"two"; content:"VTWO"; sid:3059;)
+rule 3060 loaded alert tcp any any -> any 21023 (msg:"case 3060"; pcre:"/p=(?P<pkt_p>[a-z]+)/"; sid:3060;)
+rule 3061 loaded alert tcp any any -> any 21023 (msg:"case 3061"; pktvar:p,"xy"; content:"PCHK"; sid:3061;)
+rule 3062 loaded alert tcp any any -> any 21024 (msg:"case 3062"; pktvar:q,"zz"; content:"QCHK"; sid:3062;)
+rule 3063 loaded alert tcp any any -> any 21024 (msg:"case 3063"; pcre:"/q=(?P<pkt_q>[a-z]+)/"; sid:3063;)
+rule 3064 loaded alert tcp any any -> any 21025 (msg:"case 3064"; flowvar:w,"ab"; content:"WCHK"; sid:3064;)
+rule 3065 loaded alert tcp any any -> any 21025 (msg:"case 3065"; pcre:"/w=(?P<flow_w>[a-z]+)/"; sid:3065;)
+rule 3066 loaded alert tcp any any -> any 21026 (msg:"case 3066"; pcre:"/(?P<flow_k>[a-z]+)=(?P<flow_val>[0-9]+)/"; sid:3066;)
+rule 3067 loaded alert tcp any any -> any 21026 (msg:"case 3067"; flowvar:k,"port"; flowvar:val,"80"; content:"KV"; sid:3067;)
+rule 3068 loaded alert tcp any any -> any 21027 (msg:"case 3068"; pcre:"/srv=(?P<flow_srv>[a-z]+)/"; sid:3068;)
+rule 3069 loaded alert tcp any 21027 -> any any (msg:"case 3069"; flowvar:srv,"web"; content:"BACKCHK"; sid:3069;)
 packet 10000000000000 10.1.0.1 40000 10.2.0.1 21001 44415441 -
 packet 10001000000000 10.1.0.1 40000 10.2.0.1 21001 4c4f47494e -
 packet 10002000000000 10.1.0.1 40000 10.2.0.1 21001 44415441 3001
@@ -115,3 +138,25 @@ packet 170003000000000 10.1.0.17 40003 10.2.0.17 21017 464c4f4f44 3046
 packet 170010000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 3046
 packet 170011000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 -
 packet 170012000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 -
+packet 180000000000000 10.1.0.18 40000 10.2.0.18 21018 757365723d626f62 3047
+packet 180001000000000 10.1.0.18 40000 10.2.0.18 21018 434845434b 3048
+packet 180002000000000 10.1.0.18 40001 10.2.0.18 21018 434845434b -
+packet 190000000000000 10.1.0.19 40000 10.2.0.19 21019 6e616d653d616c696365 3049
+packet 190001000000000 10.1.0.19 40000 10.2.0.19 21019 504152542057484f4c45204c4f4e474552 3050,3051
+packet 200000000000000 10.1.0.20 40000 10.2.0.20 21020 69643d3432 3053
+packet 200001000000000 10.1.0.20 40000 10.2.0.20 21020 494443484b 3054
+packet 210000000000000 10.1.0.21 40000 10.2.0.21 21021 746f6b3d616263 -
+packet 210001000000000 10.1.0.21 40000 10.2.0.21 21021 5443484b -
+packet 220000000000000 10.1.0.22 40000 10.2.0.22 21022 763d6f6e65 3057
+packet 220001000000000 10.1.0.22 40000 10.2.0.22 21022 564f4e45205654574f 3058
+packet 220002000000000 10.1.0.22 40000 10.2.0.22 21022 763d74776f 3057
+packet 220003000000000 10.1.0.22 40000 10.2.0.22 21022 564f4e45205654574f 3059
+packet 230000000000000 10.1.0.23 40000 10.2.0.23 21023 703d7879205043484b 3060,3061
+packet 230001000000000 10.1.0.23 40000 10.2.0.23 21023 5043484b -
+packet 240000000000000 10.1.0.24 40000 10.2.0.24 21024 5143484b20713d7a7a 3062,3063
+packet 250000000000000 10.1.0.25 40000 10.2.0.25 21025 773d6162205743484b 3064,3065
+packet 250001000000000 10.1.0.25 40000 10.2.0.25 21025 5743484b 3064
+packet 260000000000000 10.1.0.26 40000 10.2.0.26 21026 706f72743d3830 3066
+packet 260001000000000 10.1.0.26 40000 10.2.0.26 21026 4b56 3067
+packet 270000000000000 10.1.0.27 40000 10.2.0.27 21027 7372763d776562 3068
+packet 270001000000000 10.2.0.27 21027 10.1.0.27 40000 4241434b43484b 3069

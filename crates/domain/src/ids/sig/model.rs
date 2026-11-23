@@ -238,11 +238,25 @@ impl Content {
     }
 }
 
-/// Where a `pcre` capture is stored.
+/// Where a `pcre` capture is stored: `flow`, `pkt` or `alert`, under a
+/// name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
     pub scope: String,
     pub name: String,
+    /// Named in the expression, `(?P<flow_name>...)`, rather than listed
+    /// after its flags, where the n-th name takes the n-th group.
+    pub named: bool,
+}
+
+/// What a rule's `pcre` captured on the match that held, kept on the flow
+/// or on the packet for `flowvar` and `pktvar` to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    /// Kept on the packet (`pkt`) rather than the flow.
+    pub packet: bool,
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// One `pcre`.

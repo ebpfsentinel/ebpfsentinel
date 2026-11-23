@@ -19,9 +19,9 @@ use sha2::{Digest, Sha256};
 use super::buffers::sticky;
 use super::int::{IntMatch, IntOp};
 use super::model::{
-    Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
-    FlowCounter, FlowMatch, HeaderField, Match, MathOp, NumBase, Pcre, ProtoMode, RuleProto,
-    Signature, StreamSide, TcpFlags, TcpFlagsMode, Transform, Value,
+    Base64Decode, Buffer, ByteOp, ByteRead, Captured, Check, Content, Endian, FastPattern,
+    FloatMatch, FlowCounter, FlowMatch, HeaderField, Match, MathOp, NumBase, Pcre, ProtoMode,
+    RuleProto, Signature, StreamSide, TcpFlags, TcpFlagsMode, Transform, Value,
 };
 use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::flow::{Seen, State};
@@ -665,6 +665,9 @@ pub struct Program {
     tx: Option<[bool; 2]>,
     /// The application fields the rule compares, by the field each reads.
     fields: Vec<FieldOf>,
+    /// The variables its `pcre` captures fill: kept on the packet or the
+    /// flow, and the name.
+    vars: Vec<(bool, String)>,
 }
 
 /// Where a rule's payload matches run on a TCP connection whose streams are
@@ -915,6 +918,9 @@ struct PcreOp {
     relative: bool,
     negated: bool,
     anchored: bool,
+    /// The groups kept for `flowvar` and `pktvar`: the group's index, then
+    /// the variable's among the program's.
+    keeps: Vec<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -1156,6 +1162,7 @@ impl Program {
     /// match sets it, and a pcre or transform argument PCRE2 rejects.
     pub fn compile(signature: &Signature) -> Compiled<Self> {
         let mut names: HashMap<String, usize> = HashMap::new();
+        let mut vars = Vec::new();
         let mut lists = Vec::new();
         for list in &signature.lists {
             let source = match list.buffer {
@@ -1171,7 +1178,7 @@ impl Program {
             check_case(&list.transforms, &list.matches)?;
             let mut ops = Vec::new();
             for m in &list.matches {
-                ops.push(compile_match(m, &mut names)?);
+                ops.push(compile_match(m, &mut names, &mut vars)?);
             }
             let cursor_after = (0..ops.len())
                 .map(|i| ops[i + 1..].iter().any(Op::reads_cursor))
@@ -1203,6 +1210,7 @@ impl Program {
             inspect,
             tx,
             fields,
+            vars,
         })
     }
 
@@ -1228,7 +1236,8 @@ impl Program {
 
     /// Whether the rule holds on one side of an application transaction, 0
     /// the request, its buffers read from `fields` and its payload matches
-    /// from `payload`, the message as it travelled.
+    /// from `payload`, the message as it travelled: what its `pcre`
+    /// captured when it does.
     #[must_use]
     pub fn matches_transaction(
         &self,
@@ -1236,16 +1245,16 @@ impl Program {
         fields: &Fields,
         payload: &[u8],
         now: u64,
-    ) -> bool {
+    ) -> Option<Vec<Captured>> {
         if !self.tx.is_some_and(|sides| sides[side]) {
-            return false;
+            return None;
         }
         if !self
             .fields
             .iter()
             .all(|(name, c)| c.holds(name, fields, now))
         {
-            return false;
+            return None;
         }
         let sticky = |name: &str, index: usize| fields.get(name, index);
         self.run(payload, &sticky)
@@ -1253,9 +1262,9 @@ impl Program {
 
     /// Whether the signature's matches hold on a window of a stream: its
     /// payload matches run over the window's bytes, positions counted from
-    /// its first byte.
+    /// its first byte. Hands what its `pcre` captured when they do.
     #[must_use]
-    pub fn matches_stream(&self, bytes: &[u8]) -> bool {
+    pub fn matches_stream(&self, bytes: &[u8]) -> Option<Vec<Captured>> {
         self.run(bytes, &|_, _| None)
     }
 
@@ -1306,16 +1315,17 @@ impl Program {
         }) {
             return false;
         }
-        self.run(payload, sticky)
+        self.run(payload, sticky).is_some()
     }
 
     /// Whether the signature holds on a whole packet: its header checks on
     /// the headers, its payload matches on what follows the transport
-    /// header, and the header buffers it names on those headers.
+    /// header, and the header buffers it names on those headers. Hands what
+    /// its `pcre` captured when it does.
     #[must_use]
-    pub fn matches_packet(&self, packet: &IpPacket<'_>) -> bool {
+    pub fn matches_packet(&self, packet: &IpPacket<'_>) -> Option<Vec<Captured>> {
         if !self.headers.iter().all(|h| h.matches(packet)) {
-            return false;
+            return None;
         }
         let packet = *packet;
         let sticky = move |name: &str, index: usize| {
@@ -1332,15 +1342,31 @@ impl Program {
         &self,
         payload: &'a [u8],
         sticky: &'a dyn Fn(&str, usize) -> Option<&'a [u8]>,
-    ) -> bool {
+    ) -> Option<Vec<Captured>> {
         let mut run = Run {
             payload,
             sticky,
             slots: vec![0; self.slots],
             decoded: None,
             budget: RETRY_BUDGET,
+            kept: vec![None; self.vars.len()],
         };
-        self.list(0, &mut run)
+        if !self.list(0, &mut run) {
+            return None;
+        }
+        Some(
+            self.vars
+                .iter()
+                .zip(run.kept)
+                .filter_map(|((packet, name), bytes)| {
+                    Some(Captured {
+                        packet: *packet,
+                        name: name.clone(),
+                        bytes: bytes?,
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Whether the program inspects a buffer other than the payload and its
@@ -1432,10 +1458,20 @@ impl Program {
                         && self.step(li, oi + 1, cursor, buf, run);
                 }
                 let mut from = 0;
+                let mut locations = (!p.keeps.is_empty()).then(|| p.regex.capture_locations());
                 loop {
-                    let Ok(Some(found)) = p.regex.find_at(subject, from) else {
+                    let found = match locations.as_mut() {
+                        Some(locs) => p.regex.captures_read_at(locs, subject, from),
+                        None => p.regex.find_at(subject, from),
+                    };
+                    let Ok(Some(found)) = found else {
                         return false;
                     };
+                    if let Some(locs) = &locations {
+                        for &(group, var) in &p.keeps {
+                            run.kept[var] = locs.get(group).map(|(s, e)| subject[s..e].to_vec());
+                        }
+                    }
                     if self.step(li, oi + 1, base + found.end(), buf, run) {
                         return true;
                     }
@@ -1601,6 +1637,9 @@ struct Run<'a> {
     slots: Vec<u64>,
     decoded: Option<Vec<u8>>,
     budget: u32,
+    /// What the `pcre` of the path being tried captured, by variable: the
+    /// path that holds writes last.
+    kept: Vec<Option<Vec<u8>>>,
 }
 
 impl Run<'_> {
@@ -2137,7 +2176,7 @@ fn fast_pattern(signature: &Signature) -> Option<Needle> {
 
 /// Whether PCRE2 compiles the expression with its flags.
 pub(crate) fn check_pcre(p: &Pcre) -> Compiled<()> {
-    compile_pcre(p).map(drop)
+    compile_pcre(p, &mut Vec::new()).map(drop)
 }
 
 /// Whether PCRE2 compiles a `pcrexform` expression.
@@ -2152,7 +2191,7 @@ fn pcrexform(expression: &str) -> Compiled<Pcre2> {
         .map_err(|e| refused("pcrexform", format!("is not a PCRE2 expression: {e}")))
 }
 
-fn compile_pcre(p: &Pcre) -> Compiled<PcreOp> {
+fn compile_pcre(p: &Pcre, vars: &mut Vec<(bool, String)>) -> Compiled<PcreOp> {
     let flags = p.flags.as_str();
     let regex = RegexBuilder::new()
         .caseless(flags.contains('i'))
@@ -2162,11 +2201,46 @@ fn compile_pcre(p: &Pcre) -> Compiled<PcreOp> {
         .jit_if_available(true)
         .build(&pcre_expression(p))
         .map_err(|e| refused("pcre", format!("is not a PCRE2 expression: {e}")))?;
+    let mut keeps = Vec::new();
+    let mut listed = 0;
+    for capture in &p.captures {
+        let group = if capture.named {
+            let name = format!("{}_{}", capture.scope, capture.name);
+            regex
+                .capture_names()
+                .iter()
+                .position(|n| n.as_deref() == Some(name.as_str()))
+        } else {
+            listed += 1;
+            Some(listed).filter(|g| *g < regex.captures_len())
+        };
+        let Some(group) = group else {
+            return Err(refused(
+                "pcre",
+                format!(
+                    "keeps '{}:{}', which no group of the expression captures",
+                    capture.scope, capture.name
+                ),
+            ));
+        };
+        // An `alert` capture only decorates Suricata's alert record; the
+        // agent keeps none.
+        if capture.scope == "alert" {
+            continue;
+        }
+        let var = (capture.scope == "pkt", capture.name.clone());
+        let index = vars.iter().position(|v| *v == var).unwrap_or_else(|| {
+            vars.push(var);
+            vars.len() - 1
+        });
+        keeps.push((group, index));
+    }
     Ok(PcreOp {
         regex,
         relative: p.relative,
         negated: p.negated,
         anchored: flags.contains('A'),
+        keeps,
     })
 }
 
@@ -2184,10 +2258,14 @@ fn read_op(
     })
 }
 
-fn compile_match(m: &Match, names: &mut HashMap<String, usize>) -> Compiled<Op> {
+fn compile_match(
+    m: &Match,
+    names: &mut HashMap<String, usize>,
+    vars: &mut Vec<(bool, String)>,
+) -> Compiled<Op> {
     Ok(match m {
         Match::Content(c) => Op::Content(compile_content(c, names)?),
-        Match::Pcre(p) => Op::Pcre(compile_pcre(p)?),
+        Match::Pcre(p) => Op::Pcre(compile_pcre(p, vars)?),
         Match::IsDataAt(d) => Op::IsDataAt {
             negated: d.negated,
             at: num(&d.at, names, "isdataat")?,

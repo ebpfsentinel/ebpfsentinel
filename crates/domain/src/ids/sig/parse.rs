@@ -1590,10 +1590,11 @@ fn split_pcre(inner: &str) -> Compiled<(String, String, Vec<Capture>)> {
         if !flags.chars().all(|c| PCRE_FLAGS.contains(c)) {
             continue;
         }
-        let Some(captures) = tail.map_or(Some(Vec::new()), parse_captures) else {
+        let Some(mut captures) = tail.map_or(Some(Vec::new()), parse_captures) else {
             continue;
         };
         let expression = &body[..index];
+        captures.extend(named_captures(expression));
         return Ok((expression.to_string(), flags.to_string(), captures));
     }
     Err(bad(k, "is not '/expression/flags'"))
@@ -1606,9 +1607,37 @@ fn parse_captures(tail: &str) -> Option<Vec<Capture>> {
             matches!(scope, "flow" | "pkt" | "alert").then(|| Capture {
                 scope: scope.to_string(),
                 name: name.to_string(),
+                named: false,
             })
         })
         .collect()
+}
+
+/// The groups an expression names `flow_x`, `pkt_x` or `alert_x`, in
+/// either of PCRE2's spellings, `(?P<name>` and `(?<name>`.
+fn named_captures(expression: &str) -> Vec<Capture> {
+    let mut found = Vec::new();
+    for (at, _) in expression.match_indices("(?") {
+        let rest = &expression[at + 2..];
+        let Some(rest) = rest.strip_prefix("P<").or_else(|| rest.strip_prefix('<')) else {
+            continue;
+        };
+        let Some((group, _)) = rest.split_once('>') else {
+            continue;
+        };
+        for scope in ["flow", "pkt", "alert"] {
+            if let Some(name) = group.strip_prefix(scope).and_then(|n| n.strip_prefix('_'))
+                && !name.is_empty()
+            {
+                found.push(Capture {
+                    scope: scope.to_string(),
+                    name: name.to_string(),
+                    named: true,
+                });
+            }
+        }
+    }
+    found
 }
 
 fn parse_base64_decode(value: &str) -> Compiled<Base64Decode> {

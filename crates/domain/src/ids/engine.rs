@@ -11,15 +11,18 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, ImportedAction, SamplingMode, ThresholdType};
 use super::error::IdsError;
-use super::flow::{Ended, FlowTable, Packet, Seen, Wire};
+use super::flow::{Ended, FlowTable, Packet, PacketVars, Seen, Wire};
 use super::http1::Ready;
 use super::packet::{IpPacket, L4};
 use super::prefilter::{Entry, Prefilter, needle};
-
 use super::sig::inspect::{Inspect, Program};
+use super::sig::model::Captured;
 use super::stream::Segment;
 use crate::common::entity::Protocol;
 use crate::dns::entity::DomainPattern;
+
+/// A rule a packet matched, by index, with what its `pcre` captured there.
+type Hit<'a> = (usize, &'a IdsRule, Vec<Captured>);
 
 /// The most ports an imported rule is indexed under; past it the rule is a
 /// candidate for every packet and its header decides.
@@ -421,7 +424,7 @@ impl IdsEngine {
                     (None, Some(pattern)) => pattern.is_match(payload),
                     (None, None) => false,
                 };
-                decided.then_some((idx, rule))
+                decided.then_some((idx, rule, Vec::new()))
             })
             .collect();
         self.run_state(event, matched)
@@ -494,7 +497,7 @@ impl IdsEngine {
         }
         let seen = observed.seen;
         let streamed = seen.stream_size.is_some();
-        let on_packet: Vec<(usize, &IdsRule)> = self
+        let on_packet: Vec<Hit<'_>> = self
             .prefilter()
             .candidates(&keys, payload)
             .into_iter()
@@ -505,7 +508,11 @@ impl IdsEngine {
                     Inspect::Stream => !streamed,
                     Inspect::Packet | Inspect::Both => true,
                 };
-                (on_packet && program.matches_packet(&packet)).then_some((idx, rule))
+                if !on_packet {
+                    return None;
+                }
+                let captured = program.matches_packet(&packet)?;
+                Some((idx, rule, captured))
             })
             .collect();
         let mut on_flow = Vec::new();
@@ -528,8 +535,8 @@ impl IdsEngine {
     fn act<'a>(
         &self,
         event: &PacketEvent,
-        on_packet: Vec<(usize, &'a IdsRule)>,
-        on_flow: Vec<(usize, &'a IdsRule)>,
+        on_packet: Vec<Hit<'a>>,
+        on_flow: Vec<Hit<'a>>,
     ) -> Vec<(usize, &'a IdsRule)> {
         let action = |rule: &IdsRule| {
             rule.imported
@@ -538,8 +545,8 @@ impl IdsEngine {
         };
         let reaching: Vec<usize> = on_flow
             .iter()
-            .filter(|(_, rule)| !action(rule).is_alert())
-            .map(|(idx, _)| *idx)
+            .filter(|(_, rule, _)| !action(rule).is_alert())
+            .map(|(idx, _, _)| *idx)
             .collect();
         let mut matched = on_packet;
         matched.extend(on_flow);
@@ -638,16 +645,18 @@ impl IdsEngine {
         ports: Option<(u16, u16)>,
         seen: &Seen,
         block: &[u8],
-    ) -> Vec<(usize, &IdsRule)> {
+    ) -> Vec<Hit<'_>> {
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
         self.prefilter()
             .candidates(&keys, block)
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
-                (matches!(program.inspect(), Inspect::Stream | Inspect::Both)
-                    && program.matches_stream(block))
-                .then_some((idx, rule))
+                if !matches!(program.inspect(), Inspect::Stream | Inspect::Both) {
+                    return None;
+                }
+                let captured = program.matches_stream(block)?;
+                Some((idx, rule, captured))
             })
             .collect()
     }
@@ -663,13 +672,13 @@ impl IdsEngine {
         seen: &Seen,
         block: &[u8],
         open: &[Ready],
-    ) -> Vec<(usize, &IdsRule)> {
+    ) -> Vec<Hit<'_>> {
         if open.is_empty() {
             return Vec::new();
         }
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
         let now = event.timestamp_ns / 1_000_000_000;
-        let matched: Vec<(usize, &IdsRule, &Ready)> = self
+        let matched: Vec<(usize, &IdsRule, &Ready, Vec<Captured>)> = self
             .prefilter()
             .candidates(&keys, block)
             .into_iter()
@@ -678,9 +687,10 @@ impl IdsEngine {
                 (program.inspect() == Inspect::TransactionStream).then_some((idx, rule, program))
             })
             .flat_map(|(idx, rule, program)| {
-                open.iter()
-                    .filter(move |tx| program.matches_transaction(tx.side, &tx.fields, block, now))
-                    .map(move |tx| (idx, rule, tx))
+                open.iter().filter_map(move |tx| {
+                    let captured = program.matches_transaction(tx.side, &tx.fields, block, now)?;
+                    Some((idx, rule, tx, captured))
+                })
             })
             .collect();
         if matched.is_empty() {
@@ -690,8 +700,8 @@ impl IdsEngine {
         let packet = Packet::of(event);
         matched
             .into_iter()
-            .filter(|(idx, _, tx)| flows.first_alert(&packet, tx.id, tx.side, *idx))
-            .map(|(idx, rule, _)| (idx, rule))
+            .filter(|(idx, _, tx, _)| flows.first_alert(&packet, tx.id, tx.side, *idx))
+            .map(|(idx, rule, _, captured)| (idx, rule, captured))
             .collect()
     }
 
@@ -703,22 +713,24 @@ impl IdsEngine {
         ports: Option<(u16, u16)>,
         seen: &Seen,
         tx: &Ready,
-    ) -> Vec<(usize, &IdsRule)> {
+    ) -> Vec<Hit<'_>> {
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
-        let matched: Vec<(usize, &IdsRule)> = self
+        let matched: Vec<Hit<'_>> = self
             .prefilter()
             .candidates(&keys, &tx.payload)
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
-                (program.inspect() == Inspect::Transaction
-                    && program.matches_transaction(
-                        tx.side,
-                        &tx.fields,
-                        &tx.payload,
-                        event.timestamp_ns / 1_000_000_000,
-                    ))
-                .then_some((idx, rule))
+                if program.inspect() != Inspect::Transaction {
+                    return None;
+                }
+                let captured = program.matches_transaction(
+                    tx.side,
+                    &tx.fields,
+                    &tx.payload,
+                    event.timestamp_ns / 1_000_000_000,
+                )?;
+                Some((idx, rule, captured))
             })
             .collect();
         if matched.is_empty() {
@@ -728,7 +740,7 @@ impl IdsEngine {
         let packet = Packet::of(event);
         matched
             .into_iter()
-            .filter(|(idx, _)| flows.first_alert(&packet, tx.id, tx.side, *idx))
+            .filter(|(idx, _, _)| flows.first_alert(&packet, tx.id, tx.side, *idx))
             .collect()
     }
 
@@ -756,7 +768,7 @@ impl IdsEngine {
     fn run_state<'a>(
         &self,
         event: &PacketEvent,
-        mut matched: Vec<(usize, &'a IdsRule)>,
+        mut matched: Vec<Hit<'a>>,
     ) -> Vec<(usize, &'a IdsRule)> {
         let state = |idx: usize| {
             self.inspections
@@ -764,15 +776,25 @@ impl IdsEngine {
                 .and_then(Option::as_ref)
                 .and_then(|program| program.state())
         };
-        if matched.iter().all(|(idx, _)| state(*idx).is_none()) {
-            return matched;
+        if matched.iter().all(|(idx, _, _)| state(*idx).is_none()) {
+            return matched
+                .into_iter()
+                .map(|(idx, rule, _)| (idx, rule))
+                .collect();
         }
-        matched.sort_by_key(|(idx, _)| (state(*idx).map_or(3, super::flow::State::rank), *idx));
+        matched.sort_by_key(|(idx, _, _)| (state(*idx).map_or(3, super::flow::State::rank), *idx));
         let packet = Packet::of(event);
+        let mut vars = PacketVars::new();
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
         flows.touch(&packet);
-        matched.retain(|(idx, _)| state(*idx).is_none_or(|s| s.run(&mut flows, &packet, *idx)));
+        matched.retain(|(idx, _, captured)| {
+            state(*idx).is_none_or(|s| s.run(&mut flows, &packet, *idx, captured, &mut vars))
+        });
         drop(flows);
+        let mut matched: Vec<(usize, &IdsRule)> = matched
+            .into_iter()
+            .map(|(idx, rule, _)| (idx, rule))
+            .collect();
         matched.sort_by_key(|(idx, _)| *idx);
         matched
     }

@@ -154,3 +154,68 @@ scenario a detection filter alerts past its count until its window closes
   10 > "FLOOD"
   11 > "FLOOD"
   12 > "FLOOD"
+
+scenario a pcre capture kept on the flow is read by a later packet of it
+> pcre:"/user=(?P<flow_user>[a-z]+)/";
+> flowvar:user,"bob"; content:"CHECK";
+  0 > "user=bob"
+  1 > "CHECK"
+  2 > c1 "CHECK"
+
+scenario a flow variable is compared whole or in part
+> pcre:"/name=(?P<flow_name>[a-z]+)/";
+> flowvar:name,"li"; content:"PART";
+> flowvar:name,"alice"; content:"WHOLE";
+> flowvar:name,"alicex"; content:"LONGER";
+  0 > "name=alice"
+  1 > "PART WHOLE LONGER"
+
+scenario a capture named after the flags is kept as one named in the group
+> pcre:"/id=([0-9]+)/,flow:ident";
+> flowvar:ident,"42"; content:"IDCHK";
+  0 > "id=42"
+  1 > "IDCHK"
+
+scenario a capture of a rule that does not match is not kept
+> pcre:"/tok=(?P<flow_tok>[a-z]+)/"; content:"NEVER";
+> flowvar:tok,"abc"; content:"TCHK";
+  0 > "tok=abc"
+  1 > "TCHK"
+
+scenario a later capture replaces an earlier one
+> pcre:"/v=(?P<flow_v>[a-z]+)/";
+> flowvar:v,"one"; content:"VONE";
+> flowvar:v,"two"; content:"VTWO";
+  0 > "v=one"
+  1 > "VONE VTWO"
+  2 > "v=two"
+  3 > "VONE VTWO"
+
+scenario a packet variable lives on its packet only
+> pcre:"/p=(?P<pkt_p>[a-z]+)/";
+> pktvar:p,"xy"; content:"PCHK";
+  0 > "p=xy PCHK"
+  1 > "PCHK"
+
+scenario a packet variable is read by a rule written before the one that sets it
+> pktvar:q,"zz"; content:"QCHK";
+> pcre:"/q=(?P<pkt_q>[a-z]+)/";
+  0 > "QCHK q=zz"
+
+scenario a flow variable is read on the packet that sets it by a rule written before
+> flowvar:w,"ab"; content:"WCHK";
+> pcre:"/w=(?P<flow_w>[a-z]+)/";
+  0 > "w=ab WCHK"
+  1 > "WCHK"
+
+scenario two captures of one expression
+> pcre:"/(?P<flow_k>[a-z]+)=(?P<flow_val>[0-9]+)/";
+> flowvar:k,"port"; flowvar:val,"80"; content:"KV";
+  0 > "port=80"
+  1 > "KV"
+
+scenario a flow variable is read on either side of the flow
+> pcre:"/srv=(?P<flow_srv>[a-z]+)/";
+< flowvar:srv,"web"; content:"BACKCHK";
+  0 > "srv=web"
+  1 < "BACKCHK"
