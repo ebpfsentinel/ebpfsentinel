@@ -323,15 +323,16 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `telemetry` | 106 | none | n/a | datapath | Anonymous heartbeat of version and eBPF load state. The destination is a build-time constant, so the lane's build carries a loopback one and suite 106 receives the beat on a sink beside the agent: three fields and nothing else, the identifier kept across a restart, silence under EBPFSENTINEL_TELEMETRY_DISABLE |
 | `threatintel` | 16, 17, 33 | 2vm | 6.18 | pr | OSINT feeds + IOC + STIX |
 | `trace` | 87 | none | 6.18 | datapath | One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name |
-| `workload` | 67, 70, 92, 95 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use |
+| `workload` | 67, 70, 92, 95, 149 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use, 149 the label a cgroup directory carries |
 | `zone` | 31 | 2vm | 6.18 | datapath | Zone-based policy |
 
-#### Capabilities above the floor (17)
+#### Capabilities above the floor (18)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
 | `attribution` | 70 | none | 6.18 | datapath | The workload named on a flow |
 | `bpf_lsm` | 83, 86 | none | 6.18 | datapath | A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86 |
+| `cgroup_labels` | 149 | none | 6.18 | datapath | A cgroup carrying the label a rule names refused, another label and none let through; the route and the start-up log name the path reading the label; where the kernel reads it, a label set on the client's own cgroup refuses its next connect, skipped where the agent reads it |
 | `copy_from_user_str` | 86, 151 | none | 6.18 | datapath | 86 reads the report; 151 shows a process with the arguments it was started with although it rewrote them at once, which only the copy made at exec can see, and the /proc fallback without the BPF LSM |
 | `dlp_whole_record` | 150 | none | 6.18 | datapath | A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name |
 | `file_kfuncs` | 77 | none | 6.18 | datapath | Probed and reported in 77 |

@@ -19,6 +19,14 @@
 //! when a policy that enforces is loaded and nothing is enforcing it. A
 //! policy that only observes is allowed to run degraded, because what is lost
 //! there is a counter.
+//!
+//! Each of the six socket hooks is built twice. The `_labelled` build also
+//! reads the workload label off the calling task's cgroup with
+//! `bpf_cgroup_read_xattr`, through two pointer loads whose offsets the
+//! running kernel's BTF gives at load. Those builds are optional: a kernel
+//! that does not declare the kfunc, whose BTF lacks a field, or whose
+//! verifier refuses the read gets the plain six, and the label is read by
+//! the agent off the cgroup directory when it resolves the cgroup instead.
 
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::PathBuf;
@@ -28,6 +36,11 @@ use domain::firewall::dns_clients::{DNS_CLIENTS_NOT_COVERED, DNS_PORTS, DnsClien
 use domain::firewall::entity::IpNetwork;
 use tracing::{info, warn};
 
+use ebpf_common::workload_policy::{
+    WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL, WORKLOAD_TASK_CGROUPS_SENTINEL,
+};
+
+use super::kfunc::{vmlinux_func_param_count, vmlinux_struct_member_offsets};
 use super::kfunc_attach;
 use super::link_handover::{self, AttachedLink, LinkHook};
 use super::loader::EbpfLoader;
@@ -66,6 +79,142 @@ pub const WORKLOAD_HOOKS: &[(&str, u32)] = &[
     ("workload_skb_egress", BPF_CGROUP_INET_EGRESS),
     ("workload_skb_ingress", BPF_CGROUP_INET_INGRESS),
 ];
+
+/// The suffix of the build of a socket hook that reads the cgroup label.
+pub const LABELLED_SUFFIX: &str = "_labelled";
+
+/// The builds of the six socket hooks that read the cgroup label in the
+/// kernel, loaded as optional programs.
+pub const LABELLED_PROGRAMS: &[&str] = &[
+    "workload_connect4_labelled",
+    "workload_connect6_labelled",
+    "workload_sendmsg4_labelled",
+    "workload_sendmsg6_labelled",
+    "workload_bind4_labelled",
+    "workload_bind6_labelled",
+];
+
+/// The kfunc the labelled builds call.
+pub const LABEL_KFUNC: &str = "bpf_cgroup_read_xattr";
+
+/// The program attached under `hook`: its labelled build when the labelled
+/// builds are in use and it has one, else the hook's own program.
+#[must_use]
+pub fn program_for(hook: &str, labelled: bool) -> String {
+    let build = format!("{hook}{LABELLED_SUFFIX}");
+    if labelled && LABELLED_PROGRAMS.contains(&build.as_str()) {
+        build
+    } else {
+        hook.to_owned()
+    }
+}
+
+/// The member offsets the labelled builds read, as the pairs the loader
+/// writes over their sentinels, or why the running kernel's BTF did not give
+/// them.
+///
+/// # Errors
+///
+/// Returns the reason when the BTF cannot be read or lacks either field.
+pub fn label_offsets() -> Result<Vec<(i16, i16)>, String> {
+    let field = |strukt: &str, member: &str| -> Result<i16, String> {
+        let offsets = vmlinux_struct_member_offsets(strukt, &[member])
+            .map_err(|e| format!("the kernel BTF did not give {strukt}.{member}: {e}"))?;
+        offsets
+            .first()
+            .copied()
+            .flatten()
+            .and_then(|off| i16::try_from(off).ok())
+            .ok_or_else(|| format!("the kernel BTF carries no {strukt}.{member}"))
+    };
+    Ok(vec![
+        (
+            WORKLOAD_TASK_CGROUPS_SENTINEL,
+            field("task_struct", "cgroups")?,
+        ),
+        (
+            WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL,
+            field("css_set", "dfl_cgrp")?,
+        ),
+    ])
+}
+
+/// Which path reads the workload label a cgroup carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupLabelProbe {
+    /// Whether the kernel's BTF declares the kfunc, `None` when it could
+    /// not be read.
+    pub declared: Option<bool>,
+    /// The labelled builds loaded and are the ones attached.
+    pub loaded: bool,
+    /// Why they are not, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl CgroupLabelProbe {
+    /// What `loader` says of the labelled builds, given what the offsets
+    /// lookup answered.
+    #[must_use]
+    pub fn of(loader: &EbpfLoader, offsets: Result<(), String>) -> Self {
+        let declared = vmlinux_func_param_count(LABEL_KFUNC)
+            .ok()
+            .map(|count| count.is_some());
+        let refused = LABELLED_PROGRAMS
+            .iter()
+            .find_map(|program| loader.refused_program(program).map(|why| (*program, why)));
+        let missing = LABELLED_PROGRAMS
+            .iter()
+            .find(|program| loader.program_fd(program).is_none());
+        let reason = match (offsets, refused, missing, declared) {
+            (Err(why), _, _, _) => Some(why),
+            (Ok(()), _, _, Some(false)) => Some(format!(
+                "the kernel does not declare {LABEL_KFUNC}, which is built only with the BPF LSM \
+                 configured in"
+            )),
+            (Ok(()), Some((program, why)), _, _) => {
+                Some(format!("the verifier refused {program}: {why}"))
+            }
+            (Ok(()), None, Some(program), _) => {
+                Some(format!("program `{program}` is not in the loaded object"))
+            }
+            (Ok(()), None, None, _) => None,
+        };
+        Self {
+            declared,
+            loaded: reason.is_none(),
+            reason,
+        }
+    }
+}
+
+static LABEL_PROBE: OnceLock<Mutex<CgroupLabelProbe>> = OnceLock::new();
+
+fn label_probe_cell() -> &'static Mutex<CgroupLabelProbe> {
+    LABEL_PROBE.get_or_init(|| {
+        Mutex::new(CgroupLabelProbe {
+            declared: None,
+            loaded: false,
+            reason: Some("the workload firewall has not been loaded".to_string()),
+        })
+    })
+}
+
+/// Publish which path reads the cgroup label.
+pub fn publish_label_probe(probe: CgroupLabelProbe) {
+    let mut held = label_probe_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *held = probe;
+}
+
+/// Which path currently reads the cgroup label.
+#[must_use]
+pub fn label_probe() -> CgroupLabelProbe {
+    label_probe_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
 
 /// What the agent can say about the workload firewall, for the start-up log
 /// and for the kernel-features endpoint.
@@ -200,6 +349,8 @@ pub struct WorkloadFirewallAttacher {
     /// Set when the privileged `BPF_LINK_CREATE` goes through the warden.
     warden_sock: Option<PathBuf>,
     warden: Option<Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
+    /// Attach the labelled build of each socket hook in place of its own.
+    labelled: bool,
 }
 
 impl WorkloadFirewallAttacher {
@@ -219,9 +370,21 @@ impl WorkloadFirewallAttacher {
         self
     }
 
+    /// Attach the labelled build of each socket hook in place of its own,
+    /// which is what a loader holding all six of them asks for.
+    #[must_use]
+    pub fn with_labelled_programs(mut self, labelled: bool) -> Self {
+        self.labelled = labelled;
+        self
+    }
+
     /// Attach every hook of `loader` to `cgroup`, publishing what happened.
     pub fn attach_all(&mut self, loader: &EbpfLoader, cgroup: &str) -> WorkloadFirewallStatus {
-        self.attach_programs(|program| loader.program_fd(program), cgroup)
+        let labelled = self.labelled;
+        self.attach_programs(
+            |hook| loader.program_fd(&program_for(hook, labelled)),
+            cgroup,
+        )
     }
 
     /// Attach every hook whose program `program_fd` names to `cgroup`,
@@ -357,12 +520,14 @@ pub fn defer_attach(
     loader: &EbpfLoader,
     cgroup: &str,
 ) -> Result<(), String> {
+    let labelled = attacher.labelled;
     let programs = WORKLOAD_HOOKS
         .iter()
-        .map(|(program, _)| {
+        .map(|(hook, _)| {
+            let program = program_for(hook, labelled);
             loader
-                .program_fd_owned(program)
-                .map(|fd| (*program, fd))
+                .program_fd_owned(&program)
+                .map(|fd| (*hook, fd))
                 .ok_or_else(|| format!("program `{program}` is not in the loaded object"))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -427,6 +592,20 @@ pub fn attach_deferred() -> Option<WorkloadFirewallStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_socket_hook_has_a_labelled_build_and_the_packet_hooks_have_none() {
+        for (hook, _) in WORKLOAD_HOOKS {
+            let labelled = program_for(hook, true);
+            if hook.starts_with("workload_skb_") {
+                assert_eq!(&labelled, hook);
+            } else {
+                assert_eq!(labelled, format!("{hook}{LABELLED_SUFFIX}"));
+            }
+            assert_eq!(&program_for(hook, false), hook);
+        }
+        assert_eq!(LABELLED_PROGRAMS.len(), 6);
+    }
 
     #[test]
     fn every_hook_is_named_once_and_carries_its_own_attach_type() {

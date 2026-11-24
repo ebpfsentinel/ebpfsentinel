@@ -225,6 +225,49 @@ pub const WORKLOAD_LINEAGE_MAX_DEPTH: u32 = 16;
 /// which a running parent still carries until it restarts.
 pub const WORKLOAD_LINEAGE_MAX_EXECUTABLES: u32 = 256;
 
+/// The extended attribute a workload label is written in, on the directory
+/// of the cgroup the workload runs in, NUL-terminated as the kernel reads it.
+///
+/// A `user.` attribute because `bpf_cgroup_read_xattr` reads no other
+/// namespace, and one fixed name rather than one per key so that a single
+/// read at the call answers the question. Whoever starts the workload sets
+/// it: `setfattr -n user.ebpfsentinel.workload -v <label> <cgroup dir>`.
+pub const WORKLOAD_LABEL_XATTR: [u8; 27] = *b"user.ebpfsentinel.workload\0";
+
+/// Longest label, in bytes. A label fills a key of
+/// [`WORKLOAD_LABEL_KEY_LEN`] bytes with at least one zero after it, so a
+/// label and a longer one starting with it never share a key.
+pub const WORKLOAD_LABEL_MAX_LEN: usize = 63;
+
+/// Size of a key of `WORKLOAD_LABEL_SELECTORS`: the label, zero-padded.
+pub const WORKLOAD_LABEL_KEY_LEN: usize = WORKLOAD_LABEL_MAX_LEN + 1;
+
+/// The key a label is looked up under: its bytes, then zeros, or `None`
+/// for a label longer than [`WORKLOAD_LABEL_MAX_LEN`].
+#[must_use]
+pub fn workload_label_key(label: &[u8]) -> Option<[u8; WORKLOAD_LABEL_KEY_LEN]> {
+    if label.len() > WORKLOAD_LABEL_MAX_LEN {
+        return None;
+    }
+    let mut key = [0u8; WORKLOAD_LABEL_KEY_LEN];
+    key[..label.len()].copy_from_slice(label);
+    Some(key)
+}
+
+/// Stand-in for the offset of `task_struct.cgroups` in the programs that read
+/// a label, replaced by the loader with the running kernel's offset from its
+/// BTF before the object is loaded.
+///
+/// The cgroup is reached through two pointer loads the verifier must see as
+/// field reads of a trusted task, so the offsets sit in the instructions
+/// rather than in a map. Both values are far past any field this object
+/// reads otherwise, and 8-aligned like the pointers they stand for.
+pub const WORKLOAD_TASK_CGROUPS_SENTINEL: i16 = 0x7f00;
+
+/// Stand-in for the offset of `css_set.dfl_cgrp`, the task's cgroup on the
+/// unified hierarchy.
+pub const WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL: i16 = 0x7f08;
+
 /// One executable, as the lineage walk names it: the inode of
 /// `mm->exe_file` and the kernel's encoding of its superblock's device.
 #[repr(C)]
@@ -526,6 +569,24 @@ mod tests {
         assert_eq!(mem::size_of::<WorkloadExeKey>(), 16);
         assert_eq!(mem::size_of::<WorkloadLineageBits>(), 24);
         assert_eq!(mem::size_of::<WorkloadLineageConfig>(), 56);
+    }
+
+    #[test]
+    fn the_label_attribute_is_a_user_attribute_ending_in_one_nul() {
+        // The kernel reads nothing outside `user.`, and the name is handed to
+        // it as a C string out of read-only memory.
+        assert!(WORKLOAD_LABEL_XATTR.starts_with(b"user."));
+        assert_eq!(WORKLOAD_LABEL_XATTR.iter().filter(|b| **b == 0).count(), 1);
+        assert_eq!(WORKLOAD_LABEL_XATTR.last(), Some(&0));
+    }
+
+    #[test]
+    fn a_label_key_is_the_label_then_zeros_and_a_long_label_has_none() {
+        let key = workload_label_key(b"billing").expect("short label");
+        assert_eq!(&key[..7], b"billing");
+        assert!(key[7..].iter().all(|b| *b == 0));
+        assert!(workload_label_key(&[b'a'; WORKLOAD_LABEL_MAX_LEN]).is_some());
+        assert!(workload_label_key(&[b'a'; WORKLOAD_LABEL_MAX_LEN + 1]).is_none());
     }
 
     #[test]

@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::hash::BuildHasher;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aya::maps::{Map as AyaMap, MapData};
@@ -544,6 +544,54 @@ pub fn prepatch_kfunc_calls(elf: &[u8]) -> Result<Vec<u8>, KfuncLoaderError> {
             .expect("site name is in names");
         Ok((i32::try_from(idx).expect("site index fits i32"), 0))
     })
+}
+
+/// `BPF_LDX | BPF_MEM | BPF_DW`: an eight-byte load at `src + off`.
+const BPF_LDX_MEM_DW: u8 = 0x79;
+
+/// Write kernel struct member offsets over the sentinels a program built
+/// without CO-RE carries in their place.
+///
+/// Every eight-byte load in an executable section whose offset is the first
+/// value of a pair gets the second instead. A program reading a trusted
+/// kernel pointer field directly, for a kfunc that takes only a pointer the
+/// verifier vouches for, cannot read the offset from a map at run time: the
+/// verifier types the loaded pointer from the instruction itself. A sentinel
+/// no pair names is left in place, and the verifier refuses the load as a
+/// read past the end of the struct, which is how a kernel whose BTF did not
+/// give the offset ends up on the program's fallback.
+///
+/// # Errors
+///
+/// Returns an error when `elf` does not parse.
+pub fn patch_field_offsets(elf: &[u8], pairs: &[(i16, i16)]) -> Result<Vec<u8>, KfuncLoaderError> {
+    let file =
+        object::File::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
+    let mut out = elf.to_vec();
+    for section in file.sections() {
+        if section.kind() != object::SectionKind::Text {
+            continue;
+        }
+        let Some((start, size)) = section.file_range() else {
+            continue;
+        };
+        let (Ok(start), Ok(size)) = (usize::try_from(start), usize::try_from(size)) else {
+            continue;
+        };
+        let Some(code) = out.get_mut(start..start.saturating_add(size)) else {
+            continue;
+        };
+        for insn in code.chunks_exact_mut(8) {
+            if insn[0] != BPF_LDX_MEM_DW {
+                continue;
+            }
+            let off = i16::from_le_bytes([insn[2], insn[3]]);
+            if let Some(&(_, value)) = pairs.iter().find(|(sentinel, _)| *sentinel == off) {
+                insn[2..4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// One program as the load loop needs it.
@@ -1522,9 +1570,21 @@ unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
 // `aya::maps::Map` so the existing map managers consume them unchanged.
 
 const BPF_MAP_CREATE: u32 = 0;
+const BPF_MAP_UPDATE_ELEM: u32 = 2;
 const BPF_MAP_GET_NEXT_KEY: u32 = 4;
 const BPF_OBJ_PIN: u32 = 6;
 const BPF_OBJ_GET: u32 = 7;
+
+/// `union bpf_attr` member for `BPF_MAP_UPDATE_ELEM`.
+#[repr(C)]
+#[derive(Default)]
+struct MapUpdateAttr {
+    map_fd: u32,
+    _pad: u32,
+    key: u64,
+    value: u64,
+    flags: u64,
+}
 
 /// Kernel-matching `union bpf_attr` `map_create` member, ending in
 /// `map_token_fd`. Mirrors `aya_obj::generated::bpf_attr__bindgen_ty_1` up to
@@ -2002,6 +2062,13 @@ fn create_object_maps(
     let mut out = HashMap::new();
     for (name, def) in &obj.maps {
         let map_type = def.map_type();
+        if is_data_section(def) {
+            out.insert(
+                name.clone(),
+                (data_section_map(name, def, btf_fd)?, map_type),
+            );
+            continue;
+        }
         let Some(pin_path) = pin_path.filter(|_| is_shareable_map(map_type)) else {
             out.insert(name.clone(), (raw_map_create(name, def, btf_fd)?, map_type));
             continue;
@@ -2026,6 +2093,65 @@ fn create_object_maps(
         };
     }
     Ok(out)
+}
+
+/// True for the maps `aya_obj` makes of an object's `.rodata`, `.data` and
+/// `.bss` sections.
+fn is_data_section(def: &aya_obj::Map) -> bool {
+    use aya_obj::EbpfSectionKind;
+    matches!(
+        def.section_kind(),
+        EbpfSectionKind::Rodata | EbpfSectionKind::Data | EbpfSectionKind::Bss
+    )
+}
+
+/// Create the map behind one of an object's data sections, holding what the
+/// section holds, and freeze it when the section is read-only.
+///
+/// Never pinned and never shared: two objects both carry a `.rodata`, each
+/// with its own content, and a reused pin would hand one the other's bytes.
+/// The freeze is what lets the verifier treat the section as constant, which
+/// a kfunc taking a constant string asks for; a kernel refusing it leaves the
+/// map writable, the verifier then refuses the program reading such a
+/// string, and the caller's fallback for that program applies.
+fn data_section_map(
+    name: &str,
+    def: &aya_obj::Map,
+    btf_fd: Option<RawFd>,
+) -> Result<OwnedFd, KfuncLoaderError> {
+    let fd = raw_map_create(name, def, btf_fd)?;
+    let data = def.data();
+    if !data.is_empty() {
+        let key = 0u32;
+        let mut attr = MapUpdateAttr {
+            map_fd: u32::try_from(fd.as_raw_fd()).unwrap_or_default(),
+            key: (&raw const key) as u64,
+            value: data.as_ptr() as u64,
+            ..Default::default()
+        };
+        // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+        // union member the kernel reads for this command; `key` and `data` outlive the call and
+        // `data` is exactly the value size the map was created with.
+        let rc = unsafe {
+            bpf(
+                BPF_MAP_UPDATE_ELEM,
+                (&raw mut attr).cast(),
+                std::mem::size_of::<MapUpdateAttr>(),
+            )
+        };
+        if rc < 0 {
+            return Err(KfuncLoaderError::MapCreate {
+                name: name.to_owned(),
+                errno: io::Error::last_os_error().raw_os_error().unwrap_or(0),
+            });
+        }
+    }
+    if def.section_kind() == aya_obj::EbpfSectionKind::Rodata
+        && let Err(err) = super::map_freeze::freeze_fd(name, fd.as_fd())
+    {
+        tracing::warn!(map = name, error = %err, "a read-only section was left writable");
+    }
+    Ok(fd)
 }
 
 /// Say when a pinned map is reused at a capacity the plan no longer asks for.
@@ -2203,6 +2329,83 @@ fn load_object_token_fresh(
 
 #[cfg(test)]
 mod tests {
+    /// A relocatable eBPF object holding `code` in `.text` and nothing else.
+    fn object_with_text(code: &[u8]) -> Vec<u8> {
+        let names = b"\0.text\0.shstrtab\0";
+        let text_off = 64usize;
+        let names_off = text_off + code.len();
+        let headers_off = (names_off + names.len()).next_multiple_of(8);
+        let mut elf = Vec::new();
+        elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+        elf.extend_from_slice(&[0; 8]);
+        elf.extend_from_slice(&1u16.to_le_bytes());
+        elf.extend_from_slice(&247u16.to_le_bytes());
+        elf.extend_from_slice(&1u32.to_le_bytes());
+        elf.extend_from_slice(&0u64.to_le_bytes());
+        elf.extend_from_slice(&0u64.to_le_bytes());
+        elf.extend_from_slice(&(headers_off as u64).to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes());
+        for half in [64u16, 0, 0, 64, 3, 2] {
+            elf.extend_from_slice(&half.to_le_bytes());
+        }
+        elf.extend_from_slice(code);
+        elf.extend_from_slice(names);
+        elf.resize(headers_off, 0);
+        let header =
+            |elf: &mut Vec<u8>, name: u32, kind: u32, flags: u64, off: usize, size: usize| {
+                elf.extend_from_slice(&name.to_le_bytes());
+                elf.extend_from_slice(&kind.to_le_bytes());
+                elf.extend_from_slice(&flags.to_le_bytes());
+                elf.extend_from_slice(&0u64.to_le_bytes());
+                elf.extend_from_slice(&(off as u64).to_le_bytes());
+                elf.extend_from_slice(&(size as u64).to_le_bytes());
+                elf.extend_from_slice(&0u32.to_le_bytes());
+                elf.extend_from_slice(&0u32.to_le_bytes());
+                elf.extend_from_slice(&8u64.to_le_bytes());
+                elf.extend_from_slice(&0u64.to_le_bytes());
+            };
+        header(&mut elf, 0, 0, 0, 0, 0);
+        header(&mut elf, 1, 1, 0x6, text_off, code.len());
+        header(&mut elf, 7, 3, 0, names_off, names.len());
+        elf
+    }
+
+    fn insn(code: u8, off: i16) -> [u8; 8] {
+        let off = off.to_le_bytes();
+        [code, 0x21, off[0], off[1], 0, 0, 0, 0]
+    }
+
+    #[test]
+    fn a_sentinel_load_takes_the_offset_given_and_nothing_else_moves() {
+        let code: Vec<u8> = [
+            insn(super::BPF_LDX_MEM_DW, 0x7f00),
+            insn(super::BPF_LDX_MEM_DW, 0x7f08),
+            insn(super::BPF_LDX_MEM_DW, 16),
+            insn(0x61, 0x7f00),
+        ]
+        .concat();
+        let elf = object_with_text(&code);
+        let patched =
+            super::patch_field_offsets(&elf, &[(0x7f00, 2_456), (0x7f08, 128)]).expect("parses");
+        let text = &patched[64..64 + code.len()];
+        let offsets: Vec<i16> = text
+            .chunks_exact(8)
+            .map(|i| i16::from_le_bytes([i[2], i[3]]))
+            .collect();
+        assert_eq!(offsets, vec![2_456, 128, 16, 0x7f00]);
+        assert_eq!(patched.len(), elf.len());
+        assert_eq!(&patched[64 + code.len()..], &elf[64 + code.len()..]);
+    }
+
+    #[test]
+    fn a_sentinel_no_pair_names_is_left_for_the_verifier_to_refuse() {
+        let code = insn(super::BPF_LDX_MEM_DW, 0x7f08);
+        let elf = object_with_text(&code);
+        let patched = super::patch_field_offsets(&elf, &[(0x7f00, 2_456)]).expect("parses");
+        assert_eq!(patched, elf);
+        assert!(super::patch_field_offsets(b"not an object", &[]).is_err());
+    }
+
     #[test]
     fn a_missing_module_is_named_with_its_kfuncs_and_the_programs_calling_them() {
         let site = |section_index, name: &str| super::KfuncSite {

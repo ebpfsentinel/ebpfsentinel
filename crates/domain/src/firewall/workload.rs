@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use ebpf_common::workload_policy::{
     WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
-    WORKLOAD_POLICY_MAX_RULES, WORKLOAD_POLICY_MAX_SELECTORS,
+    WORKLOAD_LABEL_MAX_LEN, WORKLOAD_POLICY_MAX_RULES, WORKLOAD_POLICY_MAX_SELECTORS,
 };
 
 use crate::common::entity::{Protocol, RuleId};
@@ -99,6 +99,17 @@ pub struct WorkloadSelector {
     /// the runtime gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// Workload label carried by the cgroup the task runs in, compared
+    /// exactly: the value of the `user.ebpfsentinel.workload` extended
+    /// attribute on that cgroup's directory, set by whoever starts the
+    /// workload. At most 63 bytes.
+    ///
+    /// Read by the kernel at the call where it can read a cgroup's
+    /// attributes, and by the agent when it resolves the cgroup everywhere,
+    /// so a label is a name the workload's launcher gives it rather than one
+    /// the agent has to infer from a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_label: Option<String>,
     /// Labels of the pod the task runs in, read with the Kubernetes
     /// selector semantics. An empty selector names every pod, and never a
     /// task outside one.
@@ -236,26 +247,33 @@ impl WorkloadSelector {
         kubernetes: KubernetesMatchers,
         lineage: LineageMatchers,
     ) -> Result<Self, FirewallError> {
-        Self::with_digest(exe, None, unit, cgroup, container, kubernetes, lineage)
+        Self::with_digest(
+            exe, None, unit, cgroup, container, None, kubernetes, lineage,
+        )
     }
 
-    /// Build a selector that may also name the executable by its digest.
+    /// Build a selector that may also name the executable by its digest and
+    /// the workload by the label its cgroup carries.
     ///
     /// # Errors
     ///
-    /// The refusals [`Self::with_lineage`] documents. A digest alone is a
-    /// selector: it names a workload more narrowly than a path does.
+    /// The refusals [`Self::with_lineage`] documents, and a label longer than
+    /// the kernel reads off a cgroup. A digest alone is a selector: it names
+    /// a workload more narrowly than a path does. So is a label alone.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_digest(
         exe: Option<String>,
         exe_hash: Option<ExeHash>,
         unit: Option<String>,
         cgroup: Option<String>,
         container: Option<String>,
+        cgroup_label: Option<String>,
         kubernetes: KubernetesMatchers,
         lineage: LineageMatchers,
     ) -> Result<Self, FirewallError> {
         let selector = Self {
             exe_hash,
+            cgroup_label: trimmed(cgroup_label),
             ..Self::assemble(exe, unit, cgroup, container, kubernetes, lineage, None)
         };
         selector.validate()?;
@@ -299,6 +317,7 @@ impl WorkloadSelector {
             unit: trimmed(unit),
             cgroup: trimmed(cgroup),
             container: trimmed(container),
+            cgroup_label: None,
             pods: kubernetes.pods,
             namespaces: kubernetes.namespaces,
             service_account: trimmed(kubernetes.service_account),
@@ -329,8 +348,8 @@ impl WorkloadSelector {
         if self.is_empty() {
             return Err(FirewallError::InvalidWorkloadSelector {
                 reason: "a workload selector must name at least one of exe, exe_hash, unit, \
-                         cgroup, container, pods, namespaces, service_account, parent, ancestor \
-                         or guest"
+                         cgroup, container, cgroup_label, pods, namespaces, service_account, \
+                         parent, ancestor or guest"
                     .to_string(),
             });
         }
@@ -364,6 +383,24 @@ impl WorkloadSelector {
                 reason: "a guest is named alone: its processes, units, cgroups and containers \
                          run in its own kernel, where the host sees none of them"
                     .to_string(),
+            });
+        }
+        if let Some(label) = self.cgroup_label.as_deref()
+            && label.len() > WORKLOAD_LABEL_MAX_LEN
+        {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: format!(
+                    "cgroup_label is {} bytes, more than the {WORKLOAD_LABEL_MAX_LEN} the kernel \
+                     reads off a cgroup",
+                    label.len()
+                ),
+            });
+        }
+        if let Some(label) = self.cgroup_label.as_deref()
+            && label.chars().any(char::is_control)
+        {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: "cgroup_label contains a control character".to_string(),
             });
         }
         if self.parent.is_some() && self.ancestor.is_some() {
@@ -483,6 +520,7 @@ impl WorkloadSelector {
             && self.unit.is_none()
             && self.cgroup.is_none()
             && self.container.is_none()
+            && self.cgroup_label.is_none()
             && !self.names_kubernetes()
     }
 
@@ -497,8 +535,20 @@ impl WorkloadSelector {
             && self.unit.is_none()
             && self.cgroup.is_none()
             && self.container.is_none()
+            && self.cgroup_label.is_none()
             && self.guest.is_none()
             && !self.names_kubernetes()
+    }
+
+    /// Whether the workload label is the only thing this selector names, so
+    /// the kernel can decide it from the label it reads off the calling
+    /// task's cgroup, without waiting for userspace to resolve the cgroup.
+    #[must_use]
+    pub fn cgroup_label_only(&self) -> bool {
+        self.cgroup_label.is_some()
+            && self.matchers().count() == 1
+            && self.exe_hash.is_none()
+            && self.label_selectors().next().is_none()
     }
 
     /// The matchers that are set, as field name and value.
@@ -508,6 +558,7 @@ impl WorkloadSelector {
             ("unit", self.unit.as_deref()),
             ("cgroup", self.cgroup.as_deref()),
             ("container", self.container.as_deref()),
+            ("cgroup_label", self.cgroup_label.as_deref()),
             ("service_account", self.service_account.as_deref()),
             ("parent", self.parent.as_deref()),
             ("ancestor", self.ancestor.as_deref()),
@@ -591,6 +642,11 @@ impl WorkloadSelector {
         }
         if let Some(container) = self.container.as_deref()
             && !container_matches(container, facts)
+        {
+            return false;
+        }
+        if let Some(label) = self.cgroup_label.as_deref()
+            && facts.cgroup_label != Some(label)
         {
             return false;
         }
@@ -751,6 +807,8 @@ pub struct WorkloadFacts<'a> {
     pub container_id: Option<&'a str>,
     /// Container name, where a runtime enricher could read one.
     pub container_name: Option<&'a str>,
+    /// Workload label set on the task's cgroup.
+    pub cgroup_label: Option<&'a str>,
     /// Labels of the pod the task runs in, on a Kubernetes node whose pod
     /// was found.
     pub pod_labels: Option<&'a BTreeMap<String, String>>,
@@ -1629,6 +1687,57 @@ mod tests {
             !selector.matches(&verity),
             "a verity digest is another function of the file"
         );
+    }
+
+    fn labelled(label: &str, unit: Option<&str>) -> Result<WorkloadSelector, FirewallError> {
+        WorkloadSelector::with_digest(
+            None,
+            None,
+            unit.map(str::to_string),
+            None,
+            None,
+            Some(label.to_string()),
+            KubernetesMatchers::default(),
+            LineageMatchers::default(),
+        )
+    }
+
+    #[test]
+    fn a_cgroup_label_alone_is_a_selector_the_kernel_can_decide() {
+        let alone = labelled("payments-batch", None).expect("a label names a workload");
+        assert!(!alone.is_empty());
+        assert!(alone.cgroup_label_only());
+        assert!(!alone.exe_only());
+        assert!(!alone.lineage_only());
+        assert_eq!(alone.describe(), "cgroup_label=payments-batch");
+
+        let with_unit = labelled("payments-batch", Some("batch.service")).expect("valid");
+        assert!(!with_unit.cgroup_label_only());
+        assert!(!WorkloadSelector::default().cgroup_label_only());
+    }
+
+    #[test]
+    fn a_cgroup_label_matches_exactly_and_only_where_the_cgroup_carries_it() {
+        let selector = labelled("payments-batch", None).expect("valid");
+        let carried = WorkloadFacts {
+            cgroup_label: Some("payments-batch"),
+            ..WorkloadFacts::default()
+        };
+        assert!(selector.matches(&carried));
+        for other in [Some("payments"), Some("payments-batch-2"), None] {
+            let facts = WorkloadFacts {
+                cgroup_label: other,
+                ..WorkloadFacts::default()
+            };
+            assert!(!selector.matches(&facts), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_cgroup_label_the_kernel_could_not_read_whole_is_refused() {
+        assert!(labelled(&"a".repeat(WORKLOAD_LABEL_MAX_LEN), None).is_ok());
+        assert!(labelled(&"a".repeat(WORKLOAD_LABEL_MAX_LEN + 1), None).is_err());
+        assert!(labelled("pay\nments", None).is_err());
     }
 
     #[test]

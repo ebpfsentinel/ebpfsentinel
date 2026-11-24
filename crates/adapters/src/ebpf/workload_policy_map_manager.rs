@@ -40,9 +40,10 @@ use domain::firewall::workload::{WorkloadPolicy, WorkloadRule, WorkloadSelector}
 use ebpf_common::exec_network::ExecNetKey;
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_ALLOW, WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
-    WORKLOAD_FAMILY_IPV6, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WORKLOAD_RULE_SENT, WorkloadExeKey, WorkloadFqdnKey,
-    WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
+    WORKLOAD_FAMILY_IPV6, WORKLOAD_LABEL_KEY_LEN, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE,
+    WORKLOAD_POLICY_MAX_RULES, WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WORKLOAD_RULE_SENT,
+    WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey,
+    WorkloadRuleEntry, workload_label_key,
 };
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{info, warn};
@@ -63,6 +64,8 @@ pub struct WorkloadPolicyMapManager {
     peer_destinations: AyaHashMap<MapData, WorkloadPeerKey, u64>,
     peer_sources: AyaHashMap<MapData, WorkloadPeerKey, u64>,
     peer_targets: AyaHashMap<MapData, u64, u64>,
+    labels: AyaHashMap<MapData, [u8; WORKLOAD_LABEL_KEY_LEN], u64>,
+    label_config: Array<MapData, u64>,
     /// The offsets the walk reads, or why the running kernel's BTF did not
     /// give them.
     offsets: Result<WorkloadLineageConfig, String>,
@@ -90,6 +93,36 @@ pub struct LineagePlan {
 /// What the kernel reads of `selectors` at the call: the executable the
 /// calling task runs and its lineage, each selector given with the bit it
 /// holds.
+/// The labels the kernel reads off a task's cgroup, each with the selectors
+/// that name it and nothing else, and those selectors' bits ORed.
+///
+/// A selector naming a label beside anything else is left to userspace,
+/// which reads the label with the rest when it resolves the cgroup: the
+/// kernel can only vouch for the label.
+#[must_use]
+pub fn label_plan(
+    selectors: &[(usize, &WorkloadSelector)],
+) -> (BTreeMap<[u8; WORKLOAD_LABEL_KEY_LEN], u64>, u64) {
+    let mut labels = BTreeMap::new();
+    let mut named = 0u64;
+    for &(index, selector) in selectors {
+        if !selector.cgroup_label_only() {
+            continue;
+        }
+        let Some(key) = selector
+            .cgroup_label
+            .as_deref()
+            .and_then(|label| workload_label_key(label.as_bytes()))
+        else {
+            continue;
+        };
+        let bit = 1u64 << (index & 63);
+        *labels.entry(key).or_insert(0) |= bit;
+        named |= bit;
+    }
+    (labels, named)
+}
+
 #[must_use]
 pub fn lineage_plan(selectors: &[(usize, &WorkloadSelector)]) -> LineagePlan {
     let mut plan = LineagePlan::default();
@@ -203,6 +236,14 @@ impl WorkloadPolicyMapManager {
             ebpf.take_map("WORKLOAD_PEER_TARGETS")
                 .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_PEER_TARGETS' not found"))?,
         )?;
+        let labels = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_LABEL_SELECTORS")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_LABEL_SELECTORS' not found"))?,
+        )?;
+        let label_config = Array::try_from(
+            ebpf.take_map("WORKLOAD_LABEL_CONFIG")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_LABEL_CONFIG' not found"))?,
+        )?;
         info!("workload policy tables acquired");
         Ok(Self {
             rules,
@@ -216,6 +257,8 @@ impl WorkloadPolicyMapManager {
             peer_destinations,
             peer_sources,
             peer_targets,
+            labels,
+            label_config,
             offsets: lineage_offsets(),
             lineage_paths: BTreeMap::new(),
         })
@@ -228,6 +271,31 @@ impl WorkloadPolicyMapManager {
     /// an LRU doing its job.
     fn keys<K: aya::Pod + Copy, V: aya::Pod>(map: &AyaHashMap<MapData, K, V>) -> Vec<K> {
         map.keys().filter_map(Result::ok).collect()
+    }
+
+    /// Write the labels the kernel reads off a task's cgroup.
+    ///
+    /// The gate goes to zero first and back up last, so a hook never reads
+    /// a label table halfway between two policies.
+    fn publish_labels(
+        &mut self,
+        selectors: &[(usize, &WorkloadSelector)],
+    ) -> Result<(), DomainError> {
+        let (labels, named) = label_plan(selectors);
+        self.label_config.set(0, &0, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_LABEL_CONFIG write failed: {e}"))
+        })?;
+        for key in Self::keys(&self.labels) {
+            let _ = self.labels.remove(&key);
+        }
+        for (key, bits) in &labels {
+            self.labels.insert(key, bits, 0).map_err(|e| {
+                DomainError::EngineError(format!("WORKLOAD_LABEL_SELECTORS write failed: {e}"))
+            })?;
+        }
+        self.label_config.set(0, &named, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_LABEL_CONFIG write failed: {e}"))
+        })
     }
 
     /// Write what `selectors` ask of the lineage walk.
@@ -358,6 +426,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         // written decide it rightly until the caller writes them again, and
         // clearing them would let every selected task through meanwhile.
         self.publish_lineage(&selectors)?;
+        self.publish_labels(&selectors)?;
         for key in Self::keys(&self.fqdn) {
             let _ = self.fqdn.remove(&key);
         }
@@ -765,6 +834,39 @@ mod tests {
             },
         )
         .expect("a lineage selector is valid")
+    }
+
+    fn labelled(label: &str, unit: Option<&str>) -> WorkloadSelector {
+        WorkloadSelector::with_digest(
+            None,
+            None,
+            unit.map(str::to_string),
+            None,
+            None,
+            Some(label.to_string()),
+            domain::firewall::workload::KubernetesMatchers::default(),
+            domain::firewall::workload::LineageMatchers::default(),
+        )
+        .expect("a labelled selector is valid")
+    }
+
+    #[test]
+    fn only_a_selector_naming_a_label_alone_is_handed_to_the_kernel() {
+        let alone = labelled("billing", None);
+        let again = labelled("billing", None);
+        let with_unit = labelled("billing", Some("billing.service"));
+        let (labels, named) = label_plan(&[(0, &alone), (3, &again), (5, &with_unit)]);
+        assert_eq!(named, 0b1001);
+        assert_eq!(labels.len(), 1);
+        let key = workload_label_key(b"billing").expect("short");
+        assert_eq!(labels.get(&key), Some(&0b1001));
+    }
+
+    #[test]
+    fn a_policy_naming_no_label_leaves_the_label_read_off() {
+        let unit = WorkloadSelector::new(None, Some("nginx.service".to_string()), None, None)
+            .expect("valid");
+        assert_eq!(label_plan(&[(0, &unit)]), (BTreeMap::new(), 0));
     }
 
     #[test]

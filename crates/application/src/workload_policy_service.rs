@@ -75,6 +75,9 @@ pub struct ResolvedWorkload {
     pub container_id: Option<String>,
     /// Container name, where an enricher read one.
     pub container_name: Option<String>,
+    /// The workload label set on the cgroup directory, where the agent read
+    /// one.
+    pub cgroup_label: Option<String>,
     /// Labels of the pod, where the Kubernetes enricher found it.
     pub pod_labels: Option<BTreeMap<String, String>>,
     /// Labels of the pod's namespace, once the namespace watcher saw it.
@@ -116,6 +119,7 @@ impl ResolvedWorkload {
             cgroup: self.cgroup.as_deref(),
             container_id: self.container_id.as_deref(),
             container_name: self.container_name.as_deref(),
+            cgroup_label: self.cgroup_label.as_deref(),
             pod_labels: self.pod_labels.as_ref(),
             namespace_labels: self.namespace_labels.as_ref(),
             service_account: self.service_account.as_deref(),
@@ -800,7 +804,7 @@ impl WorkloadPolicyService {
                 }
                 None => workload_of_cgroup(&path),
             };
-            if self.write_cgroup(cgroup_id, &resolved) {
+            if self.write_cgroup(cgroup_id, &self.labelled(resolved)) {
                 seeded += 1;
             }
         }
@@ -874,7 +878,7 @@ impl WorkloadPolicyService {
         let (Some(tree), Some(maps)) = (&self.tree, &self.maps) else {
             return;
         };
-        let Some(pod) = pod_workload_of(context) else {
+        let Some(pod) = pod_workload_of(context).map(|pod| self.labelled(pod)) else {
             return;
         };
         let Some(cgroup_id) = pod.cgroup.as_deref().and_then(|path| tree.id_of(path)) else {
@@ -935,7 +939,7 @@ impl WorkloadPolicyService {
         let mut written = 0usize;
         for (cgroup_id, context) in &named {
             self.name_pod(context);
-            if self.write_cgroup(*cgroup_id, &workload_of_container(context)) {
+            if self.write_cgroup(*cgroup_id, &self.labelled(workload_of_container(context))) {
                 written += 1;
             }
         }
@@ -969,6 +973,17 @@ impl WorkloadPolicyService {
             .as_deref()
             .and_then(unit_of)
             .map(ToOwned::to_owned);
+        self.labelled(resolved)
+    }
+
+    /// `resolved`, with the workload label its cgroup directory carries
+    /// where the service holds a tree to read it from.
+    fn labelled(&self, mut resolved: ResolvedWorkload) -> ResolvedWorkload {
+        if resolved.cgroup_label.is_none()
+            && let (Some(tree), Some(path)) = (&self.tree, resolved.cgroup.as_deref())
+        {
+            resolved.cgroup_label = tree.label_of(path);
+        }
         resolved
     }
 
@@ -1880,6 +1895,74 @@ mod tests {
         assert_eq!(unit.count_ones(), 1);
         assert_eq!(scope.count_ones(), 1);
         assert_ne!(unit, scope);
+        assert_eq!(held.cgroups.get(&9), None);
+    }
+
+    struct LabelledTree(Vec<(u64, String, Option<String>)>);
+
+    impl CgroupTree for LabelledTree {
+        fn cgroups(&self) -> Vec<(u64, String)> {
+            self.0.iter().map(|(id, p, _)| (*id, p.clone())).collect()
+        }
+
+        fn id_of(&self, path: &str) -> Option<u64> {
+            self.0
+                .iter()
+                .find(|(_, p, _)| p == path)
+                .map(|(id, _, _)| *id)
+        }
+
+        fn label_of(&self, path: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(_, p, _)| p == path)
+                .and_then(|(_, _, label)| label.clone())
+        }
+    }
+
+    fn label_rule(id: &str, label: &str) -> WorkloadRule {
+        rule(
+            id,
+            WorkloadSelector::with_digest(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(label.to_string()),
+                domain::firewall::workload::KubernetesMatchers::default(),
+                domain::firewall::workload::LineageMatchers::default(),
+            )
+            .expect("a valid label"),
+        )
+    }
+
+    #[test]
+    fn a_cgroup_carrying_the_label_a_rule_names_is_named_by_it_and_no_other() {
+        let maps = SharedMaps::default();
+        let service = WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![label_rule("billing", "billing")]).unwrap(),
+        )
+        .with_maps(Box::new(maps.clone()))
+        .with_cgroup_tree(Arc::new(LabelledTree(vec![
+            (
+                7,
+                "/workloads/billing".to_string(),
+                Some("billing".to_string()),
+            ),
+            (
+                8,
+                "/workloads/search".to_string(),
+                Some("search".to_string()),
+            ),
+            (9, "/workloads/plain".to_string(), None),
+        ])));
+
+        service.apply(service.policy()).unwrap();
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.cgroups.get(&7), Some(&0b1));
+        assert_eq!(held.cgroups.get(&8), None);
         assert_eq!(held.cgroups.get(&9), None);
     }
 

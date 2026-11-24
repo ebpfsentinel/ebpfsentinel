@@ -599,6 +599,13 @@ pub struct WorkloadMatchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
 
+    /// Workload label of the task's cgroup: the value of the
+    /// `user.ebpfsentinel.workload` extended attribute on its directory,
+    /// compared exactly, at most 63 bytes. Whoever starts the workload sets
+    /// it with `setfattr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_label: Option<String>,
+
     /// Labels of the pod the task runs in, as `match_labels` and
     /// `match_expressions` with the Kubernetes meaning. `{}` names every pod
     /// on the node and no process outside one. Needs the Kubernetes enricher.
@@ -679,6 +686,7 @@ impl WorkloadMatchConfig {
             self.unit.clone(),
             self.cgroup.clone(),
             self.container.clone(),
+            self.cgroup_label.clone(),
             KubernetesMatchers {
                 pods: self.pods.clone(),
                 namespaces: self.namespaces.clone(),

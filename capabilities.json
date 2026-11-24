@@ -73,6 +73,15 @@
       "unlocks": "rules on what a named workload may connect to, send to or bind, decided in the syscall"
     },
     {
+      "condition": "a kernel built with it",
+      "fallback": "labels are read by the agent off the cgroup directory when it resolves the cgroup",
+      "id": "cgroup_labels",
+      "needs_lsm": false,
+      "probe": "loaded",
+      "since": "6.18",
+      "unlocks": "a workload label set on a cgroup directory read by the kernel at the call, for a cgroup the agent has not resolved yet"
+    },
+    {
       "condition": "turned on in the configuration and attached on the node",
       "fallback": "a quarantine is refused with the reason and the alert still fires",
       "id": "quarantine",

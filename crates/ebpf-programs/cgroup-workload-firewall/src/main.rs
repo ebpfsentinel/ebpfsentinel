@@ -65,8 +65,8 @@ use aya_ebpf::{
     bindings::BPF_F_NO_PREALLOC,
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
-        bpf_get_current_ancestor_cgroup_id, bpf_get_current_cgroup_id, bpf_get_current_task,
-        bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
+        bpf_dynptr_from_mem, bpf_get_current_ancestor_cgroup_id, bpf_get_current_cgroup_id,
+        bpf_get_current_task, bpf_get_current_task_btf, bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
         bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
@@ -90,7 +90,9 @@ use ebpf_common::quarantine::{
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
     WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
-    WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6, WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND,
+    WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL, WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6,
+    WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND, WORKLOAD_LABEL_KEY_LEN, WORKLOAD_LABEL_MAX_LEN,
+    WORKLOAD_LABEL_XATTR, WORKLOAD_POLICY_MAX_SELECTORS, WORKLOAD_TASK_CGROUPS_SENTINEL,
     WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
     WORKLOAD_LINEAGE_MAX_DEPTH, WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED,
     WORKLOAD_METRIC_BIND, WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
@@ -102,6 +104,7 @@ use ebpf_common::workload_policy::{
     WORKLOAD_RULE_SENT, WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey,
     WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
+use ebpf_helpers::kfuncs::{BpfDynptr, bpf_cgroup_read_xattr, cgroup};
 use ebpf_helpers::raw_skb;
 use ebpf_helpers::{increment_metric, opaque_usize};
 
@@ -171,6 +174,28 @@ static WORKLOAD_LINEAGE_EXES: HashMap<
 /// walk reads. Zeroed, it costs a policy naming no lineage one array read.
 #[btf_map]
 static WORKLOAD_LINEAGE_CONFIG: Array<WorkloadLineageConfig, 1> = Array::new();
+
+/// A workload label -> the selectors that name that label and nothing else.
+///
+/// Read only by the programs that read a label off the calling task's
+/// cgroup; the label is the key, zero-padded, so the kernel still compares
+/// bytes it was handed rather than parsing anything.
+#[btf_map]
+static WORKLOAD_LABEL_SELECTORS: HashMap<
+    [u8; WORKLOAD_LABEL_KEY_LEN],
+    u64,
+    { WORKLOAD_POLICY_MAX_SELECTORS },
+    ON_INSERT,
+> = HashMap::new();
+
+/// Every selector bit in `WORKLOAD_LABEL_SELECTORS`, ORed. Zero, which it is
+/// on a policy naming no label, skips the read altogether.
+#[btf_map]
+static WORKLOAD_LABEL_CONFIG: Array<u64, 1> = Array::new();
+
+/// The attribute name handed to the kernel, which takes it only from
+/// read-only memory it can check at load.
+static LABEL_XATTR: [u8; WORKLOAD_LABEL_XATTR.len()] = WORKLOAD_LABEL_XATTR;
 
 /// What the policy did, per CPU.
 #[btf_map]
@@ -346,26 +371,26 @@ const IPV6_HEADER_LEN: usize = 40;
 /// A workload asking for an IPv4 connection.
 #[cgroup_sock_addr(connect4)]
 pub fn workload_connect4(ctx: SockAddrContext) -> i32 {
-    answer::<false>(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer::<false, false>(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload asking for an IPv6 connection.
 #[cgroup_sock_addr(connect6)]
 pub fn workload_connect6(ctx: SockAddrContext) -> i32 {
-    answer::<true>(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer::<true, false>(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload sending a datagram with no connection, the path almost all DNS
 /// takes.
 #[cgroup_sock_addr(sendmsg4)]
 pub fn workload_sendmsg4(ctx: SockAddrContext) -> i32 {
-    answer::<false>(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer::<false, false>(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(sendmsg6)]
 pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
-    answer::<true>(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer::<true, false>(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// A workload taking an IPv4 local address, before the kernel assigns it.
@@ -375,13 +400,51 @@ pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
 /// listener may sit.
 #[cgroup_sock_addr(bind4)]
 pub fn workload_bind4(ctx: SockAddrContext) -> i32 {
-    answer::<false>(&ctx, WORKLOAD_HOOK_BIND)
+    answer::<false, false>(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(bind6)]
 pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
-    answer::<true>(&ctx, WORKLOAD_HOOK_BIND)
+    answer::<true, false>(&ctx, WORKLOAD_HOOK_BIND)
+}
+
+/// `workload_connect4`, also reading the workload label off the calling
+/// task's cgroup. The agent attaches these six in place of the six above
+/// when the kernel loads all of them.
+#[cgroup_sock_addr(connect4)]
+pub fn workload_connect4_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<false, true>(&ctx, WORKLOAD_HOOK_CONNECT)
+}
+
+/// `workload_connect6`, reading the label.
+#[cgroup_sock_addr(connect6)]
+pub fn workload_connect6_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<true, true>(&ctx, WORKLOAD_HOOK_CONNECT)
+}
+
+/// `workload_sendmsg4`, reading the label.
+#[cgroup_sock_addr(sendmsg4)]
+pub fn workload_sendmsg4_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<false, true>(&ctx, WORKLOAD_HOOK_SENDMSG)
+}
+
+/// `workload_sendmsg6`, reading the label.
+#[cgroup_sock_addr(sendmsg6)]
+pub fn workload_sendmsg6_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<true, true>(&ctx, WORKLOAD_HOOK_SENDMSG)
+}
+
+/// `workload_bind4`, reading the label.
+#[cgroup_sock_addr(bind4)]
+pub fn workload_bind4_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<false, true>(&ctx, WORKLOAD_HOOK_BIND)
+}
+
+/// `workload_bind6`, reading the label.
+#[cgroup_sock_addr(bind6)]
+pub fn workload_bind6_labelled(ctx: SockAddrContext) -> i32 {
+    answer::<true, true>(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// A packet leaving a socket, which is where a workload's DNS query is seen
@@ -553,14 +616,14 @@ fn capture(ctx: &SkBuffContext, direction: u8) {
 /// one. A family read at run time leaves both reads in all six programs, so
 /// none of them loads; a family fixed at compile time leaves each program
 /// only the one its hook allows.
-fn answer<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
+fn answer<const V6: bool, const LABELS: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     if let Some(verdict) = quarantined(hook) {
         return verdict;
     }
     if let Some(verdict) = netpol_egress::<V6>(ctx, hook) {
         return verdict;
     }
-    decide::<V6>(ctx, hook)
+    decide::<V6, LABELS>(ctx, hook)
 }
 
 /// Whether this task's cgroup is cut off, and what that means for this
@@ -612,7 +675,7 @@ fn record_quarantine(cgroup: u64, hook: u8, outcome: u32) {
 /// Nothing is counted on a node with no policy: the hooks stay attached when
 /// the last rule is removed, and a counter climbing on an empty policy would
 /// be a figure about the attachment rather than about the product.
-fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
+fn decide<const V6: bool, const LABELS: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     let Some(first) = WORKLOAD_RULES.get(0) else {
         return ALLOW;
     };
@@ -621,7 +684,7 @@ fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     }
     increment_metric!(WORKLOAD_METRICS, hook_metric(hook));
 
-    let resolved = selectors() | running();
+    let resolved = selectors() | running() | if LABELS { labelled() } else { 0 };
     let mask = with_lineage(resolved);
     if resolved == 0 && mask == 0 {
         // A task userspace has not placed in any selector yet. Counting it is
@@ -768,6 +831,81 @@ fn running() -> u64 {
     let task = unsafe { bpf_get_current_task() };
     match executable_bits(task, config) {
         Some(bits) => bits.own & config.own,
+        None => 0,
+    }
+}
+
+/// The selectors naming the label the calling task's cgroup carries.
+///
+/// The cgroup is the task's own on the unified hierarchy, reached as
+/// `task->cgroups->dfl_cgrp`: two field reads of the trusted pointer
+/// `bpf_get_current_task_btf` returns, which the verifier lets a
+/// non-sleepable program hand to an RCU kfunc. The offsets are the loader's,
+/// written over the sentinels from the kernel's BTF. A label on a cgroup
+/// above the task's own is not read.
+#[inline(always)]
+fn labelled() -> u64 {
+    let Some(named) = WORKLOAD_LABEL_CONFIG.get(0) else {
+        return 0;
+    };
+    let named = *named;
+    if named == 0 {
+        return 0;
+    }
+    // SAFETY: a helper with no argument; it returns the running task.
+    let task = unsafe { bpf_get_current_task_btf() }.cast::<u8>();
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: the verifier checks this load as a read of `task_struct.cgroups`
+    // once the loader has written the field's offset over the sentinel, and
+    // refuses the program otherwise; it is never a raw read of task memory.
+    let css_set = unsafe {
+        core::ptr::read_volatile(
+            task.wrapping_offset(isize::from(WORKLOAD_TASK_CGROUPS_SENTINEL))
+                .cast::<*const u8>(),
+        )
+    };
+    if css_set.is_null() {
+        return 0;
+    }
+    // SAFETY: as above, a read of `css_set.dfl_cgrp` the verifier checks.
+    let cgrp = unsafe {
+        core::ptr::read_volatile(
+            css_set
+                .wrapping_offset(isize::from(WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL))
+                .cast::<*mut cgroup>(),
+        )
+    };
+    if cgrp.is_null() {
+        return 0;
+    }
+    let mut key = [0u8; WORKLOAD_LABEL_KEY_LEN];
+    let mut value = BpfDynptr::uninit();
+    // SAFETY: the dynptr covers the first `WORKLOAD_LABEL_MAX_LEN` bytes of
+    // `key`, a stack buffer that outlives it, leaving the last byte zero.
+    let made = unsafe {
+        bpf_dynptr_from_mem(
+            key.as_mut_ptr().cast(),
+            WORKLOAD_LABEL_MAX_LEN as u64,
+            0,
+            (&raw mut value).cast(),
+        )
+    };
+    if made != 0 {
+        return 0;
+    }
+    // SAFETY: `cgrp` is the trusted pointer read above, `LABEL_XATTR` is a
+    // NUL-terminated static in read-only memory and `value` was initialised
+    // over `key` just above.
+    let read = unsafe { bpf_cgroup_read_xattr(cgrp, LABEL_XATTR.as_ptr(), &raw mut value) };
+    if read <= 0 {
+        return 0;
+    }
+    // SAFETY: the value is copied out at once and never held across a map
+    // update.
+    match unsafe { WORKLOAD_LABEL_SELECTORS.get(&key) } {
+        Some(bits) => *bits & named,
         None => 0,
     }
 }

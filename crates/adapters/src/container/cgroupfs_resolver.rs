@@ -1,5 +1,11 @@
+#![allow(unsafe_code)] // libc getxattr for the workload label on a cgroup directory.
+
+use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+use ebpf_common::workload_policy::{WORKLOAD_LABEL_MAX_LEN, WORKLOAD_LABEL_XATTR};
 
 use domain::container::engine::{CgroupIdResolver, CgroupTree};
 
@@ -116,6 +122,40 @@ impl CgroupTree for CgroupfsResolver {
         let meta = std::fs::metadata(self.root.join(relative)).ok()?;
         meta.is_dir().then(|| meta.ino())
     }
+
+    fn label_of(&self, path: &str) -> Option<String> {
+        let relative = path.trim_start_matches('/');
+        if relative.split('/').any(|part| part == "..") {
+            return None;
+        }
+        read_label(&self.root.join(relative))
+    }
+}
+
+/// The value of the workload label attribute on `dir`, as a label a selector
+/// can name: at most [`WORKLOAD_LABEL_MAX_LEN`] bytes of UTF-8 with no
+/// control character. Anything else reads as no label, which is also what
+/// the kernel finds for a value too long for its buffer.
+fn read_label(dir: &Path) -> Option<String> {
+    let path = CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let name = CStr::from_bytes_with_nul(&WORKLOAD_LABEL_XATTR).ok()?;
+    let mut value = [0u8; WORKLOAD_LABEL_MAX_LEN + 1];
+    // SAFETY: both names are NUL-terminated and live across the call, and the
+    // kernel writes at most `value.len()` bytes into `value`.
+    let read = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    let len = usize::try_from(read).ok()?;
+    if len == 0 || len > WORKLOAD_LABEL_MAX_LEN {
+        return None;
+    }
+    let label = std::str::from_utf8(&value[..len]).ok()?;
+    (!label.chars().any(char::is_control)).then(|| label.to_owned())
 }
 
 /// The id the kernel would report for the root of the unified hierarchy.
@@ -169,6 +209,47 @@ mod tests {
         );
         assert_eq!(tree.id_of("/kubepods/gone"), None);
         assert_eq!(tree.id_of("/kubepods/../kubepods"), None);
+    }
+
+    /// Sets the label attribute on `dir`, or answers `false` where the
+    /// filesystem the test runs on keeps no `user.` attribute.
+    fn set_label(dir: &Path, value: &[u8]) -> bool {
+        let path = CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let name = CStr::from_bytes_with_nul(&WORKLOAD_LABEL_XATTR).unwrap();
+        // SAFETY: NUL-terminated names and a value slice live across the call.
+        let rc = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        rc == 0
+    }
+
+    #[test]
+    fn a_label_set_on_the_cgroup_directory_is_read_back_and_a_bad_one_is_not() {
+        let dir = tempdir().unwrap();
+        let unit = dir.path().join("system.slice").join("billing.service");
+        fs::create_dir_all(&unit).unwrap();
+        let tree = CgroupfsResolver::new(dir.path());
+        assert_eq!(tree.label_of("/system.slice/billing.service"), None);
+        if !set_label(&unit, b"billing") {
+            return;
+        }
+        assert_eq!(
+            tree.label_of("/system.slice/billing.service").as_deref(),
+            Some("billing")
+        );
+        // The parent carries none, and a label is not read through `..`.
+        assert_eq!(tree.label_of("/system.slice"), None);
+        assert_eq!(tree.label_of("/x/../system.slice/billing.service"), None);
+        assert!(set_label(&unit, &[b'a'; WORKLOAD_LABEL_MAX_LEN + 1]));
+        assert_eq!(tree.label_of("/system.slice/billing.service"), None);
+        assert!(set_label(&unit, b"bill\ning"));
+        assert_eq!(tree.label_of("/system.slice/billing.service"), None);
     }
 
     #[test]

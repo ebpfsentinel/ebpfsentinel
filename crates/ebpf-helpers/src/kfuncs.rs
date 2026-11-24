@@ -30,6 +30,7 @@
 //! | `bpf_cast_to_kern_ctx`          | 6.2    | `void *(*)(void *obj) __ksym;`                                                                                                                   |
 //! | `bpf_sock_ops_enable_tx_tstamp` | 6.15   | `int(*)(struct bpf_sock_ops_kern *skops, u64 flags) __ksym;`                                                                                     |
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
+//! | `bpf_cgroup_read_xattr`         | 6.17   | `int(*)(struct cgroup *cgroup, const char *name__str, struct bpf_dynptr *value_p) __ksym;`                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
@@ -482,6 +483,20 @@ unsafe extern "C" {
     /// `flags` must be 0. Returns `0` on success, `-EOPNOTSUPP` from any
     /// other callback, negative errno otherwise.
     pub fn bpf_sock_ops_enable_tx_tstamp(skops: *mut core::ffi::c_void, flags: u64) -> i32;
+
+    // ── Kernel 6.17 cgroup extended attributes ─────────────────
+    //
+    // Built only into a kernel with `CONFIG_BPF_LSM`, and offered to every
+    // program type there. `name` must name a `user.` attribute and point
+    // into a frozen read-only map, which a `static` in `.rodata` is;
+    // `cgroup` must be a trusted or RCU-protected pointer.
+
+    /// Copy the value of extended attribute `name` of `cgroup`'s directory
+    /// into the memory behind `value`. Kernel 6.17+. Returns the value's
+    /// length, `-ERANGE` when it does not fit, another negative errno when
+    /// it is not set or cannot be read.
+    pub fn bpf_cgroup_read_xattr(cgroup: *mut cgroup, name: *const u8, value: *mut BpfDynptr)
+    -> i32;
 }
 
 // ── Host-target stubs ────────────────────────────────────────────

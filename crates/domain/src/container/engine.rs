@@ -43,6 +43,14 @@ pub trait CgroupTree: Send + Sync {
     fn id_of(&self, _path: &str) -> Option<u64> {
         None
     }
+
+    /// The workload label set on the directory of the cgroup at `path`, in
+    /// the `user.` extended attribute the kernel reads it from, or `None`
+    /// where none is set, it cannot be read or it is not a label a selector
+    /// can name.
+    fn label_of(&self, _path: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Default LRU capacity if no configuration override is provided.

@@ -176,6 +176,16 @@ pub const CATALOGUE: &[Capability] = &[
                    to start rather than running unenforced",
     },
     Capability {
+        id: "cgroup_labels",
+        unlocks: "a workload label set on a cgroup directory read by the kernel at the call, \
+                  for a cgroup the agent has not resolved yet",
+        probe: ProbeKind::Loaded,
+        since: KernelVersion::FLOOR,
+        needs_lsm: false,
+        fallback: "labels are read by the agent off the cgroup directory when it resolves the \
+                   cgroup",
+    },
+    Capability {
         id: "quarantine",
         unlocks: "a workload cut off from the network in the kernel for a bounded time",
         probe: ProbeKind::AttachStatus,
@@ -330,6 +340,7 @@ mod tests {
         "attribution",
         "process_tracing",
         "workload_firewall",
+        "cgroup_labels",
         "quarantine",
         "process_signal",
         "immediate_signal",

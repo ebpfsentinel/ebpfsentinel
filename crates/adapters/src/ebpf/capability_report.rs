@@ -26,6 +26,7 @@ use super::kernel_probe::distribution_family;
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
 use super::signal_task::DirectSignalProbe;
+use super::workload_firewall_attach::CgroupLabelProbe;
 
 /// What to do where the BPF LSM is not active and the probe named no remedy.
 const LSM_BOOT_PARAMETER: &str =
@@ -372,6 +373,24 @@ pub fn dlp_record_evidence(status: &DlpRecordStatus) -> Evidence {
     }
 }
 
+/// The labelled builds of the workload firewall, restated as evidence.
+/// Nothing was offered to the kernel while the workload firewall did not
+/// load.
+#[must_use]
+pub fn cgroup_label_evidence(probe: &CgroupLabelProbe) -> Evidence {
+    let load = match (probe.loaded, probe.declared) {
+        (true, _) => Load::Loaded,
+        (false, None) => Load::NotRun(probe.reason.clone().unwrap_or_else(|| {
+            "the labelled programs are offered to the kernel with the workload firewall".to_string()
+        })),
+        (false, Some(_)) => Load::Refused(probe.reason.clone().unwrap_or_default()),
+    };
+    Evidence::Kfunc {
+        declared: probe.declared,
+        load,
+    }
+}
+
 /// All declared, any not declared, or unreadable.
 fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
     let mut all = Some(true);
@@ -407,6 +426,9 @@ fn host_evidence(id: &str) -> Option<Evidence> {
             let s = workload_firewall_attach::status();
             Some(attach_evidence(s.attached, s.reason))
         }
+        "cgroup_labels" => Some(cgroup_label_evidence(
+            &workload_firewall_attach::label_probe(),
+        )),
         "quarantine" => {
             let s = quarantine_map_manager::status();
             Some(attach_evidence(s.armed, s.reason))
@@ -680,6 +702,45 @@ mod tests {
             panic!("DLP off is not probed");
         };
         assert!(why.contains("dlp.enabled"), "{why}");
+    }
+
+    #[test]
+    fn the_cgroup_label_read_says_whether_the_kernel_or_the_agent_reads_it() {
+        let entry = find("cgroup_labels").expect("entry");
+        let loaded = cgroup_label_evidence(&CgroupLabelProbe {
+            declared: Some(true),
+            loaded: true,
+            reason: None,
+        });
+        assert_eq!(classify(entry, false, &loaded), None);
+
+        let undeclared = cgroup_label_evidence(&CgroupLabelProbe {
+            declared: Some(false),
+            loaded: false,
+            reason: Some("the kernel does not declare bpf_cgroup_read_xattr".into()),
+        });
+        assert_eq!(
+            classify(entry, false, &undeclared),
+            Some(Inactive::NotDeclared)
+        );
+
+        let refused = cgroup_label_evidence(&CgroupLabelProbe {
+            declared: Some(true),
+            loaded: false,
+            reason: Some("the verifier refused workload_connect4_labelled: R1 invalid".into()),
+        });
+        assert_eq!(
+            classify(entry, false, &refused).expect("inactive").code(),
+            "refused"
+        );
+
+        let not_loaded = cgroup_label_evidence(&CgroupLabelProbe::default());
+        assert_eq!(
+            classify(entry, false, &not_loaded)
+                .expect("inactive")
+                .code(),
+            "not_probed"
+        );
     }
 
     #[test]

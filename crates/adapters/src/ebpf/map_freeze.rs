@@ -304,7 +304,7 @@ where
 ///
 /// `EBUSY` is the kernel saying the map is already frozen, which is the same
 /// outcome this asks for, so it is not an error.
-fn freeze_fd(name: &str, fd: BorrowedFd<'_>) -> Result<(), FreezeError> {
+pub(super) fn freeze_fd(name: &str, fd: BorrowedFd<'_>) -> Result<(), FreezeError> {
     let mut attr = MapFreezeAttr {
         #[allow(clippy::cast_sign_loss)]
         map_fd: fd.as_raw_fd() as u32,

@@ -224,6 +224,7 @@ suite_profiles:
   "146": datapath
   "147": datapath
   "148": datapath
+  "149": datapath
   "150": datapath
   "151": datapath
   "152": datapath
@@ -1152,11 +1153,11 @@ coverage:
 
   - kind: domain_module
     feature: workload
-    suites: ["67", "70", "92", "95"]
+    suites: ["67", "70", "92", "95", "149"]
     topology: none
     kernel_min: "6.18"
     profile: datapath
-    notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use"
+    notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use, 149 the label a cgroup directory carries"
 
   - kind: domain_module
     feature: clusterip
@@ -1332,6 +1333,14 @@ coverage:
     kernel_min: "6.18"
     profile: nightly
     notes: "Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99"
+
+  - kind: capability
+    feature: cgroup_labels
+    suites: ["149"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "A cgroup carrying the label a rule names refused, another label and none let through; the route and the start-up log name the path reading the label; where the kernel reads it, a label set on the client's own cgroup refuses its next connect, skipped where the agent reads it"
 
   - kind: capability
     feature: quarantine

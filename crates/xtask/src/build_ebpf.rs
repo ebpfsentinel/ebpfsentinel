@@ -46,6 +46,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
 // applied to every program.
 const KFUNC_EXPORTS: &[&str] = &[
     "bpf_cast_to_kern_ctx",
+    "bpf_cgroup_read_xattr",
     "bpf_copy_from_user_task_str",
     "bpf_ct_change_timeout",
     "bpf_ct_release",

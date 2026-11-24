@@ -1,7 +1,6 @@
 pub mod applayer;
 pub mod capture;
 pub mod dataset;
-pub mod reputation;
 pub mod dcerpc;
 pub mod dns;
 pub mod engine;
@@ -11,6 +10,7 @@ pub mod flow;
 pub mod http1;
 pub mod packet;
 pub mod prefilter;
+pub mod reputation;
 pub mod sig;
 pub mod smb;
 pub mod smtp;

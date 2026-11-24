@@ -6585,9 +6585,33 @@ pub fn try_load_cgroup_workload_firewall(
     config: &AgentConfig,
     attach: bool,
 ) -> anyhow::Result<LoadedWorkloadFirewall> {
+    use adapters::ebpf::workload_firewall_attach::{
+        CgroupLabelProbe, LABELLED_PROGRAMS, label_offsets, publish_label_probe,
+    };
     let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-workload-firewall")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // The labelled builds read two kernel struct fields whose offsets only
+    // the running kernel's BTF gives. Without them the sentinels stay, the
+    // verifier refuses those builds, and the plain ones attach instead.
+    let offsets = label_offsets();
+    let program_bytes = match &offsets {
+        Ok(pairs) => adapters::ebpf::kfunc_loader::patch_field_offsets(&program_bytes, pairs)?,
+        Err(_) => program_bytes,
+    };
+    let mut loader = EbpfLoader::load_with_pin_path_optional(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        LABELLED_PROGRAMS,
+    )?;
+    let label_probe = CgroupLabelProbe::of(&loader, offsets.map(drop));
+    match &label_probe.reason {
+        None => info!("workload labels are read off the cgroup in the kernel"),
+        Some(reason) => info!(
+            reason = reason.as_str(),
+            "workload labels are read off the cgroup by the agent"
+        ),
+    }
+    let labelled = label_probe.loaded;
+    publish_label_probe(label_probe);
     adapters::ebpf::pidns::publish_or_warn(
         loader.ebpf_mut(),
         &host_proc_root(),
@@ -6603,7 +6627,8 @@ pub fn try_load_cgroup_workload_firewall(
 
     // Same posture as the attribution hooks: rootless, the agent dropped the
     // capability the cgroup attach needs and the warden resolves the path.
-    let mut attacher = adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher::new();
+    let mut attacher = adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher::new()
+        .with_labelled_programs(labelled);
     if let Some(sock) = warden_sock_from_env() {
         attacher = attacher.with_warden_socket(sock);
     }

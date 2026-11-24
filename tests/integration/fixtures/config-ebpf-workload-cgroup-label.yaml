@@ -1,0 +1,69 @@
+# config-ebpf-workload-cgroup-label.yaml - a workload rule naming a task by
+# the label its cgroup directory carries in the user.ebpfsentinel.workload
+# extended attribute, and one naming a label no cgroup carries.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    - id: fw-wl-label
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 7211
+      workload:
+        cgroup_label: payments-batch
+        mode: enforce
+    - id: fw-wl-label-unset
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: 7212
+      workload:
+        cgroup_label: nobody-carries-this
+        mode: enforce
+
+process_table:
+  enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 1
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+auth:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
