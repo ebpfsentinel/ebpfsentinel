@@ -15,6 +15,7 @@ tests/perf/
 ├── BENCHMARK-RESULTS.md           # methodology + recorded resource-consumption numbers
 ├── measure-footprint.sh           # memory per configuration: maps, RSS, steady cgroup, startup peak (run from the host)
 ├── fixtures/                      # perf-only agent configs
+│   └── bpf-qdisc/                 # benchmark-only BPF qdiscs perf/09 builds on the agent VM, and its traffic runner
 ├── results/                       # dated output of a run, the source of every figure quoted elsewhere
 └── *.bats                         # the perf suites
 ```
@@ -36,6 +37,7 @@ fixtures live here; there is no separate Vagrant box.
 | `06-ebpf-feature-overhead-nat-dlp` | NAT translation overhead (SNAT egress / DNAT ingress / both) + DLP uprobe SSL-inspection cost | local + 2VM |
 | `07-attribution-overhead` | cost of naming the workload behind a flow, per connect() and per execve() | local |
 | `08-mass-encryption-kill-latency` | time from a mass encryption verdict to the last process of the run gone, alone and forking a worker per directory | local |
+| `09-bpf-qdisc-vs-edt-fq` | shaping by cgroup three ways on the same traffic: tc-qos departure times served by sch_fq, the same served by a BPF qdisc registered as fq, and a BPF qdisc shaping by itself; cost per packet, rate accuracy, fairness, latency | 2VM |
 
 Remaining per-feature datapath suites - **L4 LB** (forwarded, 3VM) and **L7**
 (HTTP via `run_http_bench`) - are planned alongside these; they need the 3VM
@@ -58,6 +60,36 @@ cd /home/vagrant/ebpfsentinel/tests/perf
 sudo bats 02-ebpf-feature-overhead.bats        # one suite
 sudo bats *.bats                               # all
 ```
+
+### BPF qdisc against the departure time served by fq (perf/09)
+
+The suite runs from the attacker VM, sending from the agent VM to it, so it
+runs on the two-machine lane only. On its own, from `../integration/vagrant/`:
+
+```bash
+vagrant ssh attacker -c 'cd /home/vagrant/ebpfsentinel/tests/integration && \
+  EBPF_2VM_MODE=true AGENT_VM_IP=192.168.56.10 ATTACKER_VM_IP=192.168.56.20 \
+  AGENT_CTL_IP=192.168.56.10 AGENT_SSH_KEY=~/.ssh/agent_key \
+  EBPFSENTINEL_STRICT_SKIPS=1 bats --timing ../perf/09-bpf-qdisc-vs-edt-fq.bats'
+```
+
+or with every other perf suite through `scripts/run-in-2vm.sh --performance`.
+`QDISC_BENCH_SECONDS` (default 20) and `QDISC_BENCH_RUNS` (default 3) set the
+length and number of runs per profile. The agent VM needs `clang` (provisioner
+`bpf-c-toolchain`) and a kernel built with `CONFIG_NET_SCH_BPF`; the qdiscs are
+built there by `fixtures/bpf-qdisc/build.sh`, which fetches the kernel's
+`bpf_fq` selftest at the running kernel's tag and never commits it. The fq arm
+backed by the BPF qdisc runs first, because it needs `sch_fq` out of the
+kernel, and is skipped with its reason where the module is built in.
+
+Nothing in `fixtures/bpf-qdisc/` is part of the agent: no crate loads it and no
+release carries it. The suite registers each qdisc, measures it, and
+unregisters it in teardown, so that no later suite is handed a BPF `fq`.
+
+The report is `/tmp/ebpfsentinel-bpf-qdisc-vs-edt-fq.json` on the attacker VM:
+every run's figures, the medians per arm and profile, and each BPF arm's
+verdict against today's arm on the criteria written above the last test. Copy
+it into `results/` under the run's date, as the other results are kept.
 
 Methodology (baseline subtraction, 3-run averaging, thresholds) is documented in
 [BENCHMARK-RESULTS.md](BENCHMARK-RESULTS.md).

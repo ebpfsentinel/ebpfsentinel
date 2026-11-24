@@ -236,6 +236,7 @@ suite_profiles:
   "perf/06": nightly
   "perf/07": nightly
   "perf/08": nightly
+  "perf/09": nightly
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 # Datapath suites the nightly lane runs a second time on the agent VM. Each
@@ -357,11 +358,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-qos
-    suites: ["28", "67"]
+    suites: ["28", "67", "perf/09"]
     topology: 2vm
     kernel_min: "6.18"
     profile: datapath
-    notes: "Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive"
+    notes: "Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive; the departure time it writes per cgroup, served by sch_fq, measured in perf/09 against a BPF qdisc serving it and against a BPF qdisc shaping by itself"
 
   - kind: ebpf_program
     feature: tc-scrub

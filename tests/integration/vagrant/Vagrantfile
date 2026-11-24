@@ -379,6 +379,24 @@ SYSCTL
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: bpf-c-toolchain
+    # clang, for the one perf suite that compares BPF qdiscs against the
+    # departure time tc-qos writes: it builds those qdiscs on this VM against
+    # the running kernel's BTF, since they are C (the agent's own programs
+    # are Rust and come from the build). libc6-dev, already there through
+    # build-essential, carries the asm headers clang needs for the BPF target.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "bpf-c-toolchain", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      if ! command -v clang &>/dev/null; then
+        apt-get update
+        apt-get install -y --no-install-recommends clang
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: kubernetes-tools (kubectl + minikube)
     # Installs the binaries the 10-kubernetes suite needs. minikube runs
     # with the docker driver (no nested VM), and conntrack - required by the
