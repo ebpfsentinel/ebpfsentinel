@@ -104,7 +104,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
 | **Audit Trail** | Rule change history with before/after diff and actor tracking |
 | **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert, one capture at a time, 60 s when an alert starts it. Concurrent captures and the forensics API are in the Enterprise tier |
-| **CLI** | Forty-six subcommands with `--output table\|json` and `--token` auth, every API route reachable |
+| **CLI** | Forty-seven subcommands with `--output table\|json` and `--token` auth, every API route reachable |
 | **Authentication** | JWT, OIDC, and API keys, with three fixed roles (admin, operator, viewer). Custom roles are in the paid tiers from Professional |
 | **TLS 1.3** | rustls + aws_lc_rs, post-quantum hybrid key exchange (X25519MLKEM768) |
 
