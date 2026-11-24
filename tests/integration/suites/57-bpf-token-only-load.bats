@@ -136,3 +136,20 @@ teardown_file() {
     [ "${BPF_TOKEN_CT_BTF}" = "1" ] || env_skip "no nf_conntrack module BTF on this kernel"
     bpf_token_log_has 'firewall .* reject wired'
 }
+
+@test "the agent loads what reads the kernel and hands it over before it listens" {
+    # Under a warden the agent loads every kernel-reading object and hands
+    # the tracepoint and kprobe programs to the warden, all before the first
+    # listener opens.
+    bpf_token_log_has 'kernel-reading programs loaded before input'
+    local handed listening
+    handed="$(grep -n 'kernel-reading programs loaded before input' "$BPF_TOKEN_LOG" | head -1 | cut -d: -f1)"
+    listening="$(grep -nE 'HTTPS? server listening' "$BPF_TOKEN_LOG" | head -1 | cut -d: -f1)"
+    [ -n "$handed" ]
+    [ -z "$listening" ] || [ "$handed" -lt "$listening" ]
+}
+
+@test "every kernel-reading program the agent closed is held by the warden" {
+    run grep -iE 'program closed without the warden holding it' "$BPF_TOKEN_LOG"
+    [ "$status" -ne 0 ]
+}

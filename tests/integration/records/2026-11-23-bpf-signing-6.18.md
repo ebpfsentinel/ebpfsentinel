@@ -93,8 +93,9 @@ kernel, not off its sources.
   only with it, `syscall_prog_func_proto` in `kernel/bpf/syscall.c`). Where the
   guard is attached, the agent keeps `CAP_PERFMON`, since every program it loads
   then comes out of a signed loader; where it is not (a kernel below 6.18, or no
-  `bpf` in `lsm=`), the agent drops `CAP_PERFMON` and `CAP_SYS_ADMIN` before its
-  first load and loads unsigned, as the 6.12 record found it must.
+  `bpf` in `lsm=`), the agent loads its kernel-reading objects before it reads
+  any input, then drops `CAP_PERFMON` and `CAP_SYS_ADMIN` and loads the rest
+  unsigned, as the 6.12 record found it must.
 - **Exclusivity holds without the guard**: a program other than the loader naming
   the metadata map is refused at load, so the map's content reaches only the
   program it was signed for.

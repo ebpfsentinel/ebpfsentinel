@@ -66,3 +66,9 @@ reason = "hands a restarted agent the link it pinned, by a checked name in the w
 
 [unfenced.UnpinLinks]
 reason = "removes pins from the warden's own pin directory only, by checked names; the uninstall and a datapath swap use it"
+
+[unfenced.HoldProgram]
+reason = "the agent hands over its kernel-reading programs once, before it reads any input; the warden keeps one only under a name listed in warden-proto and with the type listed for it"
+
+[unfenced.AttachHeld]
+reason = "the family is the held program's own: none for the raw tracepoints, whose one target is compiled into the warden, uprobe for the TLS kprobes, so the scan's arm-by-arm reading does not see it; the policy refuses the uprobe ones with the uprobe family off"

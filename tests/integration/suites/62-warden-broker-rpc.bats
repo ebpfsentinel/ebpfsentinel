@@ -18,8 +18,10 @@
 #     each one impossible from an unprivileged user namespace:
 #       ConntrackFlush  netlink teardown
 #       PcapOpen        AF_PACKET fds handed over SCM_RIGHTS
+#       HoldProgram     the kernel-reading programs handed over before the
+#                       agent reads any input
 #       DlpScan +
-#       AttachUprobe    uprobe_multi link fd for the DLP probes
+#       AttachUprobe    uprobe_multi link on a held DLP program
 #       ArpAnnounce     gratuitous ARP on VIP speaker takeover
 #
 # The feature suites (18 conntrack, 27 DLP, 37 VIP, 49 capture) own the
@@ -236,6 +238,25 @@ _route_probe() {
     done
     [ "${loaded:-0}" -ge 1 ] || {
         echo "no loaded eBPF program reported after 30s: ${body}" >&2
+        return 1
+    }
+}
+
+@test "the agent handed over and the warden holds its kernel-reading programs" {
+    local body
+    body="$(api_get /api/v1/ebpf/kernel-features)"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || {
+        echo "GET /api/v1/ebpf/kernel-features returned ${HTTP_STATUS}" >&2
+        return 1
+    }
+    [ "$(echo "${body}" | jq -r '.preload.handed_over')" = "true" ] || {
+        echo "agent did not hand over: $(echo "${body}" | jq -c '.preload')" >&2
+        return 1
+    }
+    # The DLP fixture loads uprobe-dlp, whose programs the warden holds.
+    echo "${body}" | jq -e '.preload.held | index("ssl_write")' >/dev/null || {
+        echo "ssl_write not held: $(echo "${body}" | jq -c '.preload')" >&2
         return 1
     }
 }
