@@ -181,6 +181,15 @@ struct XdpLoadMode {
 }
 
 impl XdpLoadMode {
+    /// The mode on this host: bound or not, and multi-buffer where the
+    /// pull's probe loaded.
+    fn on_this_host(dev_bound: bool) -> Self {
+        Self {
+            dev_bound,
+            multi_buffer: super::xdp_pull_probe::usable(),
+        }
+    }
+
     /// Whether a call to `name` is replaced by `r0 = -EOPNOTSUPP` rather than
     /// relocated: a receive-metadata kfunc off a bound device, and the pull
     /// where the host refused it. The program's wrapper reads the non-zero
@@ -713,18 +722,8 @@ pub fn load_kfunc_programs<S: BuildHasher>(
         _ => None,
     };
 
-    let mode = XdpLoadMode {
-        dev_bound: dev_bound_ifindex.is_some(),
-        multi_buffer: super::xdp_pull_probe::usable(),
-    };
-    // A refused pull is never relocated, so it is not resolved either: the
-    // kernel it was refused on may not declare it at all.
-    let resolvable: Vec<String> = names
-        .iter()
-        .filter(|name| mode.multi_buffer || name.as_str() != super::xdp_pull_probe::XDP_PULL_KFUNC)
-        .cloned()
-        .collect();
-    let (targets, undeclared) = resolve_targets(resolver, &resolvable)?;
+    let mode = XdpLoadMode::on_this_host(dev_bound_ifindex.is_some());
+    let (targets, undeclared) = resolve_targets(resolver, &names, mode)?;
     let fd_array = build_fd_array(resolver, &targets)?;
 
     let program_meta = program_meta(elf, &obj, resolver)?;
@@ -770,21 +769,16 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             insns
         };
         let insns = rewritten(&neutral);
-        let flags = mode.prog_flags(prog_type, flags);
 
         // Only XDP programs carry the device-bound metadata kfuncs; binding a
         // TC/uprobe program to a netdev would be meaningless (and rejected).
-        let prog_ifindex = if prog_type == BPF_PROG_TYPE_XDP {
-            dev_bound_ifindex
-        } else {
-            None
-        };
+        let prog_ifindex = dev_bound_ifindex.filter(|_| prog_type == BPF_PROG_TYPE_XDP);
 
         let request = RawProgLoad {
             name: &name,
             prog_type,
             expected_attach_type: eat,
-            prog_flags: flags,
+            prog_flags: mode.prog_flags(prog_type, flags),
             insns: &insns,
             license: obj.license.as_bytes_with_nul(),
             prog_btf_fd: prog_btf_fd.as_ref().map(AsRawFd::as_raw_fd),
@@ -864,14 +858,20 @@ fn relocated_object<S: BuildHasher>(
 
 /// Resolve every kfunc the object calls. An optional kfunc the kernel BTF does
 /// not declare is returned apart, for its calls to be neutralized; any other
-/// unresolved name fails the load.
+/// unresolved name fails the load. A pull `mode` neutralizes is never
+/// relocated, so it is not resolved either: the kernel it was refused on may
+/// not declare it at all.
 fn resolve_targets(
     resolver: &KfuncResolver,
     names: &[String],
+    mode: XdpLoadMode,
 ) -> Result<(HashMap<String, KfuncTarget>, Vec<String>), KfuncLoaderError> {
     let mut targets: HashMap<String, KfuncTarget> = HashMap::new();
     let mut undeclared: Vec<String> = Vec::new();
     for name in names {
+        if !mode.multi_buffer && name == super::xdp_pull_probe::XDP_PULL_KFUNC {
+            continue;
+        }
         match resolver.resolve(name) {
             Ok(target) => {
                 targets.insert(name.clone(), target);
