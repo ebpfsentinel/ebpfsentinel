@@ -1,5 +1,6 @@
 //! TCP health per edge: retransmissions, resets, connections opened,
-//! failed and closed, and the round-trip time.
+//! failed and closed, the round-trip time, and where a write spends its time
+//! between the application and the peer's acknowledgement.
 //!
 //! The kernel side counts every event under the edge the connection runs
 //! on: the local and remote addresses, the service port and the cgroup of
@@ -77,6 +78,48 @@ impl TcpRtt {
     }
 }
 
+/// Where a write spends its time, timed by the kernel from the moment the
+/// application hands it over: one histogram per stage, each sample a time
+/// since that moment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpSendLatency {
+    /// Until the queueing discipline took the segment carrying its last byte.
+    pub scheduled: TcpRtt,
+    /// Until the driver was handed that segment.
+    pub sent: TcpRtt,
+    /// Until the peer acknowledged that byte.
+    pub acked: TcpRtt,
+}
+
+impl TcpSendLatency {
+    /// Add `other` to these samples.
+    pub fn add(&mut self, other: &Self) {
+        self.scheduled.add(&other.scheduled);
+        self.sent.add(&other.sent);
+        self.acked.add(&other.acked);
+    }
+
+    fn went_back_from(&self, before: &Self) -> bool {
+        self.scheduled.went_back_from(&before.scheduled)
+            || self.sent.went_back_from(&before.sent)
+            || self.acked.went_back_from(&before.acked)
+    }
+
+    fn minus(&self, before: &Self) -> Self {
+        Self {
+            scheduled: self.scheduled.minus(&before.scheduled),
+            sent: self.sent.minus(&before.sent),
+            acked: self.acked.minus(&before.acked),
+        }
+    }
+
+    /// Whether no stage was timed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scheduled.count == 0 && self.sent.count == 0 && self.acked.count == 0
+    }
+}
+
 /// What one edge has counted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TcpCounts {
@@ -94,6 +137,9 @@ pub struct TcpCounts {
     pub failed: u64,
     /// Round-trip time samples.
     pub rtt: TcpRtt,
+    /// Writes timed through the kernel's transmit timestamps, empty on a
+    /// host where they are not taken.
+    pub send: TcpSendLatency,
 }
 
 impl TcpCounts {
@@ -112,6 +158,7 @@ impl TcpCounts {
         self.closed = self.closed.saturating_add(other.closed);
         self.failed = self.failed.saturating_add(other.failed);
         self.rtt.add(&other.rtt);
+        self.send.add(&other.send);
     }
 
     /// What these counts added over `before`. The kernel side never evicts
@@ -125,7 +172,8 @@ impl TcpCounts {
             || self.opened < before.opened
             || self.closed < before.closed
             || self.failed < before.failed
-            || self.rtt.went_back_from(&before.rtt);
+            || self.rtt.went_back_from(&before.rtt)
+            || self.send.went_back_from(&before.send);
         if went_back {
             return *self;
         }
@@ -137,6 +185,7 @@ impl TcpCounts {
             closed: self.closed - before.closed,
             failed: self.failed - before.failed,
             rtt: self.rtt.minus(&before.rtt),
+            send: self.send.minus(&before.send),
         }
     }
 }
@@ -560,6 +609,31 @@ mod tests {
 
         let reloaded = deltas.advance(&[edge(443, with(rtt(0, 1, 400)))], 0);
         assert_eq!(reloaded.edges[0].counts.rtt, rtt(0, 1, 400));
+    }
+
+    #[test]
+    fn send_stages_add_their_increments_and_a_reload_restarts_them() {
+        let stages = |scheduled: u64, sent: u64, acked: u64| TcpSendLatency {
+            scheduled: sampled(scheduled, scheduled * 10),
+            sent: sampled(sent, sent * 20),
+            acked: sampled(acked, acked * 300),
+        };
+        let with = |send: TcpSendLatency| TcpCounts {
+            send,
+            ..TcpCounts::default()
+        };
+        let mut deltas = TcpEdgeDeltas::default();
+        let first = deltas.advance(&[edge(443, with(stages(2, 2, 1)))], 0);
+        assert_eq!(first.edges[0].counts.send, stages(2, 2, 1));
+        assert!(!first.edges[0].counts.send.is_empty());
+
+        let second = deltas.advance(&[edge(443, with(stages(5, 4, 4)))], 0);
+        assert_eq!(second.edges[0].counts.send, stages(3, 2, 3));
+
+        // The ack stage alone going back is the object loaded again.
+        let reloaded = deltas.advance(&[edge(443, with(stages(6, 5, 1)))], 0);
+        assert_eq!(reloaded.edges[0].counts.send, stages(6, 5, 1));
+        assert!(TcpSendLatency::default().is_empty());
     }
 
     #[test]

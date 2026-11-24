@@ -6,26 +6,34 @@
 //! kernel but the counters, so a retransmission storm or a reset flood costs
 //! a hash update per event rather than a ring buffer the agent has to drain.
 //! The same state changes sample the socket's smoothed round-trip time into a
-//! histogram under the same edge.
+//! histogram under the same edge, and a `sock_ops` program times each write
+//! from the kernel's own timestamps where the host runs it.
 
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
 use aya_ebpf::{
-    btf_maps::{Array, HashMap, PerCpuArray, PerCpuHashMap},
-    helpers::bpf_probe_read_kernel,
-    macros::{btf_map, raw_tracepoint},
-    programs::RawTracePointContext,
+    btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, PerCpuHashMap},
+    helpers::{bpf_ktime_get_ns, bpf_probe_read_kernel, generated},
+    macros::{btf_map, raw_tracepoint, sock_ops},
+    programs::{RawTracePointContext, SockOpsContext},
 };
 use ebpf_common::tcp_health::{
+    BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB,
+    BPF_SOCK_OPS_TSTAMP_SENDMSG_CB, SK_BPF_CB_FLAGS, SK_BPF_CB_TX_TIMESTAMPING,
     TCP_HEALTH_AF_INET, TCP_HEALTH_AF_INET6, TCP_HEALTH_IPPROTO_TCP, TCP_HEALTH_MAX_KEYS,
     TCP_HEALTH_METRIC_COUNT, TCP_HEALTH_METRIC_COUNTED, TCP_HEALTH_METRIC_KEYS_FULL,
-    TCP_HEALTH_METRIC_UNCONFIGURED, TCP_HEALTH_METRIC_UNREADABLE, TCP_RTT_BUCKETS,
-    TCP_STATE_ESTABLISHED, TCP_STATE_NEW_SYN_RECV, TCP_STATE_TIME_WAIT, TcpEdgeCounts, TcpEdgeKey,
-    TcpEdgeRtt, TcpHealthConfig, Transition, rtt_bucket, service_port, transition,
+    TCP_HEALTH_METRIC_SEND_REFUSED, TCP_HEALTH_METRIC_UNCONFIGURED, TCP_HEALTH_METRIC_UNREADABLE,
+    TCP_HEALTH_SOL_SOCKET, TCP_RTT_BUCKETS, TCP_SEND_MAX_PENDING, TCP_SEND_STAGE_ACKED,
+    TCP_SEND_STAGES, TCP_STATE_ESTABLISHED, TCP_STATE_NEW_SYN_RECV, TCP_STATE_TIME_WAIT,
+    TcpEdgeCounts, TcpEdgeKey, TcpEdgeRtt, TcpEdgeSend, TcpHealthConfig, TcpSendPending,
+    Transition, rtt_bucket, send_in_flight, send_stage, service_port, transition,
 };
-use ebpf_helpers::increment_metric;
+use ebpf_helpers::{
+    increment_metric,
+    kfuncs::{sock_ops_enable_tx_tstamp, sock_ops_kern_ctx},
+};
 
 /// `BPF_NOEXIST`: insert only when the key is absent.
 const BPF_NOEXIST: u64 = 1;
@@ -61,8 +69,25 @@ static TCP_EDGES: PerCpuHashMap<TcpEdgeKey, TcpEdgeCounts, { TCP_HEALTH_MAX_KEYS
 #[btf_map]
 static TCP_RTT: HashMap<TcpEdgeKey, TcpEdgeRtt, { TCP_HEALTH_MAX_KEYS as usize }> = HashMap::new();
 
+/// Timed writes per edge, one histogram per stage, shared by every CPU and
+/// added to atomically. Keyed like `TCP_EDGES` and never evicted.
+#[btf_map]
+static TCP_SEND: HashMap<TcpEdgeKey, TcpEdgeSend, { TCP_HEALTH_MAX_KEYS as usize }> =
+    HashMap::new();
+
+/// One zeroed histogram set, never written: what a new edge in `TCP_SEND`
+/// is inserted from, since 432 bytes do not fit on the program's stack.
+#[btf_map]
+static TCP_SEND_ZERO: Array<TcpEdgeSend, 1> = Array::new();
+
+/// The write each socket has in flight, by socket cookie. An LRU: a socket
+/// that closed with a write never acknowledged leaves nothing behind.
+#[btf_map]
+static TCP_SEND_PENDING: LruHashMap<u64, TcpSendPending, { TCP_SEND_MAX_PENDING as usize }> =
+    LruHashMap::new();
+
 /// Per-CPU counters. Index: 0=counted, 1=keys_full, 2=unconfigured,
-/// 3=unreadable.
+/// 3=unreadable, 4=send_refused.
 #[btf_map]
 static TCP_HEALTH_METRICS: PerCpuArray<u64, { TCP_HEALTH_METRIC_COUNT as usize }> =
     PerCpuArray::new();
@@ -151,6 +176,155 @@ pub fn tcp_health_set_state(ctx: RawTracePointContext) -> i32 {
     0
 }
 
+/// Time writes with the kernel's own timestamps, attached to a cgroup.
+///
+/// An established connection opts in; each write the application hands over
+/// while none is in flight on its socket is tagged, and the callbacks the tag
+/// turns on add the time since to the edge's histograms. A write handed over
+/// while another is in flight is not timed, so each socket costs one entry
+/// and one tag at a time.
+#[sock_ops]
+pub fn tcp_health_send_timestamps(ctx: SockOpsContext) -> u32 {
+    match ctx.op() {
+        BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB | BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB => opt_in(&ctx),
+        BPF_SOCK_OPS_TSTAMP_SENDMSG_CB => tag_write(&ctx),
+        op => {
+            if let Some(stage) = send_stage(op) {
+                time_stage(&ctx, stage);
+            }
+        }
+    }
+    // One is what every attached `sock_ops` program answers when it lets the
+    // socket through; none of the callbacks used here reads a reply.
+    1
+}
+
+/// Turn the timestamp callbacks on for a connection that came up.
+#[inline(always)]
+fn opt_in(ctx: &SockOpsContext) {
+    let mut flags: i32 = SK_BPF_CB_TX_TIMESTAMPING;
+    // SAFETY: `ctx.ops` is the live context of this callback and `flags` a
+    // stack word of the length given.
+    let rc = unsafe {
+        generated::bpf_setsockopt(
+            ctx.ops.cast(),
+            TCP_HEALTH_SOL_SOCKET,
+            SK_BPF_CB_FLAGS,
+            (&raw mut flags).cast(),
+            4,
+        )
+    };
+    if rc != 0 {
+        increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_SEND_REFUSED);
+    }
+}
+
+/// Tag the write being handed over, unless one is still in flight.
+#[inline(always)]
+fn tag_write(ctx: &SockOpsContext) {
+    // SAFETY: `ctx.ops` is the live context of this callback.
+    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.ops.cast()) };
+    if cookie == 0 {
+        return;
+    }
+    // SAFETY: the helper takes no argument.
+    let now = unsafe { bpf_ktime_get_ns() };
+    if let Some(pending) = TCP_SEND_PENDING.get_ptr(&cookie) {
+        // SAFETY: a map value pointer the lookup returned.
+        if send_in_flight(unsafe { (*pending).since_ns }, now) {
+            return;
+        }
+    }
+    let Some(config) = config() else {
+        return;
+    };
+    // SAFETY: the context of this `sock_ops` invocation.
+    let kern = unsafe { sock_ops_kern_ctx(ctx.ops.cast()) };
+    if kern.is_null() {
+        return;
+    }
+    // The socket is the first word of `struct bpf_sock_ops_kern`.
+    let Ok(sk) = read_u64(kern as u64) else {
+        increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_UNREADABLE);
+        return;
+    };
+    let Ok(key) = key_of_socket(sk, &config) else {
+        increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_UNREADABLE);
+        return;
+    };
+    // SAFETY: `kern` came from this invocation's context.
+    if unsafe { sock_ops_enable_tx_tstamp(kern) }.is_err() {
+        increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_SEND_REFUSED);
+        return;
+    }
+    let pending = TcpSendPending {
+        since_ns: now,
+        key,
+        timed: 0,
+        _pad: [0; 7],
+    };
+    if TCP_SEND_PENDING.insert(&cookie, &pending, 0).is_err() {
+        increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_KEYS_FULL);
+    }
+}
+
+/// Add the time since the write was handed over to the stage a callback
+/// closes. A stage is timed once per write, a segment sent again passing the
+/// same stages again; the acknowledgement ends the write.
+#[inline(always)]
+fn time_stage(ctx: &SockOpsContext, stage: usize) {
+    if stage >= TCP_SEND_STAGES {
+        return;
+    }
+    // SAFETY: `ctx.ops` is the live context of this callback.
+    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.ops.cast()) };
+    let Some(pending) = TCP_SEND_PENDING.get_ptr_mut(&cookie) else {
+        return;
+    };
+    let bit = 1u8 << stage;
+    // SAFETY: a map value pointer the lookup returned. A callback for the
+    // same socket on another CPU can at worst time a stage twice.
+    let (since, key, timed) = unsafe { ((*pending).since_ns, (*pending).key, (*pending).timed) };
+    if timed & bit == 0 {
+        // SAFETY: as above.
+        unsafe { (*pending).timed = timed | bit };
+        // SAFETY: the helper takes no argument.
+        let now = unsafe { bpf_ktime_get_ns() };
+        if now >= since {
+            add_send(&key, stage, (now - since) / 1_000);
+        }
+    }
+    if stage == TCP_SEND_STAGE_ACKED {
+        let _ = TCP_SEND_PENDING.remove(&cookie);
+    }
+}
+
+/// Add one sample of `us` microseconds to `stage` under `key`.
+#[inline(always)]
+fn add_send(key: &TcpEdgeKey, stage: usize, us: u64) {
+    let send = match TCP_SEND.get_ptr_mut(key) {
+        Some(send) => send,
+        None => {
+            let Some(zero) = TCP_SEND_ZERO.get(0) else {
+                return;
+            };
+            let _ = TCP_SEND.insert(key, zero, BPF_NOEXIST);
+            match TCP_SEND.get_ptr_mut(key) {
+                Some(send) => send,
+                None => {
+                    increment_metric!(TCP_HEALTH_METRICS, TCP_HEALTH_METRIC_KEYS_FULL);
+                    return;
+                }
+            }
+        }
+    };
+    if stage >= TCP_SEND_STAGES {
+        return;
+    }
+    // SAFETY: `send` is a live map value and `stage` is in bounds.
+    record(unsafe { &raw mut (*send).stages[stage] }, us);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// The configuration, or `None` after counting that it was not written.
@@ -217,6 +391,12 @@ fn add_rtt(key: &TcpEdgeKey, us: u64) {
             }
         }
     };
+    record(rtt, us);
+}
+
+/// Add one sample of `us` microseconds to the histogram at `rtt`.
+#[inline(always)]
+fn record(rtt: *mut TcpEdgeRtt, us: u64) {
     let bucket = rtt_bucket(us);
     if bucket >= TCP_RTT_BUCKETS {
         return;

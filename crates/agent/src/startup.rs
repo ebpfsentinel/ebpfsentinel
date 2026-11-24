@@ -3246,6 +3246,7 @@ pub async fn run(
         );
         if let Some((service, loader)) = start_tcp_health(
             &config.tcp_health,
+            &config.attribution.cgroup_root,
             &ebpf_dir,
             &metrics,
             workloads.clone(),
@@ -7281,7 +7282,8 @@ pub fn start_kernel_drops(
 /// The running kernel's BTF is read first: where `sock_common` keeps the
 /// family, the ports, the addresses and the state, where a socket keeps its
 /// cgroup, and where `sk_buff` keeps its headers. A kernel missing one of
-/// them is refused here, in one sentence, before anything loads.
+/// them is refused here, in one sentence, before anything loads. The program
+/// timing writes is optional: a kernel refusing it leaves the counter whole.
 ///
 /// # Errors
 ///
@@ -7295,8 +7297,11 @@ pub fn try_load_tcp_health(
 )> {
     let layout = adapters::ebpf::tcp_health::resolve_from_btf().map_err(|e| anyhow::anyhow!(e))?;
     let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-tcp-health")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let mut loader = EbpfLoader::load_with_pin_path_optional(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        &adapters::ebpf::tcp_health::TCP_HEALTH_OPTIONAL,
+    )?;
     let counter = adapters::ebpf::tcp_health::TcpHealthCounter::new(loader.ebpf_mut(), layout)?;
     Ok((
         loader,
@@ -7312,8 +7317,13 @@ pub fn try_load_tcp_health(
 /// alert is on; the alerts go wherever the caller points
 /// [`TcpHealthService::set_alerts`](application::tcp_health_service::TcpHealthService::set_alerts).
 /// The loader handed back holds the program: dropping it detaches it.
+///
+/// Writes are timed from the kernel's timestamps when `send_latency` is on,
+/// by a `sock_ops` program attached to `cgroup_root`; its status is published
+/// on its own, and a refusal there leaves the counter running.
 pub fn start_tcp_health(
     config: &infrastructure::config::TcpHealthConfig,
+    cgroup_root: &str,
     ebpf_dir: &str,
     metrics: &Arc<AgentMetrics>,
     workloads: application::workload_resolver::WorkloadResolver,
@@ -7329,6 +7339,9 @@ pub fn start_tcp_health(
             attached: false,
             reason: Some("counting TCP health is turned off in the configuration".to_string()),
         });
+        adapters::ebpf::tcp_health::publish_send_status(
+            adapters::ebpf::tcp_health::send_off_with_counter("turned off in the configuration"),
+        );
         return None;
     }
     let (loader, counter, mut attacher) = match try_load_tcp_health(ebpf_dir) {
@@ -7342,13 +7355,39 @@ pub fn start_tcp_health(
                     reason: Some(e.to_string()),
                 },
             );
+            adapters::ebpf::tcp_health::publish_send_status(
+                adapters::ebpf::tcp_health::send_off_with_counter(&e.to_string()),
+            );
             return None;
         }
     };
     let status = attacher.attach(&loader);
     if !status.attached {
         metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
+        adapters::ebpf::tcp_health::publish_send_status(
+            adapters::ebpf::tcp_health::send_off_with_counter(
+                status
+                    .reason
+                    .as_deref()
+                    .unwrap_or("a tracepoint attach was refused"),
+            ),
+        );
         return None;
+    }
+    let mut send_attacher = adapters::ebpf::tcp_health::TcpSendAttacher::new();
+    if config.send_latency {
+        if let Some(sock) = warden_sock_from_env() {
+            send_attacher = send_attacher.with_warden_socket(&sock);
+        }
+        send_attacher.attach(&loader, cgroup_root);
+    } else {
+        adapters::ebpf::tcp_health::publish_send_status(
+            adapters::ebpf::tcp_health::TcpSendStatus {
+                attached: false,
+                cgroup: String::new(),
+                reason: Some("timing writes is turned off in the configuration".to_string()),
+            },
+        );
     }
     let mut service = application::tcp_health_service::TcpHealthService::new(
         Box::new(counter),
@@ -7365,6 +7404,7 @@ pub fn start_tcp_health(
     tokio::spawn(async move {
         // The links live as long as the loop reading what they count.
         let _attacher = attacher;
+        let _send_attacher = send_attacher;
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -8950,7 +8990,11 @@ fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static 
         ),
         ("tracepoint-signal", PINS, &[]),
         ("tracepoint-drop-reason", PINS, &[]),
-        ("tracepoint-tcp-health", PINS, &[]),
+        (
+            "tracepoint-tcp-health",
+            PINS,
+            &adapters::ebpf::tcp_health::TCP_HEALTH_OPTIONAL,
+        ),
         ("uprobe-crypto", PINS, &[]),
         ("uprobe-dlp", DLP_PIN_PATH, &[]),
         (adapters::ebpf::exec_network::EXEC_NETWORK_OBJECT, PINS, &[]),

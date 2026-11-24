@@ -253,6 +253,16 @@ pub struct TcpEdgeLabels {
     pub role: String,
 }
 
+/// Labels for the time a write takes to reach a stage: an edge and the stage,
+/// `scheduled`, `sent` or `acked`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TcpSendLabels {
+    pub service: String,
+    pub peer: String,
+    pub role: String,
+    pub stage: String,
+}
+
 /// A histogram whose samples were already bucketed in the kernel: what the
 /// agent adds is a batch of bucket counts, never one observation, so the
 /// bounds are the kernel's and the series is fed without replaying samples.
@@ -591,6 +601,9 @@ pub struct AgentMetrics {
     pub tcp_connections_total: Family<TcpConnectionLabels, Counter>,
     pub tcp_health_uncounted_total: Counter,
     pub tcp_rtt_seconds: Family<TcpEdgeLabels, RttHistogram>,
+    /// Time from a write handed over to each stage the kernel timestamps,
+    /// by edge and stage.
+    pub tcp_send_latency_seconds: Family<TcpSendLabels, RttHistogram>,
     /// Connections compared with the protocol their port promises, by port
     /// and verdict.
     pub l7_port_promise_total: Family<PortPromiseLabels, Counter>,
@@ -1326,6 +1339,13 @@ impl AgentMetrics {
             tcp_rtt_seconds.clone(),
         );
 
+        let tcp_send_latency_seconds = Family::<TcpSendLabels, RttHistogram>::default();
+        registry.register(
+            "tcp_send_latency_seconds",
+            "Time from a write handed to the TCP stack until the queueing discipline took it (scheduled), the driver was handed it (sent) and the peer acknowledged it (acked), timed by the kernel, by edge",
+            tcp_send_latency_seconds.clone(),
+        );
+
         let tcp_health_uncounted_total = Counter::default();
         registry.register(
             "tcp_health_uncounted",
@@ -1568,6 +1588,7 @@ impl AgentMetrics {
             tcp_connections_total,
             tcp_health_uncounted_total,
             tcp_rtt_seconds,
+            tcp_send_latency_seconds,
             l7_port_promise_total,
             l7_port_promise_uncounted_total,
             l7_flow_refusals_total,
@@ -1683,6 +1704,24 @@ impl PacketMetrics for AgentMetrics {
                     role: role.to_string(),
                 })
                 .add(&counts.rtt);
+        }
+        if !counts.send.is_empty() {
+            for (stage, samples) in [
+                ("scheduled", &counts.send.scheduled),
+                ("sent", &counts.send.sent),
+                ("acked", &counts.send.acked),
+            ] {
+                if samples.count > 0 {
+                    self.tcp_send_latency_seconds
+                        .get_or_create(&TcpSendLabels {
+                            service: service.to_string(),
+                            peer: peer.to_string(),
+                            role: role.to_string(),
+                            stage: stage.to_string(),
+                        })
+                        .add(samples);
+                }
+            }
         }
         if counts.retransmits > 0 {
             self.tcp_retransmits_total
@@ -2493,6 +2532,7 @@ impl ports::secondary::metrics_port::CtMetrics for AgentMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::tcp_health::TcpSendLatency;
     use ports::secondary::metrics_port::MetricsPort;
 
     #[test]
@@ -3096,6 +3136,49 @@ mod tests {
     }
 
     #[test]
+    fn timed_writes_encode_one_histogram_per_stage_reached() {
+        let metrics = AgentMetrics::new();
+        let mut buckets = [0; RTT_BUCKETS];
+        buckets[0] = 3;
+        let scheduled = TcpRtt {
+            buckets,
+            sum_us: 30,
+            count: 3,
+        };
+        let mut buckets = [0; RTT_BUCKETS];
+        buckets[6] = 1;
+        let acked = TcpRtt {
+            buckets,
+            sum_us: 3_000,
+            count: 1,
+        };
+        let counts = TcpCounts {
+            send: TcpSendLatency {
+                scheduled,
+                acked,
+                ..TcpSendLatency::default()
+            },
+            ..TcpCounts::default()
+        };
+        metrics.record_tcp_edge("shop/api", "shop/db", "client", &counts);
+
+        let encoded = metrics.encode();
+        let edge = "service=\"shop/api\",peer=\"shop/db\",role=\"client\"";
+        for line in [
+            format!("ebpfsentinel_tcp_send_latency_seconds_count{{{edge},stage=\"scheduled\"}} 3"),
+            format!("ebpfsentinel_tcp_send_latency_seconds_sum{{{edge},stage=\"acked\"}} 0.003"),
+        ] {
+            assert!(
+                encoded.lines().any(|l| l == line),
+                "{line} missing from\n{encoded}"
+            );
+        }
+        // A stage no write reached writes no series.
+        assert!(!encoded.contains("stage=\"sent\""));
+        assert!(!encoded.contains("ebpfsentinel_tcp_rtt_seconds_count"));
+    }
+
+    #[test]
     fn an_edge_without_round_trip_samples_writes_no_histogram() {
         let metrics = AgentMetrics::new();
         metrics.record_tcp_edge(
@@ -3275,6 +3358,7 @@ mod tests {
         ("tcp_resets", "counter"),
         ("tcp_retransmits", "counter"),
         ("tcp_rtt_seconds", "histogram"),
+        ("tcp_send_latency_seconds", "histogram"),
         ("thread_count", "gauge"),
         ("threatintel_feed_indicators", "gauge"),
         ("threatintel_feed_last_refresh_timestamp_seconds", "gauge"),

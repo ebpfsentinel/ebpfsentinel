@@ -24,6 +24,18 @@
 //! log-scale bucket of a histogram kept beside the counters under the same
 //! edge, so a percentile is a reading of the map rather than of every packet.
 //!
+//! Where the kernel times a write itself, a `sock_ops` program in the same
+//! object follows one write per socket at a time: the moment the application
+//! handed it over (`BPF_SOCK_OPS_TSTAMP_SENDMSG_CB`), the moment the queueing
+//! discipline took it (`_SCHED_CB`), the moment the driver was handed it
+//! (`_SND_SW_CB`) and the moment the peer acknowledged its last byte
+//! (`_ACK_CB`). Each stage is a time since the first, added to a histogram per
+//! edge with the round-trip time's buckets. A socket opts in when it is
+//! established, through `SK_BPF_CB_FLAGS`, and a write is tagged with the
+//! `bpf_sock_ops_enable_tx_tstamp` kfunc; both arrived in Linux 6.15, below
+//! the agent's floor, so what can still turn them off is the program being
+//! refused or not attached on a host.
+//!
 //! The structure reads all come from the running kernel's BTF through the
 //! configuration, and a program handed none counts nothing.
 
@@ -43,8 +55,11 @@ pub const TCP_HEALTH_METRIC_KEYS_FULL: u32 = 1;
 pub const TCP_HEALTH_METRIC_UNCONFIGURED: u32 = 2;
 /// Metric index: events whose socket or packet could not be read.
 pub const TCP_HEALTH_METRIC_UNREADABLE: u32 = 3;
+/// Metric index: sockets the kernel refused to time, either the opt-in at
+/// establishment or the tag on a write.
+pub const TCP_HEALTH_METRIC_SEND_REFUSED: u32 = 4;
 /// Total number of metric slots (one past the last index).
-pub const TCP_HEALTH_METRIC_COUNT: u32 = 4;
+pub const TCP_HEALTH_METRIC_COUNT: u32 = 5;
 
 /// Buckets of the round-trip time histogram.
 pub const TCP_RTT_BUCKETS: usize = 16;
@@ -52,6 +67,70 @@ pub const TCP_RTT_BUCKETS: usize = 16;
 /// it, so the fifteenth closes at about 1.05 seconds and the last one holds
 /// everything above.
 pub const TCP_RTT_FIRST_BOUND_US: u64 = 64;
+
+/// Stages a timed write is followed through, each a histogram of the time
+/// since the application handed the write over.
+pub const TCP_SEND_STAGES: usize = 3;
+/// Stage: the queueing discipline took the segment carrying the last byte.
+pub const TCP_SEND_STAGE_SCHEDULED: usize = 0;
+/// Stage: the driver was handed that segment.
+pub const TCP_SEND_STAGE_SENT: usize = 1;
+/// Stage: the peer acknowledged that byte.
+pub const TCP_SEND_STAGE_ACKED: usize = 2;
+
+/// How many sockets may have a write in flight at once. The table is an LRU,
+/// so a socket that closed with a write never acknowledged is the first to go.
+pub const TCP_SEND_MAX_PENDING: u32 = 8_192;
+
+/// A write still waiting after this long is given up for the next one, so a
+/// segment whose acknowledgement never came does not stop a long connection
+/// from being timed again. Ten seconds is past any acknowledgement a live
+/// path returns.
+pub const TCP_SEND_STALE_NS: u64 = 10_000_000_000;
+
+/// `BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB`: a connect reached `ESTABLISHED`.
+pub const BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB: u32 = 4;
+/// `BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB`: an accepted connection did.
+pub const BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB: u32 = 5;
+/// `BPF_SOCK_OPS_TSTAMP_SCHED_CB`: a tagged segment passed the queueing
+/// discipline.
+pub const BPF_SOCK_OPS_TSTAMP_SCHED_CB: u32 = 16;
+/// `BPF_SOCK_OPS_TSTAMP_SND_SW_CB`: a tagged segment is handed to the driver.
+pub const BPF_SOCK_OPS_TSTAMP_SND_SW_CB: u32 = 17;
+/// `BPF_SOCK_OPS_TSTAMP_SND_HW_CB`: the NIC stamped a tagged segment. Its
+/// time is on the NIC's clock rather than the kernel's, so it is not a stage.
+pub const BPF_SOCK_OPS_TSTAMP_SND_HW_CB: u32 = 18;
+/// `BPF_SOCK_OPS_TSTAMP_ACK_CB`: the peer acknowledged a tagged segment.
+pub const BPF_SOCK_OPS_TSTAMP_ACK_CB: u32 = 19;
+/// `BPF_SOCK_OPS_TSTAMP_SENDMSG_CB`: a `sendmsg` queued its data.
+pub const BPF_SOCK_OPS_TSTAMP_SENDMSG_CB: u32 = 20;
+
+/// `SOL_SOCKET`.
+pub const TCP_HEALTH_SOL_SOCKET: i32 = 1;
+/// `SK_BPF_CB_FLAGS`, the socket option a `sock_ops` program opts a socket
+/// in with.
+pub const SK_BPF_CB_FLAGS: i32 = 1009;
+/// `SK_BPF_CB_TX_TIMESTAMPING`: run the timestamp callbacks for this socket.
+pub const SK_BPF_CB_TX_TIMESTAMPING: i32 = 1;
+
+/// The stage a `sock_ops` callback closes, `None` for every other callback,
+/// the hardware one included.
+#[must_use]
+pub const fn send_stage(op: u32) -> Option<usize> {
+    match op {
+        BPF_SOCK_OPS_TSTAMP_SCHED_CB => Some(TCP_SEND_STAGE_SCHEDULED),
+        BPF_SOCK_OPS_TSTAMP_SND_SW_CB => Some(TCP_SEND_STAGE_SENT),
+        BPF_SOCK_OPS_TSTAMP_ACK_CB => Some(TCP_SEND_STAGE_ACKED),
+        _ => None,
+    }
+}
+
+/// Whether a write timed since `since_ns` still holds the socket at `now_ns`.
+/// A clock read before the start is taken as a fresh one.
+#[must_use]
+pub const fn send_in_flight(since_ns: u64, now_ns: u64) -> bool {
+    now_ns >= since_ns && now_ns - since_ns < TCP_SEND_STALE_NS
+}
 
 /// `AF_INET`, as `sock_common.skc_family` holds it.
 pub const TCP_HEALTH_AF_INET: u8 = 2;
@@ -136,6 +215,30 @@ pub struct TcpEdgeRtt {
     pub sum_us: u64,
     /// Number of samples.
     pub count: u64,
+}
+
+/// The writes timed on one edge, one histogram per stage, each sample the
+/// microseconds since the application handed the write over. Shared by every
+/// CPU and added to atomically, like the round-trip time.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpEdgeSend {
+    /// Indexed by `TCP_SEND_STAGE_*`.
+    pub stages: [TcpEdgeRtt; TCP_SEND_STAGES],
+}
+
+/// The write a socket has in flight: when it was handed over, the edge it is
+/// counted under and which stages were already timed.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpSendPending {
+    /// `bpf_ktime_get_ns` when the application handed it over.
+    pub since_ns: u64,
+    pub key: TcpEdgeKey,
+    /// Bit `1 << TCP_SEND_STAGE_*` once that stage is timed: a segment sent
+    /// again passes the queue again, and only the first pass is its time.
+    pub timed: u8,
+    pub _pad: [u8; 7],
 }
 
 /// The bucket a round-trip time of `us` microseconds falls in.
@@ -228,6 +331,12 @@ unsafe impl aya::Pod for TcpEdgeRtt {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for TcpHealthConfig {}
 
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for TcpEdgeSend {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for TcpSendPending {}
+
 /// The service port of a connection and whether it is the local one: the
 /// lower of the two ports, the local one on a tie.
 #[must_use]
@@ -277,6 +386,38 @@ mod tests {
         assert_eq!(mem::size_of::<TcpEdgeCounts>(), 48);
         assert_eq!(mem::size_of::<TcpHealthConfig>(), 80);
         assert_eq!(mem::size_of::<TcpEdgeRtt>(), 144);
+        assert_eq!(mem::size_of::<TcpEdgeSend>(), 432);
+        assert_eq!(mem::size_of::<TcpSendPending>(), 64);
+    }
+
+    #[test]
+    fn the_send_stages_are_the_software_timestamp_callbacks() {
+        assert_eq!(
+            send_stage(BPF_SOCK_OPS_TSTAMP_SCHED_CB),
+            Some(TCP_SEND_STAGE_SCHEDULED)
+        );
+        assert_eq!(
+            send_stage(BPF_SOCK_OPS_TSTAMP_SND_SW_CB),
+            Some(TCP_SEND_STAGE_SENT)
+        );
+        assert_eq!(
+            send_stage(BPF_SOCK_OPS_TSTAMP_ACK_CB),
+            Some(TCP_SEND_STAGE_ACKED)
+        );
+        // The NIC's clock is not the kernel's, and the write's start is not
+        // a stage of its own.
+        assert_eq!(send_stage(BPF_SOCK_OPS_TSTAMP_SND_HW_CB), None);
+        assert_eq!(send_stage(BPF_SOCK_OPS_TSTAMP_SENDMSG_CB), None);
+        assert_eq!(send_stage(BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB), None);
+        assert!(TCP_SEND_STAGE_ACKED < TCP_SEND_STAGES);
+    }
+
+    #[test]
+    fn a_write_holds_its_socket_until_it_goes_stale() {
+        assert!(send_in_flight(1_000, 1_000));
+        assert!(send_in_flight(1_000, 1_000 + TCP_SEND_STALE_NS - 1));
+        assert!(!send_in_flight(1_000, 1_000 + TCP_SEND_STALE_NS));
+        assert!(!send_in_flight(5_000, 4_000));
     }
 
     #[test]

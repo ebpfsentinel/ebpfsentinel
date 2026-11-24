@@ -27,6 +27,8 @@
 //! | `bpf_xdp_get_xfrm_state`        | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
 //! | `bpf_xdp_xfrm_state_release`    | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
 //! | `bpf_copy_from_user_task_str`   | 6.15   | `int(*)(void *dst, u32 dst__sz, const void __user *unsafe_ptr__ign, struct task_struct *tsk, u64 flags) __ksym;`                                 |
+//! | `bpf_cast_to_kern_ctx`          | 6.2    | `void *(*)(void *obj) __ksym;`                                                                                                                   |
+//! | `bpf_sock_ops_enable_tx_tstamp` | 6.15   | `int(*)(struct bpf_sock_ops_kern *skops, u64 flags) __ksym;`                                                                                     |
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
@@ -468,6 +470,18 @@ unsafe extern "C" {
         tsk: *mut task_struct,
         flags: u64,
     ) -> i32;
+
+    // ── Kernel 6.15 send timestamps from `sock_ops` ────────────
+
+    /// The kernel's own context behind a program's context: for a
+    /// `sock_ops` program, the `struct bpf_sock_ops_kern`. Kernel 6.2.
+    pub fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+
+    /// Tag the write a `BPF_SOCK_OPS_TSTAMP_SENDMSG_CB` callback runs for,
+    /// so the kernel runs the timestamp callbacks for it. Kernel 6.15.
+    /// `flags` must be 0. Returns `0` on success, `-EOPNOTSUPP` from any
+    /// other callback, negative errno otherwise.
+    pub fn bpf_sock_ops_enable_tx_tstamp(skops: *mut core::ffi::c_void, flags: u64) -> i32;
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
@@ -490,6 +504,21 @@ pub mod host_stubs {
         _ctx: *const core::ffi::c_void,
         _vlan_proto: *mut u16,
         _vlan_tci: *mut u16,
+    ) -> i32 {
+        ENOTSUP_NEG
+    }
+
+    // ── `sock_ops` send timestamp host stubs (kernel 6.15) ──
+
+    /// No kernel context behind a host pointer: the same pointer back.
+    pub unsafe fn bpf_cast_to_kern_ctx(obj: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+        obj
+    }
+
+    /// The host never times a write.
+    pub unsafe fn bpf_sock_ops_enable_tx_tstamp(
+        _skops: *mut core::ffi::c_void,
+        _flags: u64,
     ) -> i32 {
         ENOTSUP_NEG
     }
@@ -1017,6 +1046,36 @@ pub unsafe fn xdp_rx_timestamp(ctx: *const core::ffi::c_void) -> Option<u64> {
         return None;
     }
     Some(ts)
+}
+
+/// The kernel's `struct bpf_sock_ops_kern` behind a `sock_ops` program's
+/// context. Its first word is the socket the callback runs for.
+///
+/// # Safety
+/// `ctx` must be the context of the current `sock_ops` invocation.
+#[inline(always)]
+#[must_use]
+pub unsafe fn sock_ops_kern_ctx(ctx: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    #[cfg(target_arch = "bpf")]
+    let kern = unsafe { bpf_cast_to_kern_ctx(ctx) };
+    #[cfg(not(target_arch = "bpf"))]
+    let kern = unsafe { host_stubs::bpf_cast_to_kern_ctx(ctx) };
+    kern
+}
+
+/// Ask the kernel to run the timestamp callbacks for the write the current
+/// `BPF_SOCK_OPS_TSTAMP_SENDMSG_CB` runs for. `Err` carries the negative
+/// errno the kernel refused with.
+///
+/// # Safety
+/// `kern` must come from [`sock_ops_kern_ctx`] in the same invocation.
+#[inline(always)]
+pub unsafe fn sock_ops_enable_tx_tstamp(kern: *mut core::ffi::c_void) -> Result<(), i32> {
+    #[cfg(target_arch = "bpf")]
+    let rc = unsafe { bpf_sock_ops_enable_tx_tstamp(kern, 0) };
+    #[cfg(not(target_arch = "bpf"))]
+    let rc = unsafe { host_stubs::bpf_sock_ops_enable_tx_tstamp(kern, 0) };
+    if rc == 0 { Ok(()) } else { Err(rc) }
 }
 
 /// Look up the `xfrm_state` for the packet and hand it to `f`; the
@@ -1735,6 +1794,15 @@ mod tests {
         host_stubs::host_set_next_xdp_hash(7, xdp_rss_hash_type::TYPE_L3_IPV4);
         let out = unsafe { xdp_rx_hash(core::ptr::null()) };
         assert_eq!(out, Some((7, xdp_rss_hash_type::TYPE_L3_IPV4)));
+    }
+
+    #[test]
+    fn a_host_never_times_a_write() {
+        let mut ctx = 0u64;
+        let ptr = (&raw mut ctx).cast::<core::ffi::c_void>();
+        let kern = unsafe { sock_ops_kern_ctx(ptr) };
+        assert_eq!(kern, ptr);
+        assert_eq!(unsafe { sock_ops_enable_tx_tstamp(kern) }, Err(-95));
     }
 
     #[test]

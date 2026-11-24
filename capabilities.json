@@ -143,6 +143,15 @@
       "probe": "attach_status",
       "since": "6.18",
       "unlocks": "a signal, a trace or an unpin aimed at the agent refused unless a signed stop opened the window"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "round-trip times are still sampled when a connection opens and closes, and no write is timed",
+      "id": "tcp_send_timestamps",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.18",
+      "unlocks": "the time each write waits to be queued, handed to the driver and acknowledged, timed by the kernel per edge"
     }
   ],
   "floor": "6.18"

@@ -27,6 +27,12 @@ pub struct TcpHealthConfig {
     /// seconds.
     pub poll_interval_secs: u64,
 
+    /// Whether writes are timed from the kernel's own transmit timestamps:
+    /// queued, handed to the driver and acknowledged, per edge. Attached to
+    /// `attribution.cgroup_root`; off, or refused by the kernel, the
+    /// round-trip time sampled when a connection opens and closes remains.
+    pub send_latency: bool,
+
     /// The alert raised for a source drawing resets faster than its line.
     pub reset_scan: ResetScanConfig,
 }
@@ -62,6 +68,7 @@ impl Default for TcpHealthConfig {
         Self {
             enabled: true,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            send_latency: true,
             reset_scan: ResetScanConfig::default(),
         }
     }
@@ -107,6 +114,7 @@ mod tests {
         let config = TcpHealthConfig::default();
         assert!(config.enabled);
         assert_eq!(config.poll_interval_secs, 10);
+        assert!(config.send_latency);
         assert!(config.reset_scan.enabled);
         assert_eq!(config.reset_scan.window_secs, 60);
         assert_eq!(config.reset_scan.resets, 100);

@@ -6,26 +6,36 @@
 //! kernel's BTF before anything attaches, so a kernel that moves a field of
 //! `sock_common` is read where it put it, and a kernel missing one is refused
 //! here in one sentence.
+//!
+//! A `sock_ops` program of the same object times each write from the
+//! kernel's own transmit timestamps where the host runs it: attached to the
+//! cgroup the attribution hooks use, it is the probe of those callbacks, and
+//! where it is refused or not attached the round-trip time sampled at the
+//! state changes is all an edge carries.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::OwnedFd;
+use std::os::fd::{OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
 use domain::common::error::DomainError;
 use domain::tcp_health::{
     EdgeRole, RTT_BUCKETS, RTT_FIRST_BOUND_US, RawTcpEdge, TcpCounts, TcpEdgeId, TcpRtt,
+    TcpSendLatency,
 };
 use ebpf_common::tcp_health::{
-    TCP_HEALTH_AF_INET6, TCP_HEALTH_METRIC_KEYS_FULL, TCP_HEALTH_METRIC_UNCONFIGURED,
-    TCP_HEALTH_METRIC_UNREADABLE, TCP_RTT_BUCKETS, TCP_RTT_FIRST_BOUND_US, TcpEdgeCounts,
-    TcpEdgeKey, TcpEdgeRtt, TcpHealthConfig,
+    TCP_HEALTH_AF_INET6, TCP_HEALTH_METRIC_KEYS_FULL, TCP_HEALTH_METRIC_SEND_REFUSED,
+    TCP_HEALTH_METRIC_UNCONFIGURED, TCP_HEALTH_METRIC_UNREADABLE, TCP_RTT_BUCKETS,
+    TCP_RTT_FIRST_BOUND_US, TCP_SEND_STAGE_ACKED, TCP_SEND_STAGE_SCHEDULED, TCP_SEND_STAGE_SENT,
+    TcpEdgeCounts, TcpEdgeKey, TcpEdgeRtt, TcpEdgeSend, TcpHealthConfig,
 };
 use ports::secondary::tcp_health_port::TcpHealthPort;
 use tracing::{info, warn};
 
 use super::kfunc::vmlinux_struct_member_offsets;
+use super::kfunc_attach;
 use super::loader::EbpfLoader;
 use super::map_store::MapStore;
 
@@ -40,6 +50,16 @@ pub const TCP_HEALTH_HOOKS: [(&str, &str); 4] = [
     ("tcp_health_receive_reset", "tcp_receive_reset"),
     ("tcp_health_set_state", "inet_sock_set_state"),
 ];
+
+/// The `sock_ops` program timing writes. The object loads without it where
+/// the kernel refuses it, and every load of the object names it so.
+pub const TCP_SEND_PROGRAM: &str = "tcp_health_send_timestamps";
+
+/// The programs the object may do without, as every load of it names them.
+pub const TCP_HEALTH_OPTIONAL: [&str; 1] = [TCP_SEND_PROGRAM];
+
+/// `BPF_CGROUP_SOCK_OPS` from `enum bpf_attach_type`.
+const BPF_CGROUP_SOCK_OPS: u32 = 3;
 
 /// What the agent can say about the TCP health counter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -68,6 +88,50 @@ pub fn status() -> TcpHealthStatus {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone()
+}
+
+/// What the agent can say about timing writes from the kernel's timestamps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TcpSendStatus {
+    /// The program is attached to `cgroup` and writes are timed.
+    pub attached: bool,
+    /// The cgroup it is attached to, empty when it is not.
+    pub cgroup: String,
+    /// Why it is off, in one sentence. `None` when it is on.
+    pub reason: Option<String>,
+}
+
+static SEND_STATUS: OnceLock<Mutex<TcpSendStatus>> = OnceLock::new();
+
+fn send_status_cell() -> &'static Mutex<TcpSendStatus> {
+    SEND_STATUS.get_or_init(|| Mutex::new(TcpSendStatus::default()))
+}
+
+/// Publish what the agent can say about timing writes.
+pub fn publish_send_status(status: TcpSendStatus) {
+    *send_status_cell()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = status;
+}
+
+/// What the agent can currently say about timing writes.
+#[must_use]
+pub fn send_status() -> TcpSendStatus {
+    send_status_cell()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// The status of timing writes when the counter itself is off: nothing to
+/// time them into.
+#[must_use]
+pub fn send_off_with_counter(reason: &str) -> TcpSendStatus {
+    TcpSendStatus {
+        attached: false,
+        cgroup: String::new(),
+        reason: Some(format!("the TCP health counter is off: {reason}")),
+    }
 }
 
 fn offsets(struct_name: &str, members: &[&str]) -> Result<Vec<u32>, String> {
@@ -145,13 +209,32 @@ fn key_address(family: u8, words: &[u32; 4]) -> IpAddr {
     }
 }
 
-/// One kernel key, its counts summed over the CPUs and its round-trip time
-/// samples, in domain words.
+fn domain_rtt(rtt: &TcpEdgeRtt) -> TcpRtt {
+    TcpRtt {
+        buckets: rtt.buckets,
+        sum_us: rtt.sum_us,
+        count: rtt.count,
+    }
+}
+
+/// The timed writes of one kernel key, in domain words.
+#[must_use]
+pub fn send_latency(send: &TcpEdgeSend) -> TcpSendLatency {
+    TcpSendLatency {
+        scheduled: domain_rtt(&send.stages[TCP_SEND_STAGE_SCHEDULED]),
+        sent: domain_rtt(&send.stages[TCP_SEND_STAGE_SENT]),
+        acked: domain_rtt(&send.stages[TCP_SEND_STAGE_ACKED]),
+    }
+}
+
+/// One kernel key, its counts summed over the CPUs, its round-trip time
+/// samples and its timed writes, in domain words.
 #[must_use]
 pub fn raw_edge(
     key: &TcpEdgeKey,
     per_cpu: &[TcpEdgeCounts],
     rtt: Option<&TcpEdgeRtt>,
+    send: Option<&TcpEdgeSend>,
 ) -> RawTcpEdge {
     let mut counts = TcpCounts::default();
     for c in per_cpu {
@@ -162,15 +245,14 @@ pub fn raw_edge(
             opened: c.opened,
             closed: c.closed,
             failed: c.failed,
-            rtt: TcpRtt::default(),
+            ..TcpCounts::default()
         });
     }
     if let Some(rtt) = rtt {
-        counts.rtt = TcpRtt {
-            buckets: rtt.buckets,
-            sum_us: rtt.sum_us,
-            count: rtt.count,
-        };
+        counts.rtt = domain_rtt(rtt);
+    }
+    if let Some(send) = send {
+        counts.send = send_latency(send);
     }
     RawTcpEdge {
         id: TcpEdgeId {
@@ -192,6 +274,7 @@ pub fn raw_edge(
 pub struct TcpHealthCounter {
     edges: PerCpuHashMap<MapData, TcpEdgeKey, TcpEdgeCounts>,
     rtt: HashMap<MapData, TcpEdgeKey, TcpEdgeRtt>,
+    send: HashMap<MapData, TcpEdgeKey, TcpEdgeSend>,
     metrics: PerCpuArray<MapData, u64>,
 }
 
@@ -217,6 +300,10 @@ impl TcpHealthCounter {
             ebpf.take_map("TCP_RTT")
                 .ok_or_else(|| anyhow::anyhow!("map 'TCP_RTT' not found"))?,
         )?;
+        let send = HashMap::try_from(
+            ebpf.take_map("TCP_SEND")
+                .ok_or_else(|| anyhow::anyhow!("map 'TCP_SEND' not found"))?,
+        )?;
         let metrics = PerCpuArray::try_from(
             ebpf.take_map("TCP_HEALTH_METRICS")
                 .ok_or_else(|| anyhow::anyhow!("map 'TCP_HEALTH_METRICS' not found"))?,
@@ -224,6 +311,7 @@ impl TcpHealthCounter {
         Ok(Self {
             edges,
             rtt,
+            send,
             metrics,
         })
     }
@@ -243,22 +331,37 @@ impl TcpHealthPort for TcpHealthCounter {
                 entry.map_err(|e| DomainError::EngineError(format!("TCP_RTT read failed: {e}")))?;
             rtts.insert(key, rtt);
         }
+        let mut sends = BTreeMap::new();
+        for entry in &self.send {
+            let (key, send) = entry
+                .map_err(|e| DomainError::EngineError(format!("TCP_SEND read failed: {e}")))?;
+            sends.insert(key, send);
+        }
         let mut raw = Vec::new();
         for entry in &self.edges {
             let (key, values) = entry
                 .map_err(|e| DomainError::EngineError(format!("TCP_EDGES read failed: {e}")))?;
             let per_cpu: Vec<TcpEdgeCounts> = values.iter().copied().collect();
-            raw.push(raw_edge(&key, &per_cpu, rtts.remove(&key).as_ref()));
+            raw.push(raw_edge(
+                &key,
+                &per_cpu,
+                rtts.remove(&key).as_ref(),
+                sends.remove(&key).as_ref(),
+            ));
         }
-        // An edge sampled for its round-trip time after the counter map was
-        // full still carries its samples.
+        // An edge sampled for its round-trip time or timed for its writes
+        // after the counter map was full still carries its samples.
         for (key, rtt) in &rtts {
-            raw.push(raw_edge(key, &[], Some(rtt)));
+            raw.push(raw_edge(key, &[], Some(rtt), sends.remove(key).as_ref()));
+        }
+        for (key, send) in &sends {
+            raw.push(raw_edge(key, &[], None, Some(send)));
         }
         let uncounted = self
             .metric(TCP_HEALTH_METRIC_KEYS_FULL)
             .saturating_add(self.metric(TCP_HEALTH_METRIC_UNCONFIGURED))
-            .saturating_add(self.metric(TCP_HEALTH_METRIC_UNREADABLE));
+            .saturating_add(self.metric(TCP_HEALTH_METRIC_UNREADABLE))
+            .saturating_add(self.metric(TCP_HEALTH_METRIC_SEND_REFUSED));
         Ok((raw, uncounted))
     }
 }
@@ -324,6 +427,85 @@ impl TcpHealthAttacher {
     }
 }
 
+/// Holds the cgroup link of the program timing writes alive.
+#[derive(Default)]
+pub struct TcpSendAttacher {
+    link: Option<OwnedFd>,
+    warden: Option<Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
+}
+
+impl TcpSendAttacher {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Route the privileged `BPF_LINK_CREATE` through the warden at `sock`.
+    #[must_use]
+    pub fn with_warden_socket(mut self, sock: impl Into<PathBuf>) -> Self {
+        let sock = sock.into();
+        self.warden = Some(crate::warden::attribution::client_for(&sock));
+        self
+    }
+
+    /// Attach the program of `loader` to `cgroup`, publishing what happened.
+    /// A kernel that refused the program at load is named with its reason.
+    pub fn attach(&mut self, loader: &EbpfLoader, cgroup: &str) -> TcpSendStatus {
+        let status = match self.attach_one(loader, cgroup) {
+            Ok(link) => {
+                self.link = Some(link);
+                info!(cgroup, "TCP writes timed from the kernel's timestamps");
+                TcpSendStatus {
+                    attached: true,
+                    cgroup: cgroup.to_owned(),
+                    reason: None,
+                }
+            }
+            Err(reason) => {
+                warn!(
+                    cgroup,
+                    reason, "TCP writes not timed: round-trip time sampled at state changes only"
+                );
+                TcpSendStatus {
+                    attached: false,
+                    cgroup: String::new(),
+                    reason: Some(reason),
+                }
+            }
+        };
+        publish_send_status(status.clone());
+        status
+    }
+
+    fn attach_one(&self, loader: &EbpfLoader, cgroup: &str) -> Result<OwnedFd, String> {
+        if let Some(reason) = loader.refused_program(TCP_SEND_PROGRAM) {
+            return Err(format!("the kernel refused `{TCP_SEND_PROGRAM}`: {reason}"));
+        }
+        let prog_fd: RawFd = loader
+            .program_fd(TCP_SEND_PROGRAM)
+            .ok_or_else(|| format!("program `{TCP_SEND_PROGRAM}` is not in the loaded object"))?;
+        match &self.warden {
+            Some(client) => crate::warden::attribution::attach_via_warden(
+                client,
+                prog_fd,
+                cgroup,
+                BPF_CGROUP_SOCK_OPS,
+            )
+            .map_err(|e| e.to_string()),
+            None => {
+                kfunc_attach::attach_cgroup(TCP_SEND_PROGRAM, prog_fd, cgroup, BPF_CGROUP_SOCK_OPS)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    /// Whether this attacher holds the link.
+    #[must_use]
+    pub fn attached(&self) -> bool {
+        self.link.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,7 +541,7 @@ mod tests {
             sum_us: 600,
             count: 3,
         };
-        let edge = raw_edge(&key, &per_cpu, Some(&rtt));
+        let edge = raw_edge(&key, &per_cpu, Some(&rtt), None);
         assert_eq!(edge.counts.rtt.buckets[2], 3);
         assert_eq!(edge.counts.rtt.sum_us, 600);
         assert_eq!(edge.counts.rtt.count, 3);
@@ -389,10 +571,41 @@ mod tests {
             port_is_local: 0,
             ..TcpEdgeKey::default()
         };
-        let edge = raw_edge(&key, &[], None);
+        let edge = raw_edge(&key, &[], None, None);
         assert_eq!(edge.id.local, IpAddr::V6(addr));
         assert_eq!(edge.id.role, EdgeRole::Client);
         assert!(edge.counts.is_zero());
+    }
+
+    #[test]
+    fn timed_writes_read_back_stage_by_stage() {
+        let mut send = TcpEdgeSend::default();
+        send.stages[TCP_SEND_STAGE_SCHEDULED].buckets[0] = 4;
+        send.stages[TCP_SEND_STAGE_SCHEDULED].count = 4;
+        send.stages[TCP_SEND_STAGE_SCHEDULED].sum_us = 40;
+        send.stages[TCP_SEND_STAGE_SENT].count = 3;
+        send.stages[TCP_SEND_STAGE_SENT].sum_us = 90;
+        send.stages[TCP_SEND_STAGE_ACKED].buckets[5] = 2;
+        send.stages[TCP_SEND_STAGE_ACKED].count = 2;
+        send.stages[TCP_SEND_STAGE_ACKED].sum_us = 9_000;
+        let edge = raw_edge(&TcpEdgeKey::default(), &[], None, Some(&send));
+        let timed = edge.counts.send;
+        assert_eq!(timed.scheduled.count, 4);
+        assert_eq!(timed.scheduled.buckets[0], 4);
+        assert_eq!(timed.sent.sum_us, 90);
+        assert_eq!(timed.acked.buckets[5], 2);
+        assert_eq!(timed.acked.sum_us, 9_000);
+        assert!(edge.counts.rtt.count == 0 && edge.counts.opened == 0);
+    }
+
+    #[test]
+    fn the_send_program_is_the_one_the_object_may_do_without() {
+        assert_eq!(TCP_HEALTH_OPTIONAL, [TCP_SEND_PROGRAM]);
+        let off = send_off_with_counter("turned off");
+        assert!(!off.attached);
+        assert!(off.reason.is_some_and(|r| r.contains("turned off")));
+        // Nothing attached until a loader hands the program over.
+        assert!(!TcpSendAttacher::new().attached());
     }
 
     #[test]

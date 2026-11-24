@@ -248,6 +248,16 @@ pub const CATALOGUE: &[Capability] = &[
         fallback: "root stops the agent like any process, and the fleet raises the silence \
                    after the fact",
     },
+    Capability {
+        id: "tcp_send_timestamps",
+        unlocks: "the time each write waits to be queued, handed to the driver and \
+                  acknowledged, timed by the kernel per edge",
+        probe: ProbeKind::AttachStatus,
+        since: KernelVersion::FLOOR,
+        needs_lsm: false,
+        fallback: "round-trip times are still sampled when a connection opens and closes, \
+                   and no write is timed",
+    },
 ];
 
 impl Capability {
@@ -328,6 +338,7 @@ mod tests {
         "write_refusal",
         "self_protection",
         "tamper_protection",
+        "tcp_send_timestamps",
     ];
 
     #[test]

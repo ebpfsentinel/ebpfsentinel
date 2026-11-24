@@ -226,6 +226,7 @@ suite_profiles:
   "148": datapath
   "150": datapath
   "151": datapath
+  "152": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -1388,6 +1389,14 @@ coverage:
     kernel_min: "6.18"
     profile: datapath
     notes: "88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list"
+
+  - kind: capability
+    feature: tcp_send_timestamps
+    suites: ["152"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "152 reads the capability active, writes over connections to a listener in the test namespace and reads the time to scheduled, sent and acked back per edge, then turns send_latency off and reads the round trip still sampled with no write timed"
 
 # ── Attack suites (per-suite tagging) ────────────────────────────────
 # Rows above map features → suites. The block below tags each Wave-2

@@ -390,7 +390,7 @@ fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
         attribution_attach, bpf_guard, dlp_record, exec_network, file_kfunc_probe,
         kfunc_feature_probe, lsm_probe, process_attach, quarantine_map_manager, signal_attach,
-        tamper_guard, workload_firewall_attach, write_refusal,
+        tamper_guard, tcp_health, workload_firewall_attach, write_refusal,
     };
     match id {
         "bpf_lsm" => Some(lsm_evidence(lsm_probe::status())),
@@ -430,6 +430,10 @@ fn host_evidence(id: &str) -> Option<Evidence> {
         "tamper_protection" => {
             let s = tamper_guard::status();
             Some(attach_evidence(s.protected, s.reason))
+        }
+        "tcp_send_timestamps" => {
+            let s = tcp_health::send_status();
+            Some(attach_evidence(s.attached, s.reason))
         }
         "write_refusal" => {
             let s = write_refusal::status();
