@@ -199,12 +199,17 @@ impl DlpAlert {
     }
 }
 
-/// Built-in pattern ID prefixes (OSS-available categories).
-const BUILTIN_PREFIXES: &[&str] = &["dlp-pci-", "dlp-pii-", "dlp-cred-"];
-
-/// Check whether a pattern ID corresponds to a built-in pattern.
-pub fn is_builtin_pattern_id(id: &str) -> bool {
-    BUILTIN_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
+/// Whether a pattern is one the open source agent ships: the exact id of a
+/// built-in, carrying that built-in's own expression.
+///
+/// A configuration may restate a built-in to rename it, change its severity,
+/// description or category, or switch it off; it may not change what it
+/// matches. Checking the id alone let any expression in under a borrowed
+/// prefix, which made custom patterns free.
+pub fn is_builtin_pattern(id: &str, regex: &str) -> bool {
+    default_patterns()
+        .iter()
+        .any(|builtin| builtin.id.0 == id && builtin.regex == regex)
 }
 
 /// Return the predefined DLP patterns:

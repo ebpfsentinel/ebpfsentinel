@@ -902,15 +902,17 @@ impl AgentConfig {
         // Validate how much of each TLS record the probes hand over
         self.dlp.validate_record_bytes()?;
 
-        // Reject custom patterns and block mode (enterprise only)
+        // Reject custom patterns and block mode (paid tiers, Professional and up)
         {
-            use domain::dlp::entity::is_builtin_pattern_id;
+            use domain::dlp::entity::is_builtin_pattern;
             for pattern_cfg in &self.dlp.patterns {
-                if !is_builtin_pattern_id(&pattern_cfg.id) {
+                if !is_builtin_pattern(&pattern_cfg.id, &pattern_cfg.regex) {
                     return Err(ConfigError::Validation {
                         field: format!("dlp.patterns (id: {})", pattern_cfg.id),
-                        message: "custom DLP patterns require enterprise license; \
-                                  OSS supports built-in patterns only (dlp-pci-*, dlp-pii-*, dlp-cred-*)"
+                        message: "not a built-in pattern with its own expression; custom \
+                                  patterns and changed built-ins require a paid license \
+                                  (Professional and up). A built-in may be restated to rename \
+                                  it, change its severity or switch it off, with its regex as shipped"
                             .to_string(),
                     });
                 }
@@ -918,9 +920,10 @@ impl AgentConfig {
             if self.dlp.mode == "block" || self.dlp.mode == "enforce" {
                 return Err(ConfigError::Validation {
                     field: "dlp.mode".to_string(),
-                    message: "DLP block/enforce mode requires enterprise license; \
+                    message:
+                        "DLP block/enforce mode requires a paid license (Professional and up); \
                               OSS supports alert mode only"
-                        .to_string(),
+                            .to_string(),
                 });
             }
             for pattern_cfg in &self.dlp.patterns {
@@ -929,7 +932,9 @@ impl AgentConfig {
                 {
                     return Err(ConfigError::Validation {
                         field: format!("dlp.patterns[{}].mode", pattern_cfg.id),
-                        message: "per-pattern block mode requires enterprise license".to_string(),
+                        message:
+                            "per-pattern block mode requires a paid license (Professional and up)"
+                                .to_string(),
                     });
                 }
             }
@@ -1323,7 +1328,7 @@ impl AgentConfig {
                 field: "auto_response.policies".to_string(),
                 message: format!(
                     "OSS supports at most {MAX_AUTO_RESPONSE_POLICIES} auto-response policies (found {}). \
-                     Upgrade to Enterprise for unlimited policies.",
+                     The Enterprise tier lifts the limit.",
                     self.auto_response.policies.len()
                 ),
             });
@@ -4030,46 +4035,79 @@ agent:
     }
 
     #[test]
-    fn dlp_custom_patterns_parsed() {
-        let yaml = r#"
+    fn dlp_restated_builtin_parsed() {
+        let yaml = r"
 agent:
   interfaces: [eth0]
 dlp:
   enabled: true
   patterns:
-    - id: dlp-pci-001
-      name: Internal ID
-      regex: "INT-\\d{6}"
+    - id: dlp-pii-ssn
+      name: US SSN
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
       severity: high
-      data_type: custom
-"#;
+      data_type: pii
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.dlp.patterns.len(), 1);
-        assert_eq!(config.dlp.patterns[0].id, "dlp-pci-001");
+        assert_eq!(config.dlp.patterns[0].id, "dlp-pii-ssn");
         assert!(config.dlp.patterns[0].enabled);
     }
 
     #[test]
+    fn dlp_custom_pattern_refused_whatever_its_prefix() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+dlp:
+  patterns:
+    - id: dlp-pci-001
+      name: Internal ID
+      regex: 'INT-\d{6}'
+      severity: high
+      data_type: custom
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("Professional"), "{err}");
+    }
+
+    #[test]
+    fn dlp_builtin_with_a_changed_regex_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+dlp:
+  patterns:
+    - id: dlp-pii-ssn
+      name: Widened
+      regex: '\d{9}'
+      severity: high
+      data_type: pii
+";
+        assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
     fn dlp_patterns_to_domain() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 dlp:
   mode: alert
   patterns:
-    - id: dlp-pii-test
+    - id: dlp-pii-ssn
       name: Test
-      regex: "\\btest\\b"
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
       severity: medium
       data_type: custom
       description: A test pattern
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
         let added = patterns
             .iter()
-            .find(|p| p.id.0 == "dlp-pii-test")
-            .expect("configured pattern is loaded alongside the built-in set");
+            .find(|p| p.id.0 == "dlp-pii-ssn")
+            .expect("the restated built-in is loaded with the rest of the set");
         assert_eq!(added.severity, Severity::Medium);
         assert_eq!(added.mode, DomainMode::Alert);
         assert_eq!(added.data_type, "custom");
@@ -4085,7 +4123,7 @@ dlp:
         let builtin = domain::dlp::entity::default_patterns();
         let target = &builtin[0];
         let yaml = format!(
-            r#"
+            r"
 agent:
   interfaces: [eth0]
 dlp:
@@ -4093,12 +4131,12 @@ dlp:
   patterns:
     - id: {}
       name: Retuned
-      regex: "\\bretuned\\b"
+      regex: '{}'
       severity: low
       data_type: custom
       enabled: false
-"#,
-            target.id.0
+",
+            target.id.0, target.regex
         );
         let config = AgentConfig::from_yaml(&yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
@@ -4210,23 +4248,23 @@ dlp:
 
     #[test]
     fn dlp_pattern_disabled() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   interfaces: [eth0]
 dlp:
   patterns:
-    - id: dlp-pci-off
+    - id: dlp-pci-amex
       name: Disabled
-      regex: "\\d+"
+      regex: '\b3[47][0-9]{13}\b'
       severity: low
       data_type: custom
       enabled: false
-"#;
+";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let patterns = config.dlp_patterns().unwrap();
         let configured = patterns
             .iter()
-            .find(|p| p.id.0 == "dlp-pci-off")
+            .find(|p| p.id.0 == "dlp-pci-amex")
             .expect("the configured pattern is loaded");
         assert!(!configured.enabled);
     }

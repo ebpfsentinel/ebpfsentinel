@@ -60,11 +60,11 @@ impl DlpAppService {
 
     /// Set the DLP operating mode.
     ///
-    /// Only `Alert` mode is supported. `Block` mode requires enterprise.
+    /// Only `Alert` mode is supported. `Block` mode requires a paid license (Professional and up).
     pub fn set_mode(&mut self, mode: DomainMode) -> Result<(), DomainError> {
         if mode == DomainMode::Block {
             return Err(DlpError::EnterpriseRequired {
-                reason: "DLP block mode requires enterprise license; OSS supports alert mode only"
+                reason: "DLP block mode requires a paid license (Professional and up); OSS supports alert mode only"
                     .to_string(),
             }
             .into());
@@ -198,7 +198,16 @@ mod tests {
     impl ThreatIntelMetrics for TestMetrics {}
     impl ZoneMetrics for TestMetrics {}
 
+    /// A built-in as it ships, the only kind the OSS engine accepts.
     fn make_pattern(id: &str) -> DlpPattern {
+        domain::dlp::entity::default_patterns()
+            .into_iter()
+            .find(|p| p.id.0 == id)
+            .unwrap_or_else(|| panic!("no built-in {id}"))
+    }
+
+    /// A pattern of the licensed engine's own, which the OSS engine refuses.
+    fn custom_pattern(id: &str) -> DlpPattern {
         DlpPattern {
             id: RuleId(id.to_string()),
             name: format!("Test {id}"),
@@ -223,8 +232,8 @@ mod tests {
     #[test]
     fn add_and_list_patterns() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
-        svc.add_pattern(make_pattern("dlp-pci-002")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-visa")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-mastercard")).unwrap();
         assert_eq!(svc.list_patterns().len(), 2);
         assert_eq!(svc.pattern_count(), 2);
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 2);
@@ -234,19 +243,30 @@ mod tests {
     #[test]
     fn add_duplicate_fails() {
         let (mut svc, _) = make_service();
-        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
-        assert!(svc.add_pattern(make_pattern("dlp-pci-001")).is_err());
+        svc.add_pattern(make_pattern("dlp-pci-visa")).unwrap();
+        assert!(svc.add_pattern(make_pattern("dlp-pci-visa")).is_err());
         assert_eq!(svc.pattern_count(), 1);
     }
 
     #[test]
     fn remove_pattern_succeeds() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
-        svc.remove_pattern(&RuleId("dlp-pci-001".to_string()))
+        svc.add_pattern(make_pattern("dlp-pci-visa")).unwrap();
+        svc.remove_pattern(&RuleId("dlp-pci-visa".to_string()))
             .unwrap();
         assert_eq!(svc.pattern_count(), 0);
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_custom_pattern_is_refused() {
+        let (mut svc, _) = make_service();
+        let err = svc
+            .add_pattern(custom_pattern("dlp-pci-house-card"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Professional"), "{err}");
+        assert_eq!(svc.pattern_count(), 0);
     }
 
     #[test]
@@ -258,22 +278,22 @@ mod tests {
     #[test]
     fn reload_replaces_all() {
         let (mut svc, metrics) = make_service();
-        svc.add_pattern(make_pattern("dlp-pii-old")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pii-email")).unwrap();
         svc.reload_patterns(vec![
-            make_pattern("dlp-pci-new1"),
-            make_pattern("dlp-pci-new2"),
+            make_pattern("dlp-pii-ssn"),
+            make_pattern("dlp-cred-aws-key"),
         ])
         .unwrap();
         assert_eq!(svc.pattern_count(), 2);
-        assert_eq!(svc.list_patterns()[0].id.0, "dlp-pci-new1");
+        assert_eq!(svc.list_patterns()[0].id.0, "dlp-pii-ssn");
         assert_eq!(metrics.rules_loaded.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn scan_data_delegates() {
         let (mut svc, _) = make_service();
-        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
-        let matches = svc.scan_data(b"code 1234 here");
+        svc.add_pattern(make_pattern("dlp-pci-visa")).unwrap();
+        let matches = svc.scan_data(b"card 4111111111111111 here");
         assert_eq!(matches.len(), 1);
     }
 
@@ -293,12 +313,15 @@ mod tests {
         }
 
         let (mut svc, _) = make_service();
-        // Pattern requires four digits; "no digits here" would NOT match the
+        // The Visa pattern needs a card number; "no digits here" would NOT match the
         // OSS regex engine, so a hit proves the external matcher is used.
-        svc.add_pattern(make_pattern("dlp-pci-001")).unwrap();
+        svc.add_pattern(make_pattern("dlp-pci-visa")).unwrap();
         assert!(svc.scan_data(b"no digits here").is_empty());
         // The external pattern list need not be loadable by the OSS engine.
-        svc.set_external_matcher(Arc::new(StubMatcher), vec![make_pattern("visa-enterprise")]);
+        svc.set_external_matcher(
+            Arc::new(StubMatcher),
+            vec![custom_pattern("visa-enterprise")],
+        );
         let matches = svc.scan_data(b"no digits here");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].byte_length, 4);

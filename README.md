@@ -11,7 +11,7 @@
   <b>Network and host security for every Linux node, in one rootless eBPF agent.</b><br>
   Firewall · IDS/IPS · DDoS · DLP inside TLS · threat intel · NAT · load balancing · QoS<br>
   workload firewall · process, file and mass-encryption detection · packet trace · flow export<br>
-  <i>52 capabilities, free and open source, enforced in the kernel.</i>
+  <i>Free and open source, decided in the kernel.</i>
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@ on the full receive path ([benchmark results](tests/perf/BENCHMARK-RESULTS.md)).
 - **The verdict at the driver.** Unwanted traffic dies at XDP, before a socket, a copy or a context switch exists for it. What passes is inspected at TC without leaving the kernel: no sidecar hop, no packet copied to userspace on the fast path.
 - **Network and host, from one vantage point.** One agent per node sees east-west and north-south traffic, and also the process behind each flow, the files it changes and the executables allowed to reach the network. No per-app instrumentation, no sidecar per workload.
 - **Rootless by construction.** The agent loads its programs through a BPF token and holds zero `CAP_BPF` / `CAP_NET_ADMIN`; a small broker, the warden, keeps the few operations the kernel will not delegate. The domain, ports, application and agent crates are `#![forbid(unsafe_code)]`, and every alert carries its MITRE ATT&CK technique.
-- **Free, whole.** Every engine below is in this repository under AGPL-3.0, on as many hosts as you like. Nothing in the agent is paywalled; the [commercial layer](#oss-vs-enterprise) adds fleet, investigation and compliance on top.
+- **Free, with its limits stated.** Every engine below is in this repository under AGPL-3.0, on as many hosts as you like. A few stop at a stated ceiling (three automatic response policies, one alert-triggered capture of 60 s, DLP in alert mode on the built-in card, national identifier and credential patterns, three fixed roles); the [commercial layer](#oss-vs-enterprise) lifts them and adds fleet, investigation and compliance on top.
 
 ## What it does
 
@@ -544,7 +544,11 @@ See [Compatibility](https://docs.ebpfsentinel.io/operations/compatibility) for t
 
 The **open-source agent** is complete on its own: every engine listed above, the
 REST and gRPC APIs, the CLI, authentication and observability, on as many hosts
-as you like. Nothing in it is paywalled and nothing in it phones a licence server.
+as you like, and nothing in it phones a licence server. A few engines stop at a
+ceiling the agent states when a configuration crosses it: three automatic response
+policies, one alert-triggered capture of at most 60 s, DLP in alert mode on its
+built-in card, national identifier and credential patterns, and three fixed roles.
+The paid tiers lift them, as the table says.
 
 The **commercial layer** (`ebpfsentinel-enterprise`, the web console and the
 Kubernetes operator) is for running a fleet, investigating across it and proving
@@ -554,6 +558,8 @@ it to an auditor. It comes in three tiers, each containing the one before it:
 | --- | :---: | :---: | :---: | :---: |
 | *Built for* | *Anyone* | *A platform team on Kubernetes* | *A team running a SOC* | *Regulated estates, providers* |
 | **Every engine of the agent**, unlimited hosts | Yes | Yes | Yes | Yes |
+| Custom roles, DLP custom patterns and block mode (OSS: three fixed roles, alert mode on the built-in patterns) |  | Yes | Yes | Yes |
+| Unlimited response policies, concurrent and ring-buffer captures (OSS: three policies, one 60 s capture) |  |  | Yes | Yes |
 | Commercial licence instead of AGPL obligations |  | Yes | Yes | Yes |
 | Web console: entity pages, process tree, fleet service map, rule replay |  | Yes | Yes | Yes |
 | Kubernetes operator |  | Yes | Yes | Yes |

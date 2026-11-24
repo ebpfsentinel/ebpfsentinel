@@ -3,7 +3,7 @@ use regex::Regex;
 use crate::common::error::DomainError;
 
 use super::checksum::confirms;
-use super::entity::{DlpMatch, DlpPattern, is_builtin_pattern_id};
+use super::entity::{DlpMatch, DlpPattern, is_builtin_pattern};
 use super::error::DlpError;
 
 /// DLP engine: validates, stores, and manages DLP patterns.
@@ -25,14 +25,14 @@ impl DlpEngine {
     /// Add a single DLP pattern. Validates, checks for duplicates,
     /// and compiles the regex.
     ///
-    /// Only built-in patterns (prefixed `dlp-pci-`, `dlp-pii-`, `dlp-cred-`)
-    /// are accepted.
+    /// Only built-in patterns are accepted: a built-in id with its own
+    /// expression.
     pub fn add_pattern(&mut self, pattern: DlpPattern) -> Result<(), DomainError> {
-        if !is_builtin_pattern_id(&pattern.id.0) {
+        if !is_builtin_pattern(&pattern.id.0, &pattern.regex) {
             return Err(DlpError::EnterpriseRequired {
                 reason: format!(
-                    "custom DLP pattern '{}' requires enterprise license; \
-                     OSS supports built-in patterns only",
+                    "DLP pattern '{}' is not a built-in with its own expression; custom \
+                     patterns and changed built-ins require a paid license (Professional and up)",
                     pattern.id.0,
                 ),
             }
@@ -74,15 +74,15 @@ impl DlpEngine {
     /// Atomically replace all patterns. Validates all patterns and compiles
     /// all regexes before replacing. Rolls back on any error.
     ///
-    /// Only built-in patterns are accepted.
+    /// Only built-in patterns are accepted, each with its own expression.
     pub fn reload(&mut self, patterns: Vec<DlpPattern>) -> Result<(), DomainError> {
         // Validate all patterns first
         for pattern in &patterns {
-            if !is_builtin_pattern_id(&pattern.id.0) {
+            if !is_builtin_pattern(&pattern.id.0, &pattern.regex) {
                 return Err(DlpError::EnterpriseRequired {
                     reason: format!(
-                        "custom DLP pattern '{}' requires enterprise license; \
-                         OSS supports built-in patterns only",
+                        "DLP pattern '{}' is not a built-in with its own expression; custom \
+                         patterns and changed built-ins require a paid license (Professional and up)",
                         pattern.id.0,
                     ),
                 }
@@ -189,20 +189,23 @@ fn compile_pattern(pattern: &str) -> Result<Regex, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::entity::{DomainMode, RuleId, Severity};
-    use crate::dlp::entity::DlpPattern;
+    use crate::common::entity::RuleId;
+    use crate::dlp::entity::{DlpPattern, default_patterns};
 
-    fn pattern(id: &str, regex: &str) -> DlpPattern {
-        DlpPattern {
-            id: RuleId(id.to_string()),
-            name: format!("Test {id}"),
-            regex: regex.to_string(),
-            severity: Severity::High,
-            mode: DomainMode::Alert,
-            data_type: "pci".to_string(),
-            description: String::new(),
-            enabled: true,
-        }
+    /// A built-in exactly as it ships.
+    fn builtin(id: &str) -> DlpPattern {
+        default_patterns()
+            .into_iter()
+            .find(|p| p.id.0 == id)
+            .unwrap_or_else(|| panic!("no built-in {id}"))
+    }
+
+    fn ids(engine: &DlpEngine, data: &[u8]) -> Vec<String> {
+        engine
+            .scan_data(data)
+            .iter()
+            .map(|m| engine.patterns()[m.pattern_index].id.0.clone())
+            .collect()
     }
 
     // ── new / default ────────────────────────────────────────────
@@ -220,55 +223,90 @@ mod tests {
         assert_eq!(engine.pattern_count(), 0);
     }
 
-    // ── add_pattern ──────────────────────────────────────────────
+    // ── the open source ceiling ──────────────────────────────────
 
     #[test]
-    fn add_pattern_succeeds() {
+    fn every_builtin_is_accepted_as_shipped() {
         let mut engine = DlpEngine::new();
-        assert!(engine.add_pattern(pattern("dlp-pci-001", r"\d{4}")).is_ok());
-        assert_eq!(engine.pattern_count(), 1);
-        assert_eq!(engine.patterns()[0].id.0, "dlp-pci-001");
+        for pattern in default_patterns() {
+            engine.add_pattern(pattern).unwrap();
+        }
+        assert_eq!(engine.pattern_count(), default_patterns().len());
     }
+
+    #[test]
+    fn an_unknown_id_is_refused_whatever_its_prefix() {
+        let mut engine = DlpEngine::new();
+        let mut p = builtin("dlp-pii-ssn");
+        p.id = RuleId("dlp-pii-badge".to_string());
+        let err = engine.add_pattern(p).unwrap_err().to_string();
+        assert!(err.contains("Professional"), "{err}");
+        assert_eq!(engine.pattern_count(), 0);
+    }
+
+    #[test]
+    fn a_builtin_with_a_changed_expression_is_refused() {
+        let mut engine = DlpEngine::new();
+        let mut p = builtin("dlp-pii-ssn");
+        p.regex = r"ITB-[0-9]{8}".to_string();
+        assert!(engine.add_pattern(p).is_err());
+        assert_eq!(engine.pattern_count(), 0);
+    }
+
+    #[test]
+    fn a_builtin_may_be_renamed_retuned_and_switched_off() {
+        let mut engine = DlpEngine::new();
+        let mut p = builtin("dlp-pii-ssn");
+        p.name = "US social security number".to_string();
+        p.severity = crate::common::entity::Severity::Low;
+        p.description = "re-tuned".to_string();
+        p.enabled = false;
+        engine.add_pattern(p).unwrap();
+        assert_eq!(engine.pattern_count(), 1);
+    }
+
+    #[test]
+    fn reload_refuses_a_set_holding_one_changed_builtin() {
+        let mut engine = DlpEngine::new();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        let mut changed = builtin("dlp-pii-email");
+        changed.regex = r"\w+@\w+".to_string();
+        assert!(
+            engine
+                .reload(vec![builtin("dlp-pii-ssn"), changed])
+                .is_err()
+        );
+        // The set in place is kept.
+        assert_eq!(engine.pattern_count(), 1);
+        assert_eq!(engine.patterns()[0].id.0, "dlp-pci-visa");
+    }
+
+    // ── add_pattern ──────────────────────────────────────────────
 
     #[test]
     fn add_pattern_compiles_regex() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-001", r"\b4[0-9]{12}\b"))
-            .unwrap();
-        // If it compiled, scan_data should work
-        let matches = engine.scan_data(b"card 4111111111111 here");
-        assert_eq!(matches.len(), 1);
-    }
-
-    #[test]
-    fn add_pattern_invalid_regex_rejected() {
-        let mut engine = DlpEngine::new();
-        let result = engine.add_pattern(pattern("dlp-pci-001", r"[invalid"));
-        assert!(result.is_err());
-        assert_eq!(engine.pattern_count(), 0);
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        assert_eq!(
+            ids(&engine, b"card 4111111111111111 here"),
+            ["dlp-pci-visa"]
+        );
     }
 
     #[test]
     fn add_duplicate_pattern_fails() {
         let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-001", r"\d+")).unwrap();
-        assert!(engine.add_pattern(pattern("dlp-pci-001", r"\w+")).is_err());
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        assert!(engine.add_pattern(builtin("dlp-pci-visa")).is_err());
         assert_eq!(engine.pattern_count(), 1);
     }
 
     #[test]
     fn add_pattern_empty_id_rejected() {
         let mut engine = DlpEngine::new();
-        let result = engine.add_pattern(pattern("", r"\d+"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn add_pattern_empty_regex_rejected() {
-        let mut engine = DlpEngine::new();
-        let result = engine.add_pattern(pattern("dlp-pci-001", ""));
-        assert!(result.is_err());
+        let mut p = builtin("dlp-pci-visa");
+        p.id = RuleId(String::new());
+        assert!(engine.add_pattern(p).is_err());
     }
 
     // ── remove_pattern ───────────────────────────────────────────
@@ -276,13 +314,13 @@ mod tests {
     #[test]
     fn remove_pattern_succeeds() {
         let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-001", r"\d+")).unwrap();
-        engine.add_pattern(pattern("dlp-pci-002", r"\w+")).unwrap();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
         engine
-            .remove_pattern(&RuleId("dlp-pci-001".to_string()))
+            .remove_pattern(&RuleId("dlp-pci-visa".to_string()))
             .unwrap();
         assert_eq!(engine.pattern_count(), 1);
-        assert_eq!(engine.patterns()[0].id.0, "dlp-pci-002");
+        assert_eq!(engine.patterns()[0].id.0, "dlp-pii-ssn");
     }
 
     #[test]
@@ -294,16 +332,12 @@ mod tests {
     #[test]
     fn remove_keeps_compiled_in_sync() {
         let mut engine = DlpEngine::new();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
         engine
-            .add_pattern(pattern("dlp-pci-001", r"\b4\d{12}\b"))
+            .remove_pattern(&RuleId("dlp-pci-visa".to_string()))
             .unwrap();
-        engine
-            .add_pattern(pattern("dlp-pci-002", r"\d{3}-\d{2}-\d{4}"))
-            .unwrap();
-        engine
-            .remove_pattern(&RuleId("dlp-pci-001".to_string()))
-            .unwrap();
-        // Now dlp-002 is at index 0, should match SSN format
+        // The SSN pattern is now at index 0 and still matches.
         let matches = engine.scan_data(b"ssn is 123-45-6789 here");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].pattern_index, 0);
@@ -314,22 +348,19 @@ mod tests {
     #[test]
     fn reload_replaces_all_patterns() {
         let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-001", r"\d+")).unwrap();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
         engine
-            .reload(vec![
-                pattern("dlp-pci-010", r"\w+"),
-                pattern("dlp-pci-020", r"\d{4}"),
-            ])
+            .reload(vec![builtin("dlp-pii-email"), builtin("dlp-pii-ssn")])
             .unwrap();
         assert_eq!(engine.pattern_count(), 2);
-        assert_eq!(engine.patterns()[0].id.0, "dlp-pci-010");
-        assert_eq!(engine.patterns()[1].id.0, "dlp-pci-020");
+        assert_eq!(engine.patterns()[0].id.0, "dlp-pii-email");
+        assert_eq!(engine.patterns()[1].id.0, "dlp-pii-ssn");
     }
 
     #[test]
     fn reload_empty_clears_all() {
         let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-001", r"\d+")).unwrap();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
         engine.reload(vec![]).unwrap();
         assert_eq!(engine.pattern_count(), 0);
     }
@@ -337,30 +368,17 @@ mod tests {
     #[test]
     fn reload_rejects_duplicates() {
         let mut engine = DlpEngine::new();
-        let result = engine.reload(vec![
-            pattern("dlp-pci-001", r"\d+"),
-            pattern("dlp-pci-001", r"\w+"),
-        ]);
+        let result = engine.reload(vec![builtin("dlp-pci-visa"), builtin("dlp-pci-visa")]);
         assert!(result.is_err());
         assert_eq!(engine.pattern_count(), 0);
     }
 
     #[test]
-    fn reload_rejects_invalid_regex() {
-        let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-old", r"\d+")).unwrap();
-        let result = engine.reload(vec![pattern("dlp-pci-001", r"[bad")]);
-        assert!(result.is_err());
-        // Original patterns preserved on failure
-        assert_eq!(engine.pattern_count(), 1);
-        assert_eq!(engine.patterns()[0].id.0, "dlp-pci-old");
-    }
-
-    #[test]
     fn reload_validates_all_patterns() {
         let mut engine = DlpEngine::new();
-        let result = engine.reload(vec![pattern("", r"\d+")]);
-        assert!(result.is_err());
+        let mut p = builtin("dlp-pci-visa");
+        p.id = RuleId(String::new());
+        assert!(engine.reload(vec![p]).is_err());
     }
 
     // ── scan_data ────────────────────────────────────────────────
@@ -368,12 +386,9 @@ mod tests {
     #[test]
     fn scan_data_finds_credit_card() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-visa", r"\b4[0-9]{12}(?:[0-9]{3})?\b"))
-            .unwrap();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
 
-        let data = b"payment with card 4111111111111111 confirmed";
-        let matches = engine.scan_data(data);
+        let matches = engine.scan_data(b"payment with card 4111111111111111 confirmed");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].pattern_index, 0);
         assert_eq!(matches[0].byte_length, 16);
@@ -382,92 +397,66 @@ mod tests {
     #[test]
     fn scan_data_finds_email() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern(
-                "dlp-pii-email",
-                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-            ))
-            .unwrap();
-
-        let data = b"contact: user@example.com for info";
-        let matches = engine.scan_data(data);
-        assert_eq!(matches.len(), 1);
+        engine.add_pattern(builtin("dlp-pii-email")).unwrap();
+        assert_eq!(
+            ids(&engine, b"contact: user@example.com for info"),
+            ["dlp-pii-email"]
+        );
     }
 
     #[test]
     fn scan_data_finds_aws_key() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-cred-aws", r"\bAKIA[0-9A-Z]{16}\b"))
-            .unwrap();
-
-        let data = b"key=AKIAIOSFODNN7EXAMPLE";
-        let matches = engine.scan_data(data);
-        assert_eq!(matches.len(), 1);
+        engine.add_pattern(builtin("dlp-cred-aws-key")).unwrap();
+        assert_eq!(
+            ids(&engine, b"key=AKIAIOSFODNN7EXAMPLE "),
+            ["dlp-cred-aws-key"]
+        );
     }
 
     #[test]
     fn scan_data_finds_ssn() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pii-ssn", r"\b\d{3}-\d{2}-\d{4}\b"))
-            .unwrap();
-
-        let data = b"SSN: 123-45-6789";
-        let matches = engine.scan_data(data);
-        assert_eq!(matches.len(), 1);
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
+        assert_eq!(ids(&engine, b"SSN: 123-45-6789"), ["dlp-pii-ssn"]);
     }
 
     #[test]
     fn scan_data_drops_a_national_id_that_fails_its_check_digit() {
         let mut engine = DlpEngine::new();
-        engine
-            .reload(crate::dlp::entity::default_patterns())
-            .unwrap();
-        let ids = |data: &[u8]| -> Vec<String> {
-            engine
-                .scan_data(data)
-                .iter()
-                .map(|m| engine.patterns()[m.pattern_index].id.0.clone())
-                .collect()
-        };
+        engine.reload(default_patterns()).unwrap();
 
-        assert_eq!(ids(b"nir=1 85 05 78 006 084 91"), ["dlp-pii-fr-nir"]);
-        assert!(ids(b"nir=1 85 05 78 006 084 92").is_empty());
-        assert_eq!(ids(b"cf RSSMRA85T10A562S"), ["dlp-pii-it-cf"]);
-        assert_eq!(ids(b"dni 12345678Z"), ["dlp-pii-es-dni"]);
-        assert!(ids(b"dni 12345678A").is_empty());
+        assert_eq!(
+            ids(&engine, b"nir=1 85 05 78 006 084 91"),
+            ["dlp-pii-fr-nir"]
+        );
+        assert!(ids(&engine, b"nir=1 85 05 78 006 084 92").is_empty());
+        assert_eq!(ids(&engine, b"cf RSSMRA85T10A562S"), ["dlp-pii-it-cf"]);
+        assert_eq!(ids(&engine, b"dni 12345678Z"), ["dlp-pii-es-dni"]);
+        assert!(ids(&engine, b"dni 12345678A").is_empty());
         // Nine separated digits are a phone number until Luhn says otherwise.
-        assert!(ids(b"call 293 456 787").is_empty());
-        assert_eq!(ids(b"sin 293 456 786"), ["dlp-pii-ca-sin"]);
+        assert!(ids(&engine, b"call 293 456 787").is_empty());
+        assert_eq!(ids(&engine, b"sin 293 456 786"), ["dlp-pii-ca-sin"]);
     }
 
     #[test]
     fn scan_data_multiple_matches() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-digits", r"\b\d{4}\b"))
-            .unwrap();
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
 
-        let data = b"codes 1234 and 5678 here";
-        let matches = engine.scan_data(data);
+        let matches = engine.scan_data(b"ids 123-45-6789 and 234-56-7891 here");
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].byte_offset, 6);
-        assert_eq!(matches[1].byte_offset, 15);
+        assert_eq!(matches[0].byte_offset, 4);
+        assert_eq!(matches[1].byte_offset, 20);
     }
 
     #[test]
     fn scan_data_multiple_patterns() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pii-email", r"\b\w+@\w+\.\w+\b"))
-            .unwrap();
-        engine
-            .add_pattern(pattern("dlp-pii-ssn", r"\b\d{3}-\d{2}-\d{4}\b"))
-            .unwrap();
+        engine.add_pattern(builtin("dlp-pii-email")).unwrap();
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
 
-        let data = b"user@test.com and 123-45-6789";
-        let matches = engine.scan_data(data);
+        let matches = engine.scan_data(b"user@test.com and 123-45-6789");
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].pattern_index, 0); // email
         assert_eq!(matches[1].pattern_index, 1); // ssn
@@ -476,71 +465,49 @@ mod tests {
     #[test]
     fn scan_data_no_match() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-visa", r"\b4[0-9]{15}\b"))
-            .unwrap();
-
-        let data = b"nothing sensitive here at all";
-        let matches = engine.scan_data(data);
-        assert!(matches.is_empty());
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
+        assert!(
+            engine
+                .scan_data(b"nothing sensitive here at all")
+                .is_empty()
+        );
     }
 
     #[test]
     fn scan_data_disabled_pattern_skipped() {
         let mut engine = DlpEngine::new();
-        let mut p = pattern("dlp-pci-digits", r"\b\d{4}\b");
+        let mut p = builtin("dlp-pii-ssn");
         p.enabled = false;
         engine.add_pattern(p).unwrap();
-
-        let data = b"code 1234 here";
-        let matches = engine.scan_data(data);
-        assert!(matches.is_empty());
+        assert!(engine.scan_data(b"SSN: 123-45-6789").is_empty());
     }
 
     #[test]
     fn scan_data_empty_input() {
         let mut engine = DlpEngine::new();
-        engine.add_pattern(pattern("dlp-pci-any", r"\d+")).unwrap();
-        let matches = engine.scan_data(b"");
-        assert!(matches.is_empty());
+        engine.reload(default_patterns()).unwrap();
+        assert!(engine.scan_data(b"").is_empty());
     }
 
     #[test]
     fn scan_data_no_false_positive_random_numbers() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-visa", r"\b4[0-9]{12}(?:[0-9]{3})?\b"))
-            .unwrap();
+        engine.add_pattern(builtin("dlp-pci-visa")).unwrap();
 
         // Short number should not match Visa pattern (needs 13 or 16 digits)
-        let data = b"order 4123 confirmed";
-        let matches = engine.scan_data(data);
-        assert!(matches.is_empty());
+        assert!(engine.scan_data(b"order 4123 confirmed").is_empty());
     }
 
     #[test]
     fn scan_data_handles_binary_lossy() {
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(pattern("dlp-pci-digits", r"\b\d{4}\b"))
-            .unwrap();
+        engine.add_pattern(builtin("dlp-pii-ssn")).unwrap();
 
-        // Binary data with embedded digits
+        // Binary data around a readable identifier
         let mut data = vec![0xFF, 0xFE, b' '];
-        data.extend_from_slice(b"1234");
+        data.extend_from_slice(b"123-45-6789");
         data.push(b' ');
         data.extend_from_slice(&[0xFF, 0xFE]);
-        let matches = engine.scan_data(&data);
-        assert_eq!(matches.len(), 1);
-    }
-
-    // ── regex DoS prevention ──────────────────────────────────────
-
-    #[test]
-    fn deeply_nested_regex_rejected() {
-        let mut engine = DlpEngine::new();
-        let deep = "(".repeat(300) + &")".repeat(300);
-        let result = engine.add_pattern(pattern("dlp-pci-redos", &deep));
-        assert!(result.is_err());
+        assert_eq!(engine.scan_data(&data).len(), 1);
     }
 }

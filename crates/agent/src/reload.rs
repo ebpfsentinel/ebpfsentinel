@@ -1306,7 +1306,7 @@ mod tests {
         let path = dir.path().join("agent.yaml");
         let yaml = "agent:\n  interfaces: [lo]\ndlp:\n  enabled: true\n  patterns:\n    \
                     - id: dlp-pci-visa\n      name: Visa re-tuned\n      \
-                    regex: '4[0-9]{15}'\n      severity: low\n      data_type: pci\n";
+                    regex: '\\b4[0-9]{12}(?:[0-9]{3})?\\b'\n      severity: low\n      data_type: pci\n";
         std::fs::write(&path, yaml).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();

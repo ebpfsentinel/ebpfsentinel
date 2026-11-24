@@ -4757,7 +4757,6 @@ mod tests {
 
     use crate::dlp_service_impl::DlpAppService;
     use domain::dlp::engine::DlpEngine;
-    use domain::dlp::entity::DlpPattern;
     use ebpf_common::dlp::DLP_MAX_EXCERPT;
 
     fn make_dlp_event_with_data(data: &[u8]) -> DlpEvent {
@@ -4781,18 +4780,12 @@ mod tests {
     fn make_dlp_service_with_pattern() -> Arc<ArcSwap<DlpAppService>> {
         let metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
         let mut engine = DlpEngine::new();
-        engine
-            .add_pattern(DlpPattern {
-                id: RuleId("dlp-pci-001".to_string()),
-                name: "Credit Card".to_string(),
-                regex: r"\d{4}".to_string(),
-                severity: Severity::High,
-                mode: DomainMode::Alert,
-                data_type: "pci".to_string(),
-                description: String::new(),
-                enabled: true,
-            })
+        let mut visa = domain::dlp::entity::default_patterns()
+            .into_iter()
+            .find(|p| p.id.0 == "dlp-pci-visa")
             .unwrap();
+        visa.name = "Credit Card".to_string();
+        engine.add_pattern(visa).unwrap();
         Arc::new(ArcSwap::from_pointee(DlpAppService::new(engine, metrics)))
     }
 
@@ -4953,9 +4946,9 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
             .with_dlp_service(Arc::clone(&dlp));
 
-        // The digits sit past the 4,096 bytes the bounded copy would read.
+        // The card number sits past the 4,096 bytes the bounded copy would read.
         let mut data = vec![b'a'; DLP_MAX_EXCERPT + 100];
-        data.extend_from_slice(b"1234");
+        data.extend_from_slice(b" 4111111111111111");
         dispatcher.dispatch_agent_event(whole_record(&data));
         assert!(alert_rx.try_recv().is_ok(), "the whole record is scanned");
 
@@ -5024,14 +5017,14 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
             .with_dlp_service(Arc::clone(&dlp));
 
-        // Data containing 4 consecutive digits should match the \d{4} pattern
-        let dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        // A Visa test number matches the built-in card pattern
+        let dlp_event = make_dlp_event_with_data(b"card number 4111111111111111 here");
         dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
 
         let alert = alert_rx.try_recv().unwrap();
         match alert {
             AlertEvent::Dlp(a) => {
-                assert_eq!(a.pattern_id.0, "dlp-pci-001");
+                assert_eq!(a.pattern_id.0, "dlp-pci-visa");
                 assert_eq!(a.pattern_name, "Credit Card");
             }
             _ => panic!("expected AlertEvent::Dlp"),
@@ -5065,7 +5058,7 @@ mod tests {
                 source: DlpIdentitySource::ProcessAtAlertTime,
             }))));
 
-        let mut dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        let mut dlp_event = make_dlp_event_with_data(b"card number 4111111111111111 here");
         dlp_event.flow = ebpf_common::dlp::DlpSocket {
             src_addr: [0x0a01_0203, 0, 0, 0],
             dst_addr: [0x5db8_d822, 0, 0, 0],
@@ -5101,7 +5094,7 @@ mod tests {
             .with_dlp_service(Arc::clone(&dlp))
             .with_executable_reader(Arc::new(FixedExecutable(None)));
 
-        let dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        let dlp_event = make_dlp_event_with_data(b"card number 4111111111111111 here");
         dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
 
         match alert_rx.try_recv().unwrap() {

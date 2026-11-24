@@ -269,13 +269,15 @@ dlp:
   enabled: true
   mode: alert
   patterns:
-    - id: dlp-pii-it-badge
-      name: integration badge number
-      regex: "ITB-[0-9]{8}"
+    # A built-in restated with its regex as shipped: the open source agent
+    # lets a configuration rename, re-rank or switch one off, never widen it.
+    - id: dlp-pii-ssn
+      name: US social security number, switched off
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
       severity: low
       data_type: pii
       mode: alert
-      description: a made-up badge format no real traffic carries
+      description: switched off on the lane, where no traffic carries one
       enabled: false
   # Read only the workloads named here, none of which runs on the lane.
   scope:

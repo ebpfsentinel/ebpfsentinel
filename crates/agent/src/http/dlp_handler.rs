@@ -348,9 +348,9 @@ mod tests {
 
     fn pattern(mode: DomainMode) -> DlpPattern {
         DlpPattern {
-            id: RuleId("dlp-cred-aws".to_string()),
+            id: RuleId("dlp-cred-aws-key".to_string()),
             name: "AWS access key".to_string(),
-            regex: "AKIA[0-9A-Z]{16}".to_string(),
+            regex: r"\bAKIA[0-9A-Z]{16}\b".to_string(),
             severity: Severity::Critical,
             mode,
             data_type: "credentials".to_string(),

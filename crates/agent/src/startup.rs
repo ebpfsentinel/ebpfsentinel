@@ -1041,7 +1041,7 @@ pub async fn run(
         dlp_engine.reload(patterns)?;
     }
     let mut dlp_svc = DlpAppService::new(dlp_engine, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
-    // Block mode is enterprise-only and the config validator has already
+    // Block mode is paid-tier only and the config validator has already
     // refused it, so this only ever sets alert on an OSS agent.
     dlp_svc.set_mode(config.dlp_mode()?)?;
     dlp_svc.set_enabled(config.dlp.enabled);

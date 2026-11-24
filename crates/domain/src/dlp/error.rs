@@ -16,7 +16,7 @@ pub enum DlpError {
     #[error("invalid regex in pattern '{pattern}': {reason}")]
     InvalidRegex { pattern: String, reason: String },
 
-    #[error("enterprise feature required: {reason}")]
+    #[error("paid feature required: {reason}")]
     EnterpriseRequired { reason: String },
 
     #[error("invalid DLP scope selector: {reason}")]
