@@ -100,6 +100,15 @@
       "unlocks": "a signal that reaches its target at once, even a process making no syscall"
     },
     {
+      "condition": "a kernel built with it",
+      "fallback": "the DLP probes copy at most 4,096 bytes of each buffer, and a pattern past them is not seen",
+      "id": "dlp_whole_record",
+      "needs_lsm": false,
+      "probe": "loaded",
+      "since": "6.18",
+      "unlocks": "a DLP event carrying a whole TLS record, up to dlp.record_bytes of plaintext, read straight into the ring buffer"
+    },
+    {
       "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
       "fallback": "an observing list is skipped with the reason and an enforcing list refuses to start the agent",
       "id": "network_executables",

@@ -224,6 +224,7 @@ suite_profiles:
   "146": datapath
   "147": datapath
   "148": datapath
+  "150": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -939,11 +940,11 @@ coverage:
 
   - kind: domain_module
     feature: dlp
-    suites: ["16", "27", "60", "62", "perf/06"]
+    suites: ["16", "27", "60", "62", "150", "perf/06"]
     topology: 2vm
     kernel_min: "6.18"
     profile: pr
-    notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
+    notes: "Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half, suite 150 a secret past the first 4,096 bytes of one write and the dlp.record_bytes bounds. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06"
 
   - kind: domain_module
     feature: dns
@@ -1354,6 +1355,14 @@ coverage:
     kernel_min: "6.18"
     profile: datapath
     notes: "A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only"
+
+  - kind: capability
+    feature: dlp_whole_record
+    suites: ["150"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name"
 
   - kind: capability
     feature: network_executables

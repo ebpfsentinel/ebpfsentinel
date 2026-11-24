@@ -8544,6 +8544,11 @@ pub fn try_load_uprobe_dlp(
     // agent's ring buffer.
     push_dlp_cgroup_scope(&mut loader, config, scope)?;
 
+    // How much of each TLS record one event carries. The size goes in only
+    // where the loader kept the dynptr read; a probe it had to degrade copies
+    // the bounded excerpt, and the size stays at zero so nothing asks it to.
+    push_dlp_record_size(&mut loader, config);
+
     // Discover SSL libraries through the host proc root (`/host/proc` when the
     // host proc is bind-mounted into the agent), so the DLP uprobe sees
     // neighbouring containers' TLS, not only the agent's own. The same path is
@@ -8661,6 +8666,33 @@ pub fn try_load_uprobe_dlp(
 /// cgroup root to its id and refuses to arm the probes when none of them exists
 /// on this node, since an allow list that matches nothing captures nothing
 /// while every counter says DLP is loaded.
+fn push_dlp_record_size(loader: &mut EbpfLoader, config: &AgentConfig) {
+    let mut status =
+        adapters::ebpf::dlp_record::outcome(loader.degraded_programs(), config.dlp.record_bytes);
+    if status.loaded {
+        if let Err(e) = adapters::ebpf::dlp_record::push_dlp_record_bytes(
+            loader.ebpf_mut(),
+            status.record_bytes,
+        ) {
+            warn!("DLP whole-record size not written, the probes copy 4,096 bytes: {e}");
+            status.loaded = false;
+            status.reason = Some(format!("the record size could not be written: {e}"));
+            status.record_bytes = 0;
+        } else {
+            info!(
+                record_bytes = status.record_bytes,
+                "DLP probes read whole TLS records"
+            );
+        }
+    } else {
+        warn!(
+            reason = status.reason.as_deref().unwrap_or_default(),
+            "DLP probes copy at most 4,096 bytes of each buffer"
+        );
+    }
+    adapters::ebpf::dlp_record::publish_status(status);
+}
+
 fn push_dlp_cgroup_scope(
     loader: &mut EbpfLoader,
     config: &AgentConfig,

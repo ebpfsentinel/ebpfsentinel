@@ -16,6 +16,7 @@ pub mod crypto_attach;
 pub mod datapath_trace;
 pub mod dlp_attach;
 pub mod dlp_event_reader;
+pub mod dlp_record;
 pub mod dlp_scope;
 pub mod dns_event_reader;
 pub mod drop_reason;

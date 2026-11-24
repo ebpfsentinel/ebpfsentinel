@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::bindings::bpf_dynptr;
 use aya_ebpf::{
     btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
     helpers::{
@@ -16,12 +17,13 @@ use ebpf_common::dlp::{
     DLP_JOINED_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT,
     DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS,
     DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE,
-    DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
+    DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_RECORD_MAX,
     DLP_SCOPE_ANCESTOR_LEVELS, DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS, DLP_SMALL_EXCERPT,
-    DLP_TASK_SOCKET_MAX_TASKS, DLP_TASK_SOCKET_WINDOW_NS, DlpEvent, DlpEventSmall, DlpSocket,
-    DlpTaskSocket, KtlsIterOffsets, SockOffsets, SslReadArgs,
+    DLP_TASK_SOCKET_MAX_TASKS, DLP_TASK_SOCKET_WINDOW_NS, DlpEvent, DlpEventSmall, DlpRecordHeader,
+    DlpSocket, DlpTaskSocket, KtlsIterOffsets, SockOffsets, SslReadArgs,
 };
 use ebpf_helpers::increment_metric;
+use ebpf_helpers::kfuncs::BpfDynptr;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
 ebpf_helpers::pidns_view!();
@@ -29,7 +31,8 @@ ebpf_helpers::pidns_view!();
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,000 full events
-/// of 4,176 bytes, or 12,400 small ones of 336. Those are the record sizes
+/// of 4,176 bytes, or 12,400 small ones of 336, or 250 whole records at the
+/// `dlp.record_bytes` ceiling of 16,384 plus their 80 bytes of header. Those are the record sizes
 /// the kernel charges, the event plus the ring buffer's own 8-byte header,
 /// and they grew with the socket block the event now carries: 10 full events
 /// fewer in the same 4 MiB, which is why the reservation is unchanged.
@@ -94,6 +97,13 @@ static DLP_CGROUP_ALLOW: HashMap<u64, u8, { DLP_SCOPE_MAX_CGROUPS as usize }> = 
 /// a host agent with no cgroup scope configured has always done.
 #[btf_map]
 static DLP_SCOPE: Array<u32, 1> = Array::new();
+
+/// The most plaintext one event carries when the probe reads the whole record,
+/// slot 0. Written by userspace from `dlp.record_bytes` only once this object
+/// loaded with `bpf_probe_read_user_dynptr` callable; unset or zero leaves
+/// every buffer on the bounded copy of `DLP_MAX_EXCERPT` bytes.
+#[btf_map]
+static DLP_RECORD_BYTES: Array<u32, 1> = Array::new();
 
 /// Byte offsets of the `struct sock` members the kernel TLS probes read,
 /// resolved from the running kernel's BTF by userspace. No socket is read
@@ -906,18 +916,24 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
     Ok(())
 }
 
-/// Emit a `DlpEvent` to the EVENTS `RingBuf`, picking a size tier:
+/// Emit a `DlpEvent` to the EVENTS `RingBuf`, picking a shape:
 /// - `data_len <= 256` -> `DlpEventSmall` (328 bytes)
-/// - `data_len > 256`  -> `DlpEvent` (4168 bytes, full capture)
+/// - `data_len > 256`, whole record on -> header plus up to
+///   `DLP_RECORD_BYTES` of plaintext, reserved at the size it needs
+/// - otherwise -> `DlpEvent` (4168 bytes, bounded copy of 4,096)
 ///
-/// # Why two types rather than one runtime-sized reservation
+/// # Two reservations
 ///
-/// `bpf_ringbuf_reserve` takes a size argument, and aya exposes it as
-/// `reserve_bytes`, so a per-payload reservation looks reachable. It is not:
-/// the verifier requires that size to be a compile-time constant, which is
-/// what `reserve_untyped::<T>` already gives us. Tiering by type is therefore
-/// the same mechanism with the bound stated in the type system, and adding
-/// tiers is the only way to cut waste further.
+/// `bpf_ringbuf_reserve` takes its size as a verifier constant, which is what
+/// `reserve_untyped::<T>` gives, so the typed events come in fixed tiers.
+/// `bpf_ringbuf_reserve_dynptr` takes a runtime size, and
+/// `bpf_probe_read_user_dynptr` (kernel 6.16) reads user memory straight into
+/// it with the range checked by the kernel at run time rather than proved
+/// against a stack array: that pair is what lets one event hold a whole TLS
+/// record. The kfunc is a `bpf_probe_read_user` underneath and does not sleep,
+/// so uprobes and kprobes may call it; `bpf_copy_from_user_dynptr` is marked
+/// `KF_SLEEPABLE` and is refused from both. A kernel without the kfunc, or a
+/// read that fails, takes the bounded copy instead.
 ///
 /// The copy length is separate from the reservation size: it is clamped to
 /// `data_len` capped at the tier's excerpt, so only bytes the SSL buffer holds
@@ -937,9 +953,106 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSo
     }
     if data_len <= DLP_SMALL_EXCERPT as u32 {
         emit_dlp_small(user_buf, data_len, direction, flow);
-    } else {
-        emit_dlp_full(user_buf, data_len, direction, flow);
+        return;
     }
+    let limit = match DLP_RECORD_BYTES.get(0) {
+        Some(l) => *l,
+        None => 0,
+    };
+    if limit > DLP_MAX_EXCERPT as u32 && emit_dlp_record(user_buf, data_len, direction, flow, limit)
+    {
+        return;
+    }
+    emit_dlp_full(user_buf, data_len, direction, flow);
+}
+
+/// Whole-record DLP event: a `DlpRecordHeader` and then up to `limit` bytes of
+/// plaintext, in one ring buffer reservation of exactly that size.
+///
+/// Returns `false` only when the user read failed, with the reservation
+/// discarded, so the caller falls back to the bounded copy; a reservation the
+/// ring buffer refused is counted as dropped and returns `true`, because the
+/// bounded copy would be refused for the same reason.
+///
+/// The dynptr is created and consumed in this one frame and only reached
+/// through `&raw mut`, because the verifier tracks it by stack slot and
+/// rejects one that moved.
+#[inline(never)]
+fn emit_dlp_record(
+    user_buf: *const u8,
+    data_len: u32,
+    direction: u8,
+    flow: DlpSocket,
+    limit: u32,
+) -> bool {
+    let cap = if limit > DLP_RECORD_MAX {
+        DLP_RECORD_MAX
+    } else {
+        limit
+    };
+    let len = if data_len > cap { cap } else { data_len };
+    let header_len = size_of::<DlpRecordHeader>() as u32;
+    let pid_tgid = current_pid_tgid();
+    let mut header = DlpRecordHeader {
+        pid: pid_tgid as u32,
+        tgid: (pid_tgid >> 32) as u32,
+        // SAFETY: helper with no argument, callable from any probe.
+        timestamp_ns: unsafe { bpf_ktime_get_boot_ns() },
+        // SAFETY: helper with no argument; uprobes and kprobes run in process
+        // context, so the task it reads is the traced one.
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
+        data_len,
+        direction,
+        _padding: [0; 3],
+        flow,
+    };
+    let mut record = BpfDynptr::uninit();
+    let rec = (&raw mut record).cast::<bpf_dynptr>();
+    let events = core::ptr::from_ref(&EVENTS).cast_mut().cast::<c_void>();
+    // SAFETY: `events` is the address of the `.maps` ring buffer definition,
+    // which the loader patches into the map fd the helper expects; `rec` is
+    // an uninitialised dynptr slot in this frame that the helper initialises.
+    let reserved =
+        unsafe { generated::bpf_ringbuf_reserve_dynptr(events, header_len + len, 0, rec) };
+    if reserved != 0 {
+        // SAFETY: the kernel requires a reserved dynptr to be released on
+        // every path, failed reservations included, and discarding a null
+        // dynptr is a no-op.
+        unsafe { generated::bpf_ringbuf_discard_dynptr(rec, 0) };
+        increment_metric(DLP_METRIC_EVENTS_DROPPED);
+        return true;
+    }
+    // SAFETY: `rec` is the dynptr reserved above, `header_len` bytes fit at
+    // offset 0 of a reservation of `header_len + len`, and `header` is a live
+    // stack value of exactly that size.
+    let written = unsafe {
+        generated::bpf_dynptr_write(
+            rec,
+            0,
+            (&raw mut header).cast::<c_void>(),
+            u64::from(header_len),
+            0,
+        )
+    };
+    // SAFETY: the kernel checks `header_len + len` against the dynptr's size
+    // and reads the user page without faulting; `user_buf` is the traced
+    // call's own buffer, holding at least `data_len >= len` bytes.
+    let read = unsafe {
+        ebpf_helpers::kfuncs::bpf_probe_read_user_dynptr(
+            (&raw mut record),
+            u64::from(header_len),
+            u64::from(len),
+            user_buf.cast::<c_void>(),
+        )
+    };
+    if written != 0 || read != 0 {
+        // SAFETY: `rec` was reserved above and not yet released.
+        unsafe { generated::bpf_ringbuf_discard_dynptr(rec, 0) };
+        return false;
+    }
+    // SAFETY: `rec` was reserved above and not yet released.
+    unsafe { generated::bpf_ringbuf_submit_dynptr(rec, submit_flags(avail_data(&EVENTS))) };
+    true
 }
 
 /// Small DLP event (328 bytes): for SSL payloads ≤ 256 bytes.

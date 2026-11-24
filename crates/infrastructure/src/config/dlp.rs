@@ -3,6 +3,7 @@
 use domain::common::entity::RuleId;
 use domain::dlp::entity::DlpPattern;
 use domain::dlp::scope::{DlpScopePolicy, DlpScopeSelector};
+use ebpf_common::dlp::{DLP_RECORD_MAX, DLP_RECORD_MIN};
 use serde::{Deserialize, Serialize};
 
 use super::common::{
@@ -23,6 +24,18 @@ pub struct DlpConfig {
 
     #[serde(default)]
     pub scope: DlpScopeConfig,
+
+    /// The most plaintext one DLP event carries, in bytes. The probes read
+    /// it straight into the ring buffer where the kernel offers
+    /// `bpf_probe_read_user_dynptr`; elsewhere they copy at most 4,096 bytes
+    /// whatever this says. Between 4,096 and 16,384, the largest plaintext
+    /// one TLS record holds (RFC 8446 section 5.1).
+    #[serde(default = "default_record_bytes")]
+    pub record_bytes: u32,
+}
+
+fn default_record_bytes() -> u32 {
+    DLP_RECORD_MAX
 }
 
 impl Default for DlpConfig {
@@ -32,7 +45,26 @@ impl Default for DlpConfig {
             mode: "alert".to_string(),
             patterns: Vec::new(),
             scope: DlpScopeConfig::default(),
+            record_bytes: default_record_bytes(),
         }
+    }
+}
+
+impl DlpConfig {
+    /// # Errors
+    ///
+    /// Returns an error for a record size below the bounded copy, which
+    /// would read less than the kernels without the kfunc, or above one TLS
+    /// record, which the probes could never fill.
+    pub fn validate_record_bytes(&self) -> Result<(), ConfigError> {
+        if !(DLP_RECORD_MIN..=DLP_RECORD_MAX).contains(&self.record_bytes) {
+            return Err(ConfigError::InvalidValue {
+                field: "dlp.record_bytes".to_string(),
+                value: self.record_bytes.to_string(),
+                expected: format!("{DLP_RECORD_MIN}..={DLP_RECORD_MAX}"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -335,6 +367,41 @@ mod tests {
         assert!(cfg.patterns.is_empty());
         assert_eq!(cfg.scope.mode, DLP_SCOPE_ALL);
         assert!(!cfg.scope.is_workload_scoped());
+        assert_eq!(cfg.record_bytes, 16_384);
+    }
+
+    #[test]
+    fn a_record_size_defaults_to_one_whole_tls_record() {
+        let cfg: DlpConfig = serde_norway::from_str("enabled: true").expect("parse");
+        assert_eq!(cfg.record_bytes, 16_384);
+        assert!(cfg.validate_record_bytes().is_ok());
+    }
+
+    #[test]
+    fn a_record_size_between_the_bounded_copy_and_one_record_is_valid() {
+        for bytes in [4_096, 8_192, 16_384] {
+            let cfg = DlpConfig {
+                record_bytes: bytes,
+                ..DlpConfig::default()
+            };
+            assert!(cfg.validate_record_bytes().is_ok(), "{bytes}");
+        }
+    }
+
+    #[test]
+    fn a_record_size_outside_the_range_is_refused_with_the_range() {
+        for bytes in [0, 4_095, 16_385, u32::MAX] {
+            let cfg = DlpConfig {
+                record_bytes: bytes,
+                ..DlpConfig::default()
+            };
+            let err = cfg
+                .validate_record_bytes()
+                .expect_err("refused")
+                .to_string();
+            assert!(err.contains("dlp.record_bytes"), "{err}");
+            assert!(err.contains("4096..=16384"), "{err}");
+        }
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub struct EbpfLoader {
     /// reads this to say what the host cannot do instead of discovering a
     /// missing fd.
     refused_progs: HashMap<String, String>,
+    /// Programs the kernel took only with their optional kfunc calls
+    /// neutralized, with which kfuncs and why. A caller whose program calls
+    /// one reads this to say which path its program runs on.
+    degraded_progs: Vec<kfunc_loader::DegradedProgram>,
     /// Independent `dup`s of the maps aya hosts for a kfunc object, keyed by
     /// map name. Captured at load time (aya exposes no fd accessor and pinning
     /// is refused on integrity kernels) so raw map syscalls - e.g. wiring a
@@ -85,6 +89,7 @@ impl EbpfLoader {
             token_maps: super::map_store::TokenMaps::new(loaded.maps),
             kfunc_progs,
             refused_progs,
+            degraded_progs: loaded.degraded,
             links: Vec::new(),
             // Raw map fds captured at load time, so `set_tail_call_raw` can wire
             // `ProgramArray`s (e.g. XDP_PROG_ARRAY).
@@ -680,6 +685,13 @@ impl EbpfLoader {
     #[must_use]
     pub fn refused_program(&self, program_name: &str) -> Option<&str> {
         self.refused_progs.get(program_name).map(String::as_str)
+    }
+
+    /// The programs of this object loaded without their optional kfuncs,
+    /// in object order. Empty when every kfunc call was kept.
+    #[must_use]
+    pub fn degraded_programs(&self) -> &[kfunc_loader::DegradedProgram] {
+        &self.degraded_progs
     }
 
     // A program swap keeps its hook: the links this loader holds are parked

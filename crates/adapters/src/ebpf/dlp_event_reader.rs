@@ -101,56 +101,115 @@ fn drain(
 ) -> usize {
     let now_ns = observer.now_ns();
     let mut drained = 0usize;
-    // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
-    // The header is read off the type rather than written out: it grew when
-    // the event gained its socket block, and a reader carrying its own copy
-    // of the number is a reader that silently slices the excerpt wrong.
-    let header_size = DLP_EVENT_HEADER_SIZE;
     while let Some(item) = rb.next() {
         drained += 1;
-        let bytes: &[u8] = &item;
-        // Accept both small (288 bytes) and full (4128 bytes) DLP events.
-        // Both share the same header layout; only the excerpt buffer size differs.
-        // We reconstruct a full DlpEvent with zero-padded excerpt for uniform handling.
-        if bytes.len() >= header_size {
-            let mut event = DlpEvent {
-                pid: 0,
-                tgid: 0,
-                timestamp_ns: 0,
-                cgroup_id: 0,
-                data_len: 0,
-                direction: 0,
-                _padding: [0; 3],
-                flow: DlpSocket::default(),
-                data_excerpt: [0; DLP_MAX_EXCERPT],
-            };
-            // SAFETY: header fields are at known offsets, verified by length check.
-            // Both DlpEvent and DlpEventSmall share identical header layout (32 bytes).
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    core::ptr::addr_of_mut!(event).cast::<u8>(),
-                    header_size.min(bytes.len()),
-                );
-            }
-            // Copy available excerpt data (may be 256 or 4096 bytes)
-            let excerpt_bytes = &bytes[header_size..];
-            let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
-            event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
-
-            let mut event = AgentEvent::Dlp(Box::new(event));
-            observer.accept(now_ns, &mut event);
-            if tx.try_send(event).is_err() {
-                observer.dropped("channel_full");
-                debug!("DLP event channel full, dropping event");
-            }
-        } else {
-            // Shorter than the 32-byte header both event shapes share.
-            // Counted rather than skipped: an unreadable record is a
-            // loss, and silence would hide it.
+        let Some(mut event) = decode(&item) else {
             observer.dropped("truncated_record");
+            continue;
+        };
+        observer.accept(now_ns, &mut event);
+        if tx.try_send(event).is_err() {
+            observer.dropped("channel_full");
+            debug!("DLP event channel full, dropping event");
         }
     }
 
     drained
+}
+
+/// One ring buffer record as the event it carries, `None` when it is shorter
+/// than the header.
+///
+/// A payload past the excerpt a `DlpEvent` holds is a whole record the probe
+/// read straight into the ring buffer, and travels as it was read; anything
+/// shorter is the bounded copy.
+fn decode(bytes: &[u8]) -> Option<AgentEvent> {
+    // The header is read off the type rather than written out: it grew when
+    // the event gained its socket block, and a reader carrying its own copy
+    // of the number is a reader that silently slices the excerpt wrong.
+    let header_size = DLP_EVENT_HEADER_SIZE;
+    if bytes.len() < header_size {
+        return None;
+    }
+    let mut event = DlpEvent {
+        pid: 0,
+        tgid: 0,
+        timestamp_ns: 0,
+        cgroup_id: 0,
+        data_len: 0,
+        direction: 0,
+        _padding: [0; 3],
+        flow: DlpSocket::default(),
+        data_excerpt: [0; DLP_MAX_EXCERPT],
+    };
+    // SAFETY: `bytes` holds at least `header_size` bytes, checked above, and
+    // the header is a prefix of the `#[repr(C)]` `DlpEvent` the destination
+    // is, made of plain integers for which every bit pattern is valid.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            core::ptr::addr_of_mut!(event).cast::<u8>(),
+            header_size,
+        );
+    }
+    let payload = &bytes[header_size..];
+    if payload.len() > DLP_MAX_EXCERPT {
+        return Some(AgentEvent::DlpRecord {
+            header: Box::new(event),
+            record: payload.to_vec(),
+        });
+    }
+    event.data_excerpt[..payload.len()].copy_from_slice(payload);
+    Some(AgentEvent::Dlp(Box::new(event)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(data_len: u32, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; DLP_EVENT_HEADER_SIZE];
+        bytes[..4].copy_from_slice(&7u32.to_ne_bytes());
+        // `data_len` follows pid, tgid, timestamp_ns and cgroup_id.
+        bytes[24..28].copy_from_slice(&data_len.to_ne_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn a_record_shorter_than_the_header_is_dropped() {
+        assert!(decode(&[0u8; DLP_EVENT_HEADER_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn the_bounded_copy_is_an_excerpt() {
+        let Some(AgentEvent::Dlp(event)) = decode(&record(5, b"hello")) else {
+            panic!("an excerpt");
+        };
+        assert_eq!(event.pid, 7);
+        assert_eq!(event.data_len, 5);
+        assert_eq!(&event.data_excerpt[..5], b"hello");
+    }
+
+    #[test]
+    fn a_full_excerpt_is_still_the_bounded_copy() {
+        let payload = vec![b'a'; DLP_MAX_EXCERPT];
+        assert!(matches!(
+            decode(&record(20_000, &payload)),
+            Some(AgentEvent::Dlp(_))
+        ));
+    }
+
+    #[test]
+    fn a_payload_past_the_excerpt_travels_whole() {
+        let payload = vec![b'r'; 16_384];
+        let Some(AgentEvent::DlpRecord { header, record }) = decode(&record(16_384, &payload))
+        else {
+            panic!("a whole record");
+        };
+        assert_eq!(header.pid, 7);
+        assert_eq!(header.data_len, 16_384);
+        assert_eq!(record.len(), 16_384);
+        assert!(header.data_excerpt.iter().all(|b| *b == 0));
+    }
 }

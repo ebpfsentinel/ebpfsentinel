@@ -224,7 +224,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `xdp-ratelimit-syncookie` | 43 | 2vm | 6.18 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
 | `xdp-vip-announcer` | 37, 44, 67 | 2vm | 6.18 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
-#### CLI subcommands (46)
+#### CLI subcommands (47)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -272,6 +272,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `trace` | 87 | none | 6.18 | datapath | trace through the loaded programs, naming the deny rule a crafted packet meets, in 87 |
 | `uninstall` | 140 | none | 6.18 | datapath | Removes the pins and the state a graceful stop leaves behind, so nothing of the agent keeps enforcing; asserted in 140 after enforcement survived the agent |
 | `version` | 01 | none | n/a | pr | Version + build info |
+| `wardenpolicy` | 57 | none | 6.18 | datapath | Writes the warden's policy from the agent's configuration before the warden starts; every rootless start in the suites runs it, 57 through the token loader's start |
 | `watch` | 34 | none | n/a | pr | SSE alerts stream (tail -f) |
 | `zones` | 31 | 2vm | 6.18 | datapath | Zone, policy and status reads through /api/v1/zones in 31 |
 
@@ -289,7 +290,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `container` | 54, 130, 131, 137 | 2vm | 6.18 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane; a veth created after start-up, its peer in a namespace of its own, carries the agent's TC programs within seconds and the window before the attach is counted under its kind, in 137. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
 | `coverage` | 87, ebpfsentinel-operator/coexistence/08 | k8s | 6.18 | datapath | What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the operator's coexistence suite 08-pods-and-guests.bats reads the per-pod report on kind beside Cilium and Calico (the test pod listed with its attached link and an unobserved loopback) and the counts and named gaps the operator folds into the agent resource's status |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.18 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
-| `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.18 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
+| `dlp` | 16, 27, 60, 62, 150, perf/06 | 2vm | 6.18 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half, suite 150 a secret past the first 4,096 bytes of one write and the dlp.record_bytes bounds. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
 | `dns` | 04, 19, 45, 55 | 3vm | 6.18 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
 | `drops` | 90 | none | 6.18 | datapath | Kernel drop reasons as readable counts, fed by tracepoint-drop-reason; 90 reads NO_SOCKET back with its description |
 | `exposure` | 90 | none | 6.18 | datapath | What this node exposes, read off the socket hooks, and who bound it; 90 binds two listeners after start and reads one reachable by the default policy and one closed by a deny rule |
@@ -325,13 +326,14 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `workload` | 67, 70, 92, 95 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use |
 | `zone` | 31 | 2vm | 6.18 | datapath | Zone-based policy |
 
-#### Capabilities above the floor (15)
+#### Capabilities above the floor (16)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
 | `attribution` | 70 | none | 6.18 | datapath | The workload named on a flow |
 | `bpf_lsm` | 83, 86 | none | 6.18 | datapath | A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86 |
 | `copy_from_user_str` | 86 | none | 6.18 | datapath | No shipped program rests on it yet, so the report in 86 is all there is to assert |
+| `dlp_whole_record` | 150 | none | 6.18 | datapath | A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name |
 | `file_kfuncs` | 77 | none | 6.18 | datapath | Probed and reported in 77 |
 | `immediate_signal` | 82 | none | 6.18 | datapath | A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only |
 | `kprobe_session` | 86 | none | 6.18 | datapath | No shipped program rests on it yet, so the report in 86 is all there is to assert |
@@ -352,7 +354,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 105, 130, 141, 30 |
 | `/api/v1/agent/stop` | _MISSING_ |
-| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
+| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 150, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | 25 |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -366,8 +368,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/captures/manual` | 49, 62 |
 | `/api/v1/captures/{id}` | 49, 62 |
 | `/api/v1/config` | 16, 23, 25 |
-| `/api/v1/config/reload` | 16, 17, 35, 52, 99 |
-| `/api/v1/config/{section}` | 16, 17, 27, 35, 52, 99 |
+| `/api/v1/config/reload` | 150, 16, 17, 35, 52, 99 |
+| `/api/v1/config/{section}` | 150, 16, 17, 27, 35, 52, 99 |
 | `/api/v1/conntrack/connections` | 107, 18 |
 | `/api/v1/conntrack/events` | 18 |
 | `/api/v1/conntrack/flush` | 18, 62 |
@@ -394,7 +396,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 100, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `/api/v1/ebpf/kernel-features` | 100, 150, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 27, 60 |

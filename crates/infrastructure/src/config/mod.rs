@@ -899,6 +899,9 @@ impl AgentConfig {
         // Validate the cgroup scope the probes enforce
         self.dlp.scope.validate()?;
 
+        // Validate how much of each TLS record the probes hand over
+        self.dlp.validate_record_bytes()?;
+
         // Reject custom patterns and block mode (enterprise only)
         {
             use domain::dlp::entity::is_builtin_pattern_id;

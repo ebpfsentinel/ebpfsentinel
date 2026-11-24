@@ -28,4 +28,12 @@ pub enum AgentEvent {
         bytes: Vec<u8>,
     },
     Dlp(Box<DlpEvent>),
+    /// A DLP buffer longer than the excerpt a `DlpEvent` holds, read whole
+    /// into the ring buffer. `header` carries the process, socket and length
+    /// with its excerpt left empty; `record` holds what was read, at most
+    /// `dlp.record_bytes`.
+    DlpRecord {
+        header: Box<DlpEvent>,
+        record: Vec<u8>,
+    },
 }

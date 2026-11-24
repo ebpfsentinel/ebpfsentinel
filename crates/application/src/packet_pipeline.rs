@@ -666,7 +666,7 @@ impl EventDispatcher {
             AgentEvent::Packet { header, .. } => {
                 header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
             }
-            AgentEvent::Dlp(ev) => ev.pid ^ ev.tgid,
+            AgentEvent::Dlp(ev) | AgentEvent::DlpRecord { header: ev, .. } => ev.pid ^ ev.tgid,
         };
         hash as usize % num_workers
     }
@@ -678,7 +678,7 @@ impl EventDispatcher {
             AgentEvent::L7 { .. } => "l7",
             AgentEvent::Dns { .. } => "dns",
             AgentEvent::Packet { .. } => "packet",
-            AgentEvent::Dlp(_) => "dlp",
+            AgentEvent::Dlp(_) | AgentEvent::DlpRecord { .. } => "dlp",
         };
         match event {
             AgentEvent::L4(pkt) => self.dispatch_event(pkt),
@@ -689,7 +689,10 @@ impl EventDispatcher {
             } => self.process_l7_event(header, segment, &payload),
             AgentEvent::Dns { header, payload } => self.process_dns_event(header, &payload),
             AgentEvent::Packet { header, bytes, .. } => self.process_ids_packet(&header, &bytes),
-            AgentEvent::Dlp(event) => self.process_dlp_event(&event),
+            AgentEvent::Dlp(event) => self.process_dlp_event(&event, None),
+            AgentEvent::DlpRecord { header, record } => {
+                self.process_dlp_event(&header, Some(&record));
+            }
         }
         self.metrics
             .observe_processing_duration(program, start.elapsed().as_secs_f64());
@@ -2050,7 +2053,9 @@ impl EventDispatcher {
         }
     }
 
-    fn process_dlp_event(&self, event: &DlpEvent) {
+    /// Scan one buffer the DLP probes read: the whole record where they read
+    /// one, the excerpt the event carries otherwise.
+    fn process_dlp_event(&self, event: &DlpEvent, record: Option<&[u8]>) {
         self.metrics.record_packet("dlp", "captured");
 
         let direction = if event.direction == ebpf_common::dlp::DLP_DIRECTION_READ {
@@ -2067,8 +2072,7 @@ impl EventDispatcher {
             "DLP event received"
         );
 
-        let actual_len = (event.data_len as usize).min(ebpf_common::dlp::DLP_MAX_EXCERPT);
-        let data = &event.data_excerpt[..actual_len];
+        let data = dlp_scanned_bytes(event, record);
         // Resolved once per event and only when something will read them:
         // the pid is the same for every alert raised on one buffer, and the
         // process may exit between two of them.
@@ -2265,6 +2269,17 @@ impl EventDispatcher {
             action = action_label,
             "load balancer event"
         );
+    }
+}
+
+/// The bytes of one DLP buffer the scan and the plaintext observers read: the
+/// whole record where the probes read one, the excerpt otherwise, never past
+/// the length the probe saw.
+fn dlp_scanned_bytes<'a>(event: &'a DlpEvent, record: Option<&'a [u8]>) -> &'a [u8] {
+    let len = event.data_len as usize;
+    match record {
+        Some(record) => &record[..len.min(record.len())],
+        None => &event.data_excerpt[..len.min(ebpf_common::dlp::DLP_MAX_EXCERPT)],
     }
 }
 
@@ -4906,6 +4921,65 @@ mod tests {
         assert_eq!(alert.direction, Some(ebpf_common::dlp::DLP_DIRECTION_READ));
         assert_eq!(alert.executable_path.as_deref(), Some("/usr/sbin/nginx"));
         assert_eq!(alert.flow_source.as_deref(), Some("kernel_socket"));
+    }
+
+    fn whole_record(data: &[u8]) -> AgentEvent {
+        let mut header = make_dlp_event_with_data(&[]);
+        header.data_len = u32::try_from(data.len()).expect("one record");
+        AgentEvent::DlpRecord {
+            header: Box::new(header),
+            record: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_whole_record_is_scanned_up_to_the_length_the_probe_saw() {
+        let mut event = make_dlp_event_with_data(b"abc");
+        assert_eq!(dlp_scanned_bytes(&event, None), b"abc");
+        let record = vec![b'x'; 10_000];
+        event.data_len = 9_000;
+        assert_eq!(dlp_scanned_bytes(&event, Some(&record)).len(), 9_000);
+        event.data_len = 20_000;
+        assert_eq!(dlp_scanned_bytes(&event, Some(&record)).len(), 10_000);
+        assert_eq!(dlp_scanned_bytes(&event, None).len(), DLP_MAX_EXCERPT);
+    }
+
+    #[tokio::test]
+    async fn a_match_past_the_bounded_copy_raises_from_a_whole_record() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dlp = make_dlp_service_with_pattern();
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_dlp_service(Arc::clone(&dlp));
+
+        // The digits sit past the 4,096 bytes the bounded copy would read.
+        let mut data = vec![b'a'; DLP_MAX_EXCERPT + 100];
+        data.extend_from_slice(b"1234");
+        dispatcher.dispatch_agent_event(whole_record(&data));
+        assert!(alert_rx.try_recv().is_ok(), "the whole record is scanned");
+
+        // The same buffer cut to the excerpt raises nothing.
+        let mut cut = make_dlp_event_with_data(&data);
+        cut.data_len = u32::try_from(data.len()).expect("one record");
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(cut)));
+        assert!(alert_rx.try_recv().is_err(), "the excerpt stops short");
+    }
+
+    #[tokio::test]
+    async fn a_tls_plaintext_observer_sees_the_whole_record() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(PlaintextSpotter::default());
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_tls_plaintext_observer(Arc::clone(&observer) as _);
+
+        dispatcher.dispatch_agent_event(whole_record(&[b'z'; 16_384]));
+
+        let seen = observer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1, 16_384);
     }
 
     #[tokio::test]

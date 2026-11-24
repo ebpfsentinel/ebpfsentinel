@@ -158,6 +158,18 @@ fn is_dev_bound_metadata_kfunc(name: &str) -> bool {
     DEV_BOUND_METADATA_KFUNCS.contains(&name)
 }
 
+/// Kfuncs a program is built to do without. A call to one the running kernel
+/// does not declare, or that the verifier refuses in the program's context, is
+/// rewritten to `r0 = -EOPNOTSUPP` and the program loaded again: the program
+/// reads the non-zero return as "not here" and takes the path it had before
+/// the kfunc existed. Every other kfunc stays a hard requirement.
+pub const OPTIONAL_KFUNCS: &[&str] = &["bpf_probe_read_user_dynptr"];
+
+/// Whether `name` is one of [`OPTIONAL_KFUNCS`].
+fn is_optional_kfunc(name: &str) -> bool {
+    OPTIONAL_KFUNCS.contains(&name)
+}
+
 /// Errors surfaced while loading a kfunc-using program.
 #[derive(Debug, thiserror::Error)]
 pub enum KfuncLoaderError {
@@ -275,14 +287,35 @@ pub struct RefusedProgram {
     pub reason: String,
 }
 
-/// What an object's programs came to: the ones the kernel took, and the
-/// optional ones it refused.
+/// A program loaded with its calls to optional kfuncs neutralized, because
+/// the kernel does not declare them or refused the program while it called
+/// them. The program runs, on its fallback path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegradedProgram {
+    /// Program name as keyed in the object.
+    pub name: String,
+    /// The optional kfuncs whose calls were neutralized, in first-seen order.
+    pub kfuncs: Vec<String>,
+    /// Whether the kernel BTF declares them: `false` when the calls were
+    /// neutralized before any load because a name did not resolve, `true`
+    /// when the kernel refused the program while it called them.
+    pub declared: bool,
+    /// Why, in one sentence: the kernel's refusal, or that its BTF does not
+    /// declare the kfunc.
+    pub reason: String,
+}
+
+/// What an object's programs came to: the ones the kernel took, the optional
+/// ones it refused, and the ones it took only without their optional kfuncs.
 #[derive(Debug, Default)]
 pub struct LoadedPrograms {
     /// Loaded programs, in object order.
     pub programs: Vec<KfuncLoadedProgram>,
     /// Optional programs the kernel refused, in object order.
     pub refused: Vec<RefusedProgram>,
+    /// Loaded programs whose optional kfunc calls were neutralized, in object
+    /// order. Each also appears in `programs`.
+    pub degraded: Vec<DegradedProgram>,
 }
 
 /// Find every kfunc call site: relocations targeting an undefined (extern)
@@ -589,25 +622,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     refuse_missing_modules(elf, &sites, resolver)?;
     let names = unique_names(&sites);
 
-    let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
-    // Every BTF feature is answered as supported: the kernel floor carries all
-    // eight `BtfFeature` kinds, so nothing in the program BTF is rewritten
-    // into an older form. A kind added upstream is answered the same way until
-    // somebody reads the enum and decides otherwise.
-    obj.fixup_and_sanitize_btf(|| Some(|_| true))
-        .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
-
-    // Relocate against aya's hosted maps, matched by full ELF name.
-    // `bridged` borrows the hosted fds for the call.
-    let bridged = bridge_maps(&mut obj, hosted)?;
-    let text_sections: HashSet<usize> = obj.functions.keys().map(|(s, _)| *s).collect();
-    obj.relocate_maps(
-        bridged.iter().map(|(n, fd, m)| (n.as_str(), *fd, m)),
-        &text_sections,
-    )
-    .map_err(|e| KfuncLoaderError::Relocate(format!("{e:?}")))?;
-    obj.relocate_calls(&text_sections)
-        .map_err(|e| KfuncLoaderError::Relocate(format!("{e:?}")))?;
+    let obj = relocated_object(elf, hosted)?;
 
     // The program BTF is shared by every program in the object.
     let btf_bytes = obj.btf.as_ref().map(aya_obj::btf::Btf::to_bytes);
@@ -616,10 +631,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
         _ => None,
     };
 
-    let mut targets: HashMap<String, KfuncTarget> = HashMap::new();
-    for name in &names {
-        targets.insert(name.clone(), resolver.resolve(name)?);
-    }
+    let (targets, undeclared) = resolve_targets(resolver, &names)?;
     let fd_array = build_fd_array(resolver, &targets)?;
 
     let program_meta = program_meta(elf, &obj, resolver)?;
@@ -641,19 +653,30 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             .functions
             .get(&key)
             .ok_or_else(|| KfuncLoaderError::MissingFunction { name: name.clone() })?;
-        let mut insns = func.instructions.clone();
         let fi_bytes = func.func_info.func_info_bytes();
         let fi_rec = u32::try_from(func.func_info_rec_size).unwrap_or(0);
         let li_rec = u32::try_from(func.line_info_rec_size).unwrap_or(0);
         let li_bytes = sanitize_line_info(&func.line_info.line_info_bytes(), li_rec);
 
-        rewrite_kfunc_calls(
-            &mut insns,
-            &names,
-            &targets,
-            &fd_array.module_slot,
-            dev_bound_ifindex.is_some(),
-        );
+        let optional_calls = optional_kfunc_calls(&func.instructions, &names);
+        let neutral: Vec<String> = optional_calls
+            .iter()
+            .filter(|k| undeclared.contains(k))
+            .cloned()
+            .collect();
+        let rewritten = |neutral: &[String]| {
+            let mut insns = func.instructions.clone();
+            rewrite_kfunc_calls(
+                &mut insns,
+                &names,
+                &targets,
+                &fd_array.module_slot,
+                dev_bound_ifindex.is_some(),
+                neutral,
+            );
+            insns
+        };
+        let insns = rewritten(&neutral);
 
         // Only XDP programs carry the device-bound metadata kfuncs; binding a
         // TC/uprobe program to a netdev would be meaningless (and rejected).
@@ -680,7 +703,10 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             dev_bound_ifindex: prog_ifindex,
             attach_btf_id,
         };
-        let fd = match raw_prog_load(&request) {
+        let (first, degraded) = load_degrading(&request, &neutral, &optional_calls, || {
+            rewritten(&optional_calls)
+        });
+        let fd = match first {
             Ok(fd) => fd,
             // A program the caller named optional is one whose absence it
             // knows how to report. The kernel refusing it is a fact about the
@@ -698,6 +724,9 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             Err(e) => return Err(e),
         };
 
+        if let Some(degraded) = degraded {
+            loaded.degraded.push(degraded);
+        }
         loaded.programs.push(KfuncLoadedProgram {
             name,
             fd,
@@ -710,6 +739,102 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     drop(fd_array);
     drop(prog_btf_fd);
     Ok(loaded)
+}
+
+/// Parse `elf` and relocate it against aya's hosted maps, matched by full ELF
+/// name, and against its own calls.
+fn relocated_object<S: BuildHasher>(
+    elf: &[u8],
+    hosted: &HashMap<String, OwnedFd, S>,
+) -> Result<Object, KfuncLoaderError> {
+    let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
+    // Every BTF feature is answered as supported: the kernel floor carries all
+    // eight `BtfFeature` kinds, so nothing in the program BTF is rewritten
+    // into an older form. A kind added upstream is answered the same way until
+    // somebody reads the enum and decides otherwise.
+    obj.fixup_and_sanitize_btf(|| Some(|_| true))
+        .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
+
+    // `bridged` borrows the hosted fds for the call.
+    let bridged = bridge_maps(&mut obj, hosted)?;
+    let text_sections: HashSet<usize> = obj.functions.keys().map(|(s, _)| *s).collect();
+    obj.relocate_maps(
+        bridged.iter().map(|(n, fd, m)| (n.as_str(), *fd, m)),
+        &text_sections,
+    )
+    .map_err(|e| KfuncLoaderError::Relocate(format!("{e:?}")))?;
+    obj.relocate_calls(&text_sections)
+        .map_err(|e| KfuncLoaderError::Relocate(format!("{e:?}")))?;
+    Ok(obj)
+}
+
+/// Resolve every kfunc the object calls. An optional kfunc the kernel BTF does
+/// not declare is returned apart, for its calls to be neutralized; any other
+/// unresolved name fails the load.
+fn resolve_targets(
+    resolver: &KfuncResolver,
+    names: &[String],
+) -> Result<(HashMap<String, KfuncTarget>, Vec<String>), KfuncLoaderError> {
+    let mut targets: HashMap<String, KfuncTarget> = HashMap::new();
+    let mut undeclared: Vec<String> = Vec::new();
+    for name in names {
+        match resolver.resolve(name) {
+            Ok(target) => {
+                targets.insert(name.clone(), target);
+            }
+            Err(_) if is_optional_kfunc(name) => undeclared.push(name.clone()),
+            Err(e) => return Err(KfuncLoaderError::Resolve(e)),
+        }
+    }
+    Ok((targets, undeclared))
+}
+
+/// Load one program, and say what of its optional kfuncs it lost.
+///
+/// `request` carries the instructions with the `neutral` calls (undeclared
+/// optional kfuncs) already neutralized. A refusal while the program still
+/// calls an optional kfunc is read as the kernel refusing that kfunc in this
+/// context - a sleepable one from a probe that may not sleep, a program type
+/// outside its set - and the program is offered again with every optional
+/// call neutralized, from `all_neutral`. A refusal that survives the retry is
+/// the program's own, and the first error is the one returned.
+fn load_degrading(
+    request: &RawProgLoad<'_>,
+    neutral: &[String],
+    optional_calls: &[String],
+    all_neutral: impl FnOnce() -> Vec<aya_obj::generated::bpf_insn>,
+) -> (Result<OwnedFd, KfuncLoaderError>, Option<DegradedProgram>) {
+    match raw_prog_load(request) {
+        Err(e) if neutral.len() < optional_calls.len() => {
+            let retry_insns = all_neutral();
+            let retry = raw_prog_load(&RawProgLoad {
+                insns: &retry_insns,
+                ..*request
+            });
+            match retry {
+                Ok(fd) => (
+                    Ok(fd),
+                    Some(DegradedProgram {
+                        name: request.name.to_owned(),
+                        kfuncs: optional_calls.to_vec(),
+                        declared: true,
+                        reason: e.to_string(),
+                    }),
+                ),
+                Err(_) => (Err(e), None),
+            }
+        }
+        Ok(fd) if !neutral.is_empty() => (
+            Ok(fd),
+            Some(DegradedProgram {
+                name: request.name.to_owned(),
+                kfuncs: neutral.to_vec(),
+                declared: false,
+                reason: format!("the kernel BTF does not declare {}", quoted_list(neutral)),
+            }),
+        ),
+        other => (other, None),
+    }
 }
 
 /// Pair every map the object declares with its hosted fd, draining `obj.maps`
@@ -761,23 +886,41 @@ fn build_fd_array(
     })
 }
 
+/// The optional kfuncs (see [`OPTIONAL_KFUNCS`]) a program's still-sentinel
+/// instructions call, in first-seen order.
+fn optional_kfunc_calls(insns: &[aya_obj::generated::bpf_insn], names: &[String]) -> Vec<String> {
+    let mut calls = Vec::new();
+    for ins in insns {
+        if ins.code == INSN_CALL
+            && ins.src_reg() == BPF_PSEUDO_KFUNC_CALL
+            && let Some(name) = usize::try_from(ins.imm).ok().and_then(|i| names.get(i))
+            && is_optional_kfunc(name)
+        {
+            push_unique(&mut calls, name);
+        }
+    }
+    calls
+}
+
 /// Rewrite each kfunc-call sentinel in `insns` to its resolved `(btf_id,
 /// fd_array index)`. When `dev_bound` is false, device-bound-only metadata
 /// kfunc sites are instead neutralized to `r0 = -EOPNOTSUPP` so the program
 /// loads on a NIC without `xdp_metadata_ops` (the program's wrapper treats the
-/// non-zero return as "metadata unavailable").
+/// non-zero return as "metadata unavailable"). A call to a kfunc named in
+/// `neutral` is neutralized the same way, whatever the device.
 fn rewrite_kfunc_calls(
     insns: &mut [aya_obj::generated::bpf_insn],
     names: &[String],
     targets: &HashMap<String, KfuncTarget>,
     module_slot: &HashMap<String, i16>,
     dev_bound: bool,
+    neutral: &[String],
 ) {
     for ins in insns {
         if ins.code == INSN_CALL && ins.src_reg() == BPF_PSEUDO_KFUNC_CALL {
             let idx = usize::try_from(ins.imm).expect("kfunc sentinel index is non-negative");
             let name = &names[idx];
-            if !dev_bound && is_dev_bound_metadata_kfunc(name) {
+            if (!dev_bound && is_dev_bound_metadata_kfunc(name)) || neutral.contains(name) {
                 // Replace `call <metadata kfunc>` with `r0 = -EOPNOTSUPP`.
                 ins.code = BPF_MOV64_IMM;
                 ins.set_dst_reg(0);
@@ -1427,6 +1570,8 @@ pub struct TokenLoadedObject {
     /// The optional programs the kernel refused, with the reason each one
     /// carried. Empty when the caller named none or the kernel took them all.
     pub refused: Vec<RefusedProgram>,
+    /// The programs loaded without their optional kfuncs, with the reason.
+    pub degraded: Vec<DegradedProgram>,
     /// Map name → a borrowed (dup'd) raw fd of the same kernel map, kept so the
     /// loader can issue raw `BPF_MAP_UPDATE_ELEM` (e.g. tail-call `ProgramArray`
     /// wiring) against a map whose typed form lives in `maps`.
@@ -2050,6 +2195,7 @@ fn load_object_token_fresh(
         maps,
         programs: loaded_programs.programs,
         refused: loaded_programs.refused,
+        degraded: loaded_programs.degraded,
         hosted,
         map_types,
     })
@@ -2565,7 +2711,7 @@ mod tests {
         let module_slot = HashMap::new();
         let mut insns = [kfunc_call_sentinel(0)];
 
-        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, false);
+        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, false, &[]);
 
         // The call became `r0 = -EOPNOTSUPP`, so the wrapper falls back.
         assert_eq!(insns[0].code, BPF_MOV64_IMM);
@@ -2588,12 +2734,81 @@ mod tests {
         let module_slot = HashMap::new();
         let mut insns = [kfunc_call_sentinel(0)];
 
-        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, true);
+        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, true, &[]);
 
         // Device-bound: stays a kfunc call resolved to the real btf id, off 0.
         assert_eq!(insns[0].code, INSN_CALL);
         assert_eq!(insns[0].imm, 4242);
         assert_eq!(insns[0].off, 0);
+    }
+
+    #[test]
+    fn the_dynptr_user_read_is_the_only_optional_kfunc() {
+        assert_eq!(OPTIONAL_KFUNCS, &["bpf_probe_read_user_dynptr"]);
+        assert!(is_optional_kfunc("bpf_probe_read_user_dynptr"));
+        assert!(!is_optional_kfunc("bpf_copy_from_user_dynptr"));
+        assert!(!is_optional_kfunc("bpf_xdp_ct_lookup"));
+    }
+
+    #[test]
+    fn optional_calls_are_listed_once_in_first_seen_order() {
+        let names = vec![
+            "bpf_xdp_ct_lookup".to_owned(),
+            "bpf_probe_read_user_dynptr".to_owned(),
+        ];
+        let plain = aya_obj::generated::bpf_insn {
+            code: BPF_MOV64_IMM,
+            ..kfunc_call_sentinel(1)
+        };
+        let insns = [
+            kfunc_call_sentinel(0),
+            kfunc_call_sentinel(1),
+            plain,
+            kfunc_call_sentinel(1),
+            kfunc_call_sentinel(7),
+        ];
+        assert_eq!(
+            optional_kfunc_calls(&insns, &names),
+            vec!["bpf_probe_read_user_dynptr".to_owned()]
+        );
+        assert!(optional_kfunc_calls(&insns[..1], &names).is_empty());
+    }
+
+    #[test]
+    fn a_neutral_kfunc_becomes_eopnotsupp_and_needs_no_target() {
+        let names = vec![
+            "bpf_ct_release".to_owned(),
+            "bpf_probe_read_user_dynptr".to_owned(),
+        ];
+        // Only the hard requirement resolved: the optional one is undeclared
+        // and must never be looked up.
+        let mut targets = HashMap::new();
+        targets.insert(
+            names[0].clone(),
+            KfuncTarget {
+                btf_id: 77,
+                module_name: None,
+                module_btf_obj_id: None,
+            },
+        );
+        let module_slot = HashMap::new();
+        let mut insns = [kfunc_call_sentinel(0), kfunc_call_sentinel(1)];
+
+        rewrite_kfunc_calls(
+            &mut insns,
+            &names,
+            &targets,
+            &module_slot,
+            false,
+            &["bpf_probe_read_user_dynptr".to_owned()],
+        );
+
+        assert_eq!(insns[0].code, INSN_CALL);
+        assert_eq!(insns[0].imm, 77);
+        assert_eq!(insns[1].code, BPF_MOV64_IMM);
+        assert_eq!(insns[1].dst_reg(), 0);
+        assert_eq!(insns[1].src_reg(), 0);
+        assert_eq!(insns[1].imm, NEG_EOPNOTSUPP);
     }
 
     #[test]

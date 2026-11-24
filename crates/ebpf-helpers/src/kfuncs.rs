@@ -26,6 +26,7 @@
 //! | `bpf_xdp_metadata_rx_vlan_tag`  | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
 //! | `bpf_xdp_get_xfrm_state`        | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
 //! | `bpf_xdp_xfrm_state_release`    | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
+//! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
@@ -366,6 +367,22 @@ unsafe extern "C" {
     /// Return the logical size of the dynptr in bytes. Kernel 6.5+.
     pub fn bpf_dynptr_size(p: *const BpfDynptr) -> u32;
 
+    // ── Kernel 6.16 dynptr user-memory read ───────────────────
+
+    /// Copy `size` bytes of user memory at `unsafe_ptr` into `dptr` at
+    /// `off`. Kernel 6.16. Returns `0` on success, a negative errno when
+    /// the range falls outside the dynptr or the user page cannot be read.
+    ///
+    /// The non-faulting variant: unlike `bpf_copy_from_user_dynptr`, which
+    /// the kernel marks `KF_SLEEPABLE`, it may be called from a uprobe or a
+    /// kprobe, which never sleep.
+    pub fn bpf_probe_read_user_dynptr(
+        dptr: *mut BpfDynptr,
+        off: u64,
+        size: u64,
+        unsafe_ptr: *const core::ffi::c_void,
+    ) -> i32;
+
     // ── Kernel 5.18 netfilter conntrack lookup ──────────────────
     //
     // `bpf_skb_ct_lookup` / `bpf_xdp_ct_lookup` query the kernel
@@ -658,6 +675,19 @@ pub mod host_stubs {
     pub unsafe fn bpf_dynptr_size(p: *const BpfDynptr) -> u32 {
         let backing = unsafe { HostDynptrBacking::from_opaque((*p).__opaque) };
         backing.end.saturating_sub(backing.start)
+    }
+
+    // ── Kernel 6.16 dynptr user-memory read stub ──
+
+    /// No user memory on the host: the read is refused the way a kernel
+    /// without the kfunc would leave the caller on its fallback.
+    pub unsafe fn bpf_probe_read_user_dynptr(
+        _dptr: *mut BpfDynptr,
+        _off: u64,
+        _size: u64,
+        _unsafe_ptr: *const core::ffi::c_void,
+    ) -> i32 {
+        ENOTSUP_NEG
     }
 
     // ── Conntrack stubs (kernel 5.18) ──

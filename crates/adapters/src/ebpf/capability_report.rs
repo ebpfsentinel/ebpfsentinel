@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use domain::ransom::refusal::WriteRefusalRoute;
 
 use super::capabilities::{CATALOGUE, Capability, KernelVersion};
+use super::dlp_record::DlpRecordStatus;
 use super::file_kfunc_probe::FileKfuncStatus;
 use super::kernel_probe::distribution_family;
 use super::kfunc_feature_probe::KfuncFeature;
@@ -354,6 +355,23 @@ pub fn immediate_signal_evidence(probe: &DirectSignalProbe) -> Evidence {
     }
 }
 
+/// The DLP probes' whole-record read, restated as evidence. Nothing was
+/// offered to the kernel while DLP is off.
+#[must_use]
+pub fn dlp_record_evidence(status: &DlpRecordStatus) -> Evidence {
+    let load = match (status.loaded, status.declared) {
+        (true, _) => Load::Loaded,
+        (false, None) => Load::NotRun(status.reason.clone().unwrap_or_else(|| {
+            "the DLP probes are loaded only when dlp.enabled is true".to_string()
+        })),
+        (false, Some(_)) => Load::Refused(status.reason.clone().unwrap_or_default()),
+    };
+    Evidence::Kfunc {
+        declared: status.declared,
+        load,
+    }
+}
+
 /// All declared, any not declared, or unreadable.
 fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
     let mut all = Some(true);
@@ -370,9 +388,9 @@ fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 /// The evidence the running agent holds for one catalogue entry.
 fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
-        attribution_attach, bpf_guard, exec_network, file_kfunc_probe, kfunc_feature_probe,
-        lsm_probe, process_attach, quarantine_map_manager, signal_attach, tamper_guard,
-        workload_firewall_attach, write_refusal,
+        attribution_attach, bpf_guard, dlp_record, exec_network, file_kfunc_probe,
+        kfunc_feature_probe, lsm_probe, process_attach, quarantine_map_manager, signal_attach,
+        tamper_guard, workload_firewall_attach, write_refusal,
     };
     match id {
         "bpf_lsm" => Some(lsm_evidence(lsm_probe::status())),
@@ -400,6 +418,7 @@ fn host_evidence(id: &str) -> Option<Evidence> {
         "immediate_signal" => Some(immediate_signal_evidence(
             &signal_attach::status().immediate,
         )),
+        "dlp_whole_record" => Some(dlp_record_evidence(&dlp_record::status())),
         "network_executables" => {
             let s = exec_network::status();
             Some(attach_evidence(s.attached, s.reason))
@@ -617,6 +636,46 @@ mod tests {
             classify(entry, false, &off).expect("inactive").code(),
             "not_probed"
         );
+    }
+
+    #[test]
+    fn the_whole_record_says_which_of_the_kernel_or_the_configuration_is_why() {
+        let entry = find("dlp_whole_record").expect("entry");
+        let kept = dlp_record_evidence(&DlpRecordStatus {
+            declared: Some(true),
+            loaded: true,
+            reason: None,
+            record_bytes: 16_384,
+        });
+        assert_eq!(classify(entry, false, &kept), None);
+
+        let undeclared = dlp_record_evidence(&DlpRecordStatus {
+            declared: Some(false),
+            loaded: false,
+            reason: Some("the kernel BTF does not declare it".into()),
+            record_bytes: 0,
+        });
+        assert_eq!(
+            classify(entry, false, &undeclared),
+            Some(Inactive::NotDeclared)
+        );
+
+        let refused = dlp_record_evidence(&DlpRecordStatus {
+            declared: Some(true),
+            loaded: false,
+            reason: Some("the verifier refused the call".into()),
+            record_bytes: 0,
+        });
+        assert_eq!(
+            classify(entry, false, &refused),
+            Some(Inactive::Refused("the verifier refused the call".into()))
+        );
+
+        let off = dlp_record_evidence(&DlpRecordStatus::default());
+        let Some(Inactive::NotProbed(why)) = classify(entry, false, &off) else {
+            panic!("DLP off is not probed");
+        };
+        assert!(why.contains("dlp.enabled"), "{why}");
     }
 
     #[test]

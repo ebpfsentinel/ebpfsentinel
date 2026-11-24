@@ -17,7 +17,7 @@ pub fn event_timestamp_ns(event: &AgentEvent) -> u64 {
         AgentEvent::L4(e) => e.timestamp_ns,
         AgentEvent::L7 { header, .. } | AgentEvent::Packet { header, .. } => header.timestamp_ns,
         AgentEvent::Dns { header, .. } => header.timestamp_ns,
-        AgentEvent::Dlp(e) => e.timestamp_ns,
+        AgentEvent::Dlp(e) | AgentEvent::DlpRecord { header: e, .. } => e.timestamp_ns,
     }
 }
 
@@ -32,7 +32,9 @@ fn set_event_timestamp_ns(event: &mut AgentEvent, timestamp_ns: u64) {
             header.timestamp_ns = timestamp_ns;
         }
         AgentEvent::Dns { header, .. } => header.timestamp_ns = timestamp_ns,
-        AgentEvent::Dlp(e) => e.timestamp_ns = timestamp_ns,
+        AgentEvent::Dlp(e) | AgentEvent::DlpRecord { header: e, .. } => {
+            e.timestamp_ns = timestamp_ns;
+        }
     }
 }
 

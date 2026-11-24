@@ -200,6 +200,16 @@ pub const CATALOGUE: &[Capability] = &[
                    within the window is reported as a survivor",
     },
     Capability {
+        id: "dlp_whole_record",
+        unlocks: "a DLP event carrying a whole TLS record, up to dlp.record_bytes of \
+                  plaintext, read straight into the ring buffer",
+        probe: ProbeKind::Loaded,
+        since: KernelVersion::FLOOR,
+        needs_lsm: false,
+        fallback: "the DLP probes copy at most 4,096 bytes of each buffer, and a pattern past \
+                   them is not seen",
+    },
+    Capability {
         id: "network_executables",
         unlocks: "the list of executables allowed to reach the network, decided before the \
                   socket exists",
@@ -312,6 +322,7 @@ mod tests {
         "quarantine",
         "process_signal",
         "immediate_signal",
+        "dlp_whole_record",
         "network_executables",
         "write_refusal",
         "self_protection",

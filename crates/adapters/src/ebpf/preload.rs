@@ -28,7 +28,8 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::kfunc_loader::{
-    KfuncLoadedProgram, KfuncLoaderError, RefusedProgram, TokenLoadedObject, wrap_map_data,
+    DegradedProgram, KfuncLoadedProgram, KfuncLoaderError, RefusedProgram, TokenLoadedObject,
+    wrap_map_data,
 };
 
 static WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
@@ -73,6 +74,7 @@ struct Kept {
     maps: Vec<(String, OwnedFd, u32)>,
     programs: Vec<(String, OwnedFd, u32)>,
     refused: Vec<RefusedProgram>,
+    degraded: Vec<DegradedProgram>,
 }
 
 /// The arguments a load is answered on: the object's bytes, where its maps
@@ -194,6 +196,7 @@ fn rebuild(kept: &Kept) -> Result<TokenLoadedObject, KfuncLoaderError> {
         maps,
         programs,
         refused: kept.refused.clone(),
+        degraded: kept.degraded.clone(),
         hosted,
         map_types,
     })
@@ -219,6 +222,7 @@ fn keep(loaded: &TokenLoadedObject) -> Result<Kept, KfuncLoaderError> {
         maps,
         programs,
         refused: loaded.refused.clone(),
+        degraded: loaded.degraded.clone(),
     })
 }
 

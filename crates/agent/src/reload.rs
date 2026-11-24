@@ -525,7 +525,7 @@ const REREAD: &[(&str, Reread)] = &[
     ("zones", Reread::All),
     ("loadbalancer", Reread::All),
     ("interface_groups", Reread::All),
-    ("dlp", Reread::AllBut(&["scope"])),
+    ("dlp", Reread::AllBut(&["scope", "record_bytes"])),
     ("qos", Reread::AllBut(&["enabled"])),
     ("threatintel", Reread::AllBut(&["crowdsec", "max_entries"])),
     ("dns", Reread::Only(&["enabled"])),

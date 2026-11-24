@@ -348,6 +348,41 @@ unsafe impl aya::Pod for DlpEventSmall {}
 /// the header moves the excerpt and the reader follows without being edited.
 pub const DLP_EVENT_HEADER_SIZE: usize = core::mem::offset_of!(DlpEvent, data_excerpt);
 
+/// The header of a whole-record event: the fields of [`DlpEvent`] in front of
+/// its excerpt, at the same offsets, with no excerpt of its own.
+///
+/// A whole record is reserved at the size the plaintext needs rather than at
+/// one of the two fixed tiers, so its bytes cannot sit in a typed array. The
+/// probe writes this header at offset 0 of the reservation and the plaintext
+/// right after it, which is the layout the reader already slices on
+/// [`DLP_EVENT_HEADER_SIZE`]: the reader tells the three shapes apart by
+/// length alone.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DlpRecordHeader {
+    pub pid: u32,
+    pub tgid: u32,
+    pub timestamp_ns: u64,
+    /// cgroup v2 ID from `bpf_get_current_cgroup_id`. See `DlpEvent`.
+    pub cgroup_id: u64,
+    /// Bytes the traced call handed over, which may exceed what was read.
+    pub data_len: u32,
+    pub direction: u8,
+    pub _padding: [u8; 3],
+    /// The socket the plaintext was written to or read from. See `DlpEvent`.
+    pub flow: DlpSocket,
+}
+
+/// The default and the largest plaintext a DLP probe hands to userspace in
+/// one event when it reads the whole record: the plaintext ceiling of one
+/// TLS record, 2^14 bytes (RFC 8446 section 5.1, RFC 5246 section 6.2.1).
+pub const DLP_RECORD_MAX: u32 = 16_384;
+
+/// The smallest whole-record size the configuration accepts: the bounded
+/// copy's excerpt. A smaller ceiling would let the fallback read more than
+/// the configuration allows.
+pub const DLP_RECORD_MIN: u32 = DLP_MAX_EXCERPT as u32;
+
 /// Per-task context saved at SSL_read entry, consumed at SSL_read return.
 /// Stored in the SSL_READ_ARGS HashMap keyed by pid_tgid.
 /// Size: 16 bytes (aligned to 8 bytes due to buf_ptr u64).
@@ -619,6 +654,26 @@ mod tests {
             mem::size_of::<DlpEventSmall>(),
             DLP_EVENT_HEADER_SIZE + DLP_SMALL_EXCERPT
         );
+    }
+
+    #[test]
+    fn a_record_header_is_the_event_header() {
+        assert_eq!(mem::size_of::<DlpRecordHeader>(), DLP_EVENT_HEADER_SIZE);
+        assert_eq!(mem::align_of::<DlpRecordHeader>(), 8);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, pid), 0);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, tgid), 4);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, timestamp_ns), 8);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, cgroup_id), 16);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, data_len), 24);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, direction), 28);
+        assert_eq!(mem::offset_of!(DlpRecordHeader, flow), 32);
+    }
+
+    #[test]
+    fn a_whole_record_holds_one_tls_record_and_never_less_than_the_bounded_copy() {
+        assert_eq!(DLP_RECORD_MAX, 1 << 14);
+        assert_eq!(DLP_RECORD_MIN as usize, DLP_MAX_EXCERPT);
+        const { assert!(DLP_RECORD_MIN < DLP_RECORD_MAX) };
     }
 
     #[test]
