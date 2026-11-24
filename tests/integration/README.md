@@ -327,7 +327,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `workload` | 67, 70, 92, 95, 149 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use, 149 the label a cgroup directory carries |
 | `zone` | 31 | 2vm | 6.18 | datapath | Zone-based policy |
 
-#### Capabilities above the floor (19)
+#### Capabilities above the floor (20)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -336,6 +336,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup_labels` | 149 | none | 6.18 | datapath | A cgroup carrying the label a rule names refused, another label and none let through; the route and the start-up log name the path reading the label; where the kernel reads it, a label set on the client's own cgroup refuses its next connect, skipped where the agent reads it |
 | `copy_from_user_str` | 86, 151 | none | 6.18 | datapath | 86 reads the report; 151 shows a process with the arguments it was started with although it rewrote them at once, which only the copy made at exec can see, and the /proc fallback without the BPF LSM |
 | `dlp_whole_record` | 150 | none | 6.18 | datapath | A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name |
+| `executable_digest` | 154 | none | 6.18 | datapath | 154 reads the capability active where the BPF LSM and IMA run, then the process table's digest of a started binary against sha256sum, a second exec answered from the kept entry and an append dropping it; skipped where either LSM is missing at boot |
 | `file_kfuncs` | 77 | none | 6.18 | datapath | Probed and reported in 77 |
 | `immediate_signal` | 82 | none | 6.18 | datapath | A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only |
 | `kprobe_session` | 86 | none | 6.18 | datapath | No shipped program rests on it yet, so the report in 86 is all there is to assert |
@@ -400,7 +401,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 62, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 27, 60 |
