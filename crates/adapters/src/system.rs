@@ -20,6 +20,44 @@ pub fn set_restrictive_umask() {
     // No-op on non-Unix platforms.
 }
 
+/// The open-file limit before and after [`raise_open_file_limit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenFileLimit {
+    /// The soft limit the process was started with.
+    pub before: u64,
+    /// The soft limit it runs with now: the hard limit.
+    pub after: u64,
+}
+
+/// Raise the soft open-file limit to the hard one. Every eBPF program, map
+/// and link is a descriptor, and the agent holds more than the 1024 that
+/// systemd, Docker and containerd give a process by default: past it a load
+/// fails with `EMFILE` and the program runs degraded. Raising the soft limit
+/// up to the hard one takes no privilege.
+#[cfg(unix)]
+pub fn raise_open_file_limit() -> std::io::Result<OpenFileLimit> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable rlimit for the duration of the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let before = limit.rlim_cur;
+    if limit.rlim_cur < limit.rlim_max {
+        limit.rlim_cur = limit.rlim_max;
+        // SAFETY: `limit` is a valid rlimit read just above, soft raised to hard.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(OpenFileLimit {
+        before,
+        after: limit.rlim_cur,
+    })
+}
+
 /// Why a second agent was refused the state directory.
 #[derive(Debug)]
 pub enum InstanceLockError {
@@ -150,6 +188,20 @@ pub fn acquire_instance_lock(path: &Path) -> Result<InstanceLock, InstanceLockEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_soft_open_file_limit_ends_at_the_hard_one() {
+        let limit = raise_open_file_limit().expect("getrlimit and setrlimit answer");
+        let mut now = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `now` is a valid, writable rlimit for the duration of the call.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut now) }, 0);
+        assert_eq!(limit.after, now.rlim_cur);
+        assert_eq!(now.rlim_cur, now.rlim_max);
+        assert!(limit.before <= limit.after);
+    }
 
     #[test]
     fn the_first_agent_takes_it_and_says_where() {

@@ -728,6 +728,20 @@ pub async fn run(
         "eBPFsentinel agent starting"
     );
 
+    // ── 2a. Room for every program, map and link descriptor ─────────
+    match adapters::system::raise_open_file_limit() {
+        Ok(limit) if limit.before < limit.after => info!(
+            from = limit.before,
+            to = limit.after,
+            "open-file limit raised to the hard limit"
+        ),
+        Ok(_) => {}
+        Err(e) => warn!(
+            error = %e,
+            "open-file limit left as started: programs past it load degraded"
+        ),
+    }
+
     // ── 2b. Refuse to be the second agent on this state directory ────
     // Startup wipes the pins it finds and opens the redb stores for writing,
     // so a second process here does not share the node with the first one: it
@@ -9155,7 +9169,7 @@ pub fn establish_bpf_token_at(
 /// The objects holding programs that read the kernel, with the pin path and
 /// the programs each may do without, exactly as their own loads below name
 /// them: a load is answered from what start-up kept only when it asks the same.
-fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static str]); 10] {
+fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static str]); 11] {
     use adapters::ebpf::DEFAULT_BPF_PIN_PATH as PINS;
     const GUARD_OPTIONAL: [&str; 2] = [
         adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_3,
@@ -9188,6 +9202,7 @@ fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static 
             &GUARD_OPTIONAL,
         ),
         (adapters::ebpf::tamper_guard::TAMPER_GUARD_OBJECT, PINS, &[]),
+        (adapters::ebpf::exec_digest::EXEC_DIGEST_OBJECT, PINS, &[]),
     ]
 }
 
@@ -10001,6 +10016,28 @@ fn attach_tc_egress_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An object holding an LSM, tracepoint or uprobe program that start-up
+    /// does not load before the hand-over is refused on its own load later.
+    #[test]
+    fn every_kernel_reading_object_is_loaded_before_input() {
+        let programs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ebpf-programs");
+        let listed: Vec<&str> = kernel_reading_objects()
+            .iter()
+            .map(|(n, _, _)| *n)
+            .collect();
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(programs).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let reads_kernel = ["lsm-", "tracepoint-", "uprobe-"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix));
+            if reads_kernel && !listed.contains(&name.as_str()) {
+                missing.push(name);
+            }
+        }
+        assert!(missing.is_empty(), "not loaded before input: {missing:?}");
+    }
 
     fn refusal_without_ebpf(yaml: &str) -> Option<String> {
         let config = AgentConfig::from_yaml(yaml).unwrap();
