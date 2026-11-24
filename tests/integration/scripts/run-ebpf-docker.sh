@@ -51,16 +51,20 @@ fi
 
 # ── Build if needed ───────────────────────────────────────────────
 if [ "$SKIP_BUILD" = "false" ]; then
-    echo "Building agent (release)..."
-    (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-agent)
+    echo "Building agent and warden (release)..."
+    (cd "$PROJECT_ROOT" && cargo build --release --bin ebpfsentinel-agent --bin warden)
     echo ""
 fi
 
-if [ ! -x "${PROJECT_ROOT}/target/release/ebpfsentinel-agent" ]; then
-    echo "ERROR: agent binary not found at target/release/ebpfsentinel-agent" >&2
-    echo "Run: cargo build --release --bin ebpfsentinel-agent" >&2
-    exit 1
-fi
+# The agent loads eBPF only through the token the warden delegates; without
+# the warden every suite would run against an agent in API-only mode.
+for bin in ebpfsentinel-agent warden; do
+    if [ ! -x "${PROJECT_ROOT}/target/release/${bin}" ]; then
+        echo "ERROR: ${bin} binary not found at target/release/${bin}" >&2
+        echo "Run: cargo build --release --bin ebpfsentinel-agent --bin warden" >&2
+        exit 1
+    fi
+done
 
 if [ ! -f "${PROJECT_ROOT}/target/bpfel-unknown-none/release/xdp-firewall" ]; then
     echo "ERROR: eBPF programs not found at target/bpfel-unknown-none/release/" >&2
@@ -158,7 +162,7 @@ docker run --rm \
         add-apt-repository -y universe >/dev/null 2>&1 || true
         apt-get update -qq >/dev/null 2>&1
         apt-get install -y -qq \
-            curl jq iproute2 iputils-ping ncat nmap procps bc openssl \
+            curl jq iproute2 iputils-ping ncat nmap procps bc openssl dnsutils \
             >/dev/null 2>&1 || true
 
         # Install bats (not in default Ubuntu repos)
