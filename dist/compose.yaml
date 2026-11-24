@@ -40,7 +40,7 @@ services:
   warden-policy:
     image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev
     container_name: ebpfsentinel-warden-policy
-    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output", "/run/ebpfsentinel-policy/warden-policy.json"]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output-file", "/run/ebpfsentinel-policy/warden-policy.json"]
     user: "0:0"
     network_mode: none
     read_only: true

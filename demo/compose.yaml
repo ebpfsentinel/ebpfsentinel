@@ -27,7 +27,7 @@ services:
   # either starts, into a volume only the warden mounts.
   warden-policy:
     image: ghcr.io/ebpfsentinel/ebpfsentinel:${EBPFSENTINEL_TAG:-latest}
-    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output", "/run/ebpfsentinel-policy/warden-policy.json"]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml", "warden-policy", "--output-file", "/run/ebpfsentinel-policy/warden-policy.json"]
     user: "0:0"
     network_mode: none
     read_only: true

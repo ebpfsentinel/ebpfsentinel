@@ -30,9 +30,9 @@ pub(super) async fn run_oss(mut cli: Cli) -> Result<Option<Cli>> {
             Ok(())
         }
 
-        Some(Command::WardenPolicy { output }) => {
+        Some(Command::WardenPolicy { output_file }) => {
             let policy = crate::warden_policy::derive_from_file(std::path::Path::new(&cli.config))?;
-            crate::warden_policy::write(&policy, output.as_deref())
+            crate::warden_policy::write(&policy, output_file.as_deref())
         }
 
         Some(Command::Stop { conn, reason }) => {

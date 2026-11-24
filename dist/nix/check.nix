@@ -134,7 +134,7 @@ let
 
     "the warden's policy is written from the agent's configuration before it starts" =
       warden.serviceConfig.ExecStartPre
-      == "${package}/bin/ebpfsentinel-agent --config ${package}/share/ebpfsentinel/ebpfsentinel.yaml warden-policy --output /run/ebpfsentinel/warden-policy.json";
+      == "${package}/bin/ebpfsentinel-agent --config ${package}/share/ebpfsentinel/ebpfsentinel.yaml warden-policy --output-file /run/ebpfsentinel/warden-policy.json";
 
     "the agent loads its objects from the store" =
       agent.environment.EBPF_PROGRAM_DIR == "${package}/lib/ebpfsentinel";

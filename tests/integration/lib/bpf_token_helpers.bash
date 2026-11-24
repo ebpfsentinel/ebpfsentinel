@@ -104,7 +104,7 @@ bpf_token_run() {
     # The warden answers what the agent's configuration uses and nothing
     # else, written by the agent binary before either starts.
     local policy="${BPF_TOKEN_WARDEN_SOCK%.sock}.policy.json"
-    "$AGENT_BIN" --config "$config" warden-policy --output "$policy" >>"$BPF_TOKEN_LOG" 2>&1 \
+    "$AGENT_BIN" --config "$config" warden-policy --output-file "$policy" >>"$BPF_TOKEN_LOG" 2>&1 \
         || return 1
 
     # Start the privileged warden broker. It serves its default uid, 65534, the

@@ -197,7 +197,7 @@ in
         # --policy: what the warden answers, written by the agent binary as
         # root before the agent runs, from the configuration the agent reads,
         # into a directory the agent cannot write.
-        ExecStartPre = "${cfg.package}/bin/ebpfsentinel-agent --config ${configFile} warden-policy --output /run/ebpfsentinel/warden-policy.json";
+        ExecStartPre = "${cfg.package}/bin/ebpfsentinel-agent --config ${configFile} warden-policy --output-file /run/ebpfsentinel/warden-policy.json";
         ExecStart = "${cfg.package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel --policy /run/ebpfsentinel/warden-policy.json";
         Restart = "always";
         RestartSec = "2s";

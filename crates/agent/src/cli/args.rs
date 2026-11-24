@@ -78,9 +78,10 @@ pub enum Command {
     /// warden starts, from the file the agent reads
     WardenPolicy {
         /// File the policy is written to, replaced in one rename; standard
-        /// output without one
-        #[arg(long)]
-        output: Option<std::path::PathBuf>,
+        /// output without one. Not `--output`: that name is the global
+        /// output format, and clap would read the path as a format
+        #[arg(short = 'f', long)]
+        output_file: Option<std::path::PathBuf>,
     },
 
     /// Stop the running agent and keep it stopped: the stop is recorded under
@@ -1361,6 +1362,27 @@ mod tests {
             Cli::try_parse_from(["ebpfsentinel-agent", "--token", "my-secret-token", "status"])
                 .unwrap();
         assert_eq!(cli.token.as_deref(), Some("my-secret-token"));
+    }
+
+    #[test]
+    fn warden_policy_takes_its_file_beside_the_global_output_format() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "--config",
+            "/etc/ebpfsentinel/config.yaml",
+            "warden-policy",
+            "--output-file",
+            "/run/ebpfsentinel/warden-policy.json",
+        ])
+        .unwrap();
+        assert_eq!(cli.output, OutputFormat::Table);
+        match cli.command {
+            Some(Command::WardenPolicy { output_file }) => assert_eq!(
+                output_file.as_deref(),
+                Some(std::path::Path::new("/run/ebpfsentinel/warden-policy.json"))
+            ),
+            other => panic!("expected warden-policy, got {other:?}"),
+        }
     }
 
     #[test]

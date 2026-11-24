@@ -398,7 +398,7 @@ start_ebpf_agent() {
             # configuration leaves a family off sees the warden refuse it.
             local policy="${sock%.sock}.policy.json"
             rm -f "$policy"
-            if ! "$AGENT_BIN" --config "$config_file" warden-policy --output "$policy" \
+            if ! "$AGENT_BIN" --config "$config_file" warden-policy --output-file "$policy" \
                 >>"${AGENT_LOG_FILE}.warden" 2>&1; then
                 echo "  [warden] the agent binary could not write the policy" >&2
                 return 1

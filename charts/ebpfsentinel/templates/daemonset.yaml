@@ -122,7 +122,7 @@ spec:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
             - "warden-policy"
-            - "--output"
+            - "--output-file"
             - "/run/ebpfsentinel-policy/warden-policy.json"
           securityContext:
             runAsUser: 65534

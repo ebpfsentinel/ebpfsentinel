@@ -44,7 +44,7 @@ RuntimeDirectoryMode=0755
 # the gateways, VIPs, ports and paths it names fence the rest. The directory is
 # root's, so the agent can neither write the file nor replace it. A setting
 # changed later takes effect for the warden at its next restart.
-ExecStartPre=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml warden-policy --output /run/ebpfsentinel/warden-policy.json
+ExecStartPre=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml warden-policy --output-file /run/ebpfsentinel/warden-policy.json
 ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel --policy /run/ebpfsentinel/warden-policy.json
 Restart=always
 RestartSec=2s

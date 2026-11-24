@@ -281,7 +281,7 @@ case "${LAUNCH}" in
         else
             POLICY_BIN="${REMOTE}/ebpfsentinel-enterprise-agent"
         fi
-        "${POLICY_BIN}" --config "${CONFIG}" warden-policy --output "${REMOTE}/warden-policy.json" \
+        "${POLICY_BIN}" --config "${CONFIG}" warden-policy --output-file "${REMOTE}/warden-policy.json" \
             || { echo '{"error":"the warden policy could not be written"}'; exit 1; }
         systemd-run --unit fp-warden "${PROPS[@]}" -- /usr/local/bin/warden serve "${REMOTE}/warden.sock" --policy "${REMOTE}/warden-policy.json"
         chown 65534:65534 "${CONFIG}"
