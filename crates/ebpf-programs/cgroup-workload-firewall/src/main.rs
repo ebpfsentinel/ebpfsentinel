@@ -197,6 +197,11 @@ static WORKLOAD_LABEL_CONFIG: Array<u64, 1> = Array::new();
 /// read-only memory it can check at load.
 static LABEL_XATTR: [u8; WORKLOAD_LABEL_XATTR.len()] = WORKLOAD_LABEL_XATTR;
 
+/// Where the label is read to. `bpf_dynptr_from_mem` takes a map value and
+/// nothing else, a stack buffer included, so the key is built here.
+#[btf_map]
+static WORKLOAD_LABEL_SCRATCH: PerCpuArray<[u8; WORKLOAD_LABEL_KEY_LEN], 1> = PerCpuArray::new();
+
 /// What the policy did, per CPU.
 #[btf_map]
 static WORKLOAD_METRICS: PerCpuArray<u64, { WORKLOAD_METRIC_COUNT as usize }> = PerCpuArray::new();
@@ -880,10 +885,17 @@ fn labelled() -> u64 {
     if cgrp.is_null() {
         return 0;
     }
-    let mut key = [0u8; WORKLOAD_LABEL_KEY_LEN];
+    let Some(key) = WORKLOAD_LABEL_SCRATCH.get_ptr_mut(0) else {
+        return 0;
+    };
+    // SAFETY: `key` is this CPU's slot of the scratch map, written by nobody
+    // else while the program runs; zeroed so a shorter label than the last
+    // one leaves no tail behind it.
+    let key = unsafe { &mut *key };
+    *key = [0u8; WORKLOAD_LABEL_KEY_LEN];
     let mut value = BpfDynptr::uninit();
     // SAFETY: the dynptr covers the first `WORKLOAD_LABEL_MAX_LEN` bytes of
-    // `key`, a stack buffer that outlives it, leaving the last byte zero.
+    // `key`, a map value that outlives it, leaving the last byte zero.
     let made = unsafe {
         bpf_dynptr_from_mem(
             key.as_mut_ptr().cast(),
@@ -904,7 +916,7 @@ fn labelled() -> u64 {
     }
     // SAFETY: the value is copied out at once and never held across a map
     // update.
-    match unsafe { WORKLOAD_LABEL_SELECTORS.get(&key) } {
+    match unsafe { WORKLOAD_LABEL_SELECTORS.get(&*key) } {
         Some(bits) => *bits & named,
         None => 0,
     }
