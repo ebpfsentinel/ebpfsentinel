@@ -2813,6 +2813,43 @@ mod tests {
     }
 
     #[test]
+    fn the_built_exec_digest_object_names_its_three_hooks_one_sleepable() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-exec-digest"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        let hooks = lsm_hooks(&elf).expect("parse");
+        let obj = Object::parse(&elf).expect("object");
+        let mut by_program: Vec<(String, String)> = obj
+            .programs
+            .iter()
+            .map(|(name, p)| (name.clone(), hooks[&p.section_index].clone()))
+            .collect();
+        by_program.sort();
+        assert_eq!(
+            by_program,
+            vec![
+                (
+                    super::super::exec_digest::EXEC_DIGEST_EXEC_PROGRAM.to_string(),
+                    "bprm_committed_creds".to_string()
+                ),
+                (
+                    super::super::exec_digest::EXEC_DIGEST_OPEN_PROGRAM.to_string(),
+                    "file_open".to_string()
+                ),
+                (
+                    super::super::exec_digest::EXEC_DIGEST_TRUNCATE_PROGRAM.to_string(),
+                    "path_truncate".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn the_built_write_refusal_object_names_both_its_hooks() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),

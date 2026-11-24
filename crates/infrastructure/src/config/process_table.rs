@@ -51,6 +51,15 @@ pub struct ProcessTableConfig {
     #[serde(default)]
     pub capture_command_line: bool,
 
+    /// Take the executable's SHA-256 in the kernel at the exec, from IMA's
+    /// hash of the file, and keep it on the file until the file is written.
+    ///
+    /// On by default and used only where the host runs both the BPF LSM and
+    /// IMA; anywhere else, and for any file the kernel did not answer, the
+    /// agent reads the file itself as before. Off, the agent always reads it.
+    #[serde(default = "default_true")]
+    pub kernel_digest: bool,
+
     /// The three detections read off the table where a process touches the
     /// network.
     #[serde(default)]
@@ -63,6 +72,7 @@ impl Default for ProcessTableConfig {
             enabled: true,
             capacity: default_capacity(),
             capture_command_line: false,
+            kernel_digest: true,
             detections: ProcessDetectionConfig::default(),
         }
     }
@@ -244,6 +254,13 @@ mod tests {
     #[test]
     fn the_command_line_is_off_until_somebody_turns_it_on() {
         assert!(!ProcessTableConfig::default().capture_command_line);
+    }
+
+    #[test]
+    fn the_kernel_digest_is_on_until_somebody_turns_it_off() {
+        assert!(ProcessTableConfig::default().kernel_digest);
+        let cfg: ProcessTableConfig = serde_norway::from_str("kernel_digest: false\n").unwrap();
+        assert!(!cfg.kernel_digest);
     }
 
     #[test]

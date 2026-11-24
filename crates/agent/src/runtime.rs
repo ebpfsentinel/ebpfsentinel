@@ -1978,6 +1978,8 @@ pub struct HostObservation {
     _tracing: Option<(EbpfLoader, adapters::ebpf::ProcessTracingAttacher)>,
     // And the probes counting calls into the crypto libraries.
     _crypto: Option<EbpfLoader>,
+    // And the hooks taking each executable's digest at the exec.
+    _digest: Option<EbpfLoader>,
 }
 
 /// The process kill held by a binary that does not run the agent's own
@@ -2072,7 +2074,18 @@ pub async fn start_host_observation(
         .forward_to(process_tx.clone(), &cancel);
     let tracing = start_process_tracing(config, services, process_tx, &cancel);
 
-    let mut table = process_table(config, services, &proc_root).await;
+    let digests = startup::executable_digests(
+        config,
+        &startup::resolve_ebpf_program_dir(config),
+        &proc_root,
+        &services.metrics,
+    );
+    poll_kernel_counters(
+        digests.metrics_rdr.into_iter().collect(),
+        &services.metrics,
+        &cancel,
+    );
+    let mut table = process_table(config, services, &proc_root, digests.digester).await;
     let alerts_for_ransom = alerts.clone();
     let host_rules = Arc::new(
         application::host_rule_service::HostRuleService::new(host_rules_set, alerts).with_facts(
@@ -2142,15 +2155,18 @@ pub async fn start_host_observation(
         ransom,
         _tracing: tracing,
         _crypto: crypto,
+        _digest: digests.loader,
     }))
 }
 
-/// The process table, resolving what each entry runs, where it runs and
-/// which scopes read it, before any detection is attached to it.
+/// The process table, resolving what each entry runs, what it hashes to,
+/// where it runs and which scopes read it, before any detection is attached
+/// to it.
 async fn process_table(
     config: &AgentConfig,
     services: &ServiceHandles,
     proc_root: &std::path::Path,
+    digester: Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester>,
 ) -> application::process_table_service::ProcessTableService {
     let mut table = application::process_table_service::ProcessTableService::new(
         config.process_table.capacity,
@@ -2159,9 +2175,7 @@ async fn process_table(
     .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
         proc_root,
     )))
-    .with_digester(Arc::new(adapters::container::ProcExecutableDigester::new(
-        proc_root,
-    )))
+    .with_digester(digester)
     .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
         proc_root,
     )))

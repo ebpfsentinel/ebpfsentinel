@@ -22,6 +22,7 @@ pub mod dns_event_reader;
 pub mod drop_reason;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
+pub mod exec_digest;
 pub mod exec_network;
 pub mod feature_gates;
 pub mod file_kfunc_probe;

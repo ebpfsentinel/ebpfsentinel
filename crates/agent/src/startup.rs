@@ -2300,6 +2300,11 @@ pub async fn run(
     // it through the same proc root the container resolver does and both are
     // built from it further down.
     let coverage_proc = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
+    // The process table's digester, taken from the kernel at exec where the
+    // eBPF start-up below can arm it, the agent's own read otherwise.
+    let mut executable_digester: Option<
+        Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester>,
+    > = None;
     // The exec and exit events cross from the ring-buffer reader to the table
     // here. The table is built further down, once the container resolver and
     // the enrichers exist, so the buffer is what holds the first execs of the
@@ -3357,6 +3362,16 @@ pub async fn run(
             );
         }
 
+        // 10f-sexies-b. The executable's digest taken at the exec
+        let digests = executable_digests(&config, &ebpf_dir, &coverage_proc, &metrics);
+        if let Some(rdr) = digests.metrics_rdr {
+            metrics_readers.push(rdr);
+        }
+        if let Some(loader) = digests.loader {
+            ebpf_state.add_loader(loader);
+        }
+        executable_digester = Some(digests.digester);
+
         // 10f-septies. Write-opens refused past a count under the watched
         // directories
         write_refusal_running = wire_write_refusal(&mut WriteRefusalWiring {
@@ -3658,6 +3673,10 @@ pub async fn run(
         status.insert(
             "lsm-exec-network".to_string(),
             adapters::ebpf::exec_network::status().attached,
+        );
+        status.insert(
+            "lsm-exec-digest".to_string(),
+            adapters::ebpf::exec_digest::status().attached,
         );
         status.insert(
             "lsm-write-refusal".to_string(),
@@ -4161,9 +4180,11 @@ pub async fn run(
         .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
             &coverage_proc,
         )))
-        .with_digester(Arc::new(adapters::container::ProcExecutableDigester::new(
-            &coverage_proc,
-        )))
+        .with_digester(executable_digester.take().unwrap_or_else(|| {
+            Arc::new(adapters::container::ProcExecutableDigester::new(
+                &coverage_proc,
+            ))
+        }))
         .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
             &coverage_proc,
         )));
@@ -7675,6 +7696,131 @@ pub fn start_exec_network(
         maps,
         attacher,
         reader,
+    })
+}
+
+/// Who digests what each process runs, and what to keep alive for it.
+pub struct ExecutableDigests {
+    /// Asked by the process table for each executable it learns of.
+    pub digester: Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester>,
+    /// The object taking the digests at exec, absent when the agent's own
+    /// read is the only one. The hooks stay attached while it lives.
+    pub loader: Option<EbpfLoader>,
+    /// The object's counters.
+    pub metrics_rdr: Option<MetricsReader>,
+}
+
+impl ExecutableDigests {
+    /// The agent's own read alone, with the reason the kernel takes none
+    /// published where the kernel-features endpoint reads it.
+    fn userspace_only(
+        digester: Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester>,
+        reason: String,
+    ) -> Self {
+        adapters::ebpf::exec_digest::publish_status(
+            adapters::ebpf::exec_digest::ExecDigestStatus {
+                attached: false,
+                reason: Some(reason),
+            },
+        );
+        Self {
+            digester,
+            loader: None,
+            metrics_rdr: None,
+        }
+    }
+}
+
+/// The digester the process table asks: the SHA-256 the kernel took at exec
+/// where this host can take it, the agent's own read of the file for
+/// everything else and wherever it cannot.
+///
+/// A host that cannot is not a failure to start: the digests are the same
+/// SHA-256 either way, and why the kernel takes none is said once and
+/// published for the kernel-features endpoint.
+pub fn executable_digests(
+    config: &AgentConfig,
+    ebpf_dir: &str,
+    proc_root: &Path,
+    metrics: &AgentMetrics,
+) -> ExecutableDigests {
+    let userspace: Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester> =
+        Arc::new(adapters::container::ProcExecutableDigester::new(proc_root));
+    if !config.process_table.enabled || !config.process_table.kernel_digest {
+        metrics.clear_ebpf_program_status("lsm_exec_digest");
+        let reason = if config.process_table.enabled {
+            "the kernel digest is turned off in the configuration"
+        } else {
+            "the process table is turned off in the configuration"
+        };
+        return ExecutableDigests::userspace_only(userspace, reason.to_string());
+    }
+    match start_exec_digest(ebpf_dir, proc_root, Arc::clone(&userspace)) {
+        Ok(started) => {
+            metrics.set_ebpf_program_status("lsm_exec_digest", true);
+            adapters::ebpf::exec_digest::publish_status(
+                adapters::ebpf::exec_digest::ExecDigestStatus {
+                    attached: true,
+                    reason: None,
+                },
+            );
+            info!(
+                "executable digests taken by the kernel at exec, the agent's own read for the rest"
+            );
+            started
+        }
+        Err(reason) => {
+            metrics.set_ebpf_program_status("lsm_exec_digest", false);
+            warn!("executable digests taken by the agent's own read only: {reason}");
+            ExecutableDigests::userspace_only(userspace, reason)
+        }
+    }
+}
+
+/// Load the exec digest object, write its layout and attach its three hooks.
+///
+/// The host is asked first: an LSM program on a kernel not running the BPF
+/// LSM loads and then never runs, and one without IMA has nothing to hash
+/// with. The layout is written before the hooks attach, and the hooks that
+/// drop an entry attach before the one that takes it.
+///
+/// # Errors
+///
+/// Returns why the kernel cannot take the digests here, in one sentence.
+fn start_exec_digest(
+    ebpf_dir: &str,
+    proc_root: &Path,
+    userspace: Arc<dyn ports::secondary::executable_digest_port::ExecutableDigester>,
+) -> Result<ExecutableDigests, String> {
+    if let Some(refusal) = adapters::ebpf::exec_digest::host_refusal(
+        adapters::ebpf::lsm_probe::status(),
+        adapters::ebpf::file_kfunc_probe::init_cached(),
+    ) {
+        return Err(refusal);
+    }
+    let offsets = adapters::ebpf::exec_digest::resolve_offsets()?;
+    let program_bytes =
+        read_ebpf_program(ebpf_dir, adapters::ebpf::exec_digest::EXEC_DIGEST_OBJECT)
+            .map_err(|e| format!("the object is missing: {e}"))?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
+            .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "EXEC_DIGEST_METRICS").ok();
+    let mut maps = adapters::ebpf::exec_digest::ExecDigestMaps::new(loader.ebpf_mut())
+        .map_err(|e| e.to_string())?;
+    maps.arm(offsets).map_err(|e| e.to_string())?;
+    let mut attacher = adapters::ebpf::exec_digest::ExecDigestAttacher::new();
+    attacher.attach(&loader)?;
+    let digester = adapters::ebpf::exec_digest::KernelExecutableDigester::new(
+        maps,
+        attacher,
+        Arc::new(adapters::container::ProcExecutableResolver::new(proc_root)),
+        userspace,
+    );
+    Ok(ExecutableDigests {
+        digester: Arc::new(digester),
+        loader: Some(loader),
+        metrics_rdr,
     })
 }
 

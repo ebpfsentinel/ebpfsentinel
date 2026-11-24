@@ -429,7 +429,7 @@ fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 /// The evidence the running agent holds for one catalogue entry.
 fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
-        attribution_attach, bpf_guard, dlp_record, exec_network, file_kfunc_probe,
+        attribution_attach, bpf_guard, dlp_record, exec_digest, exec_network, file_kfunc_probe,
         kfunc_feature_probe, lsm_probe, process_attach, quarantine_map_manager, signal_attach,
         tamper_guard, tcp_health, workload_firewall_attach, write_refusal, xdp_pull_probe,
     };
@@ -466,6 +466,10 @@ fn host_evidence(id: &str) -> Option<Evidence> {
         "dlp_whole_record" => Some(dlp_record_evidence(&dlp_record::status())),
         "network_executables" => {
             let s = exec_network::status();
+            Some(attach_evidence(s.attached, s.reason))
+        }
+        "executable_digest" => {
+            let s = exec_digest::status();
             Some(attach_evidence(s.attached, s.reason))
         }
         "self_protection" => {

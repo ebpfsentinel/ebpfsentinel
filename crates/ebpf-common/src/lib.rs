@@ -12,6 +12,7 @@ pub mod dlp;
 pub mod dns;
 pub mod drop_reason;
 pub mod event;
+pub mod exec_digest;
 pub mod exec_network;
 pub mod firewall;
 pub mod ids;

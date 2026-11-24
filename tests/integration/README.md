@@ -190,7 +190,7 @@ What scoping cannot remove is a suite written for more than one lane whose indiv
 
 _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render` after adding/removing a feature._
 
-#### eBPF programs (29)
+#### eBPF programs (30)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -199,6 +199,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-connect-redirect` | ebpfsentinel-enterprise/27 | none | 6.18 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. The listener and the selection are the enterprise TLS interception's, so the suite lives in that repository: ebpfsentinel-enterprise/tests/integration/suites/27-enterprise-tls-redirect.bats asserts a process in the selected cgroup is answered by the agent's listener while one outside it reaches the server |
 | `cgroup-workload-firewall` | 67, 70, 92, 98 | 2vm | 6.18 | datapath | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-bpf-guard` | 88 | none | 6.18 | datapath | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets |
+| `lsm-exec-digest` | 154 | none | 6.18 | datapath | The executable's SHA-256 taken from IMA's hash at bprm_committed_creds and kept against device and inode, dropped at file_open for writing and at path_truncate: 154 reads the process table's digest against sha256sum, a second exec answered from the entry and an append dropping it. Needs the BPF LSM and IMA active at boot; the suite skips where either is not |
 | `lsm-exec-network` | 91 | none | 6.18 | datapath | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-tamper-guard` | ebpfsentinel-enterprise/62 | none | 6.18 | manual | Refuses the signals, ptrace and writes that would end or alter a protected agent. Armed only by the enterprise tamper protection, so the suite lives there: ebpfsentinel-enterprise/tests/integration/suites/62-enterprise-signed-stop.bats asserts a kill is refused while armed and a signed stop ends the agent. Needs the BPF LSM active at boot (lsm=bpf) |
 | `lsm-write-refusal` | 83 | none | 6.18 | datapath | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
@@ -399,7 +400,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 27, 60 |
@@ -448,7 +449,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/nat/status` | 16, 21 |
 | `/api/v1/netpol/replay` | 87 |
 | `/api/v1/processes` | 151, 67 |
-| `/api/v1/processes/{pid}` | 72 |
+| `/api/v1/processes/{pid}` | 154, 72 |
 | `/api/v1/qos/classifiers` | 28 |
 | `/api/v1/qos/classifiers/{id}` | 28 |
 | `/api/v1/qos/pipes` | 28 |
@@ -486,7 +487,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
 | `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 141, 151, 152, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
-| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 152, 153, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
+| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 152, 153, 154, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
 | `/readyz` | 01, 02, 06, 07, 106, 132, 140, 141, 151, 152, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
 
 <!-- coverage:end -->

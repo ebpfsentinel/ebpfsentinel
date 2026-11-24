@@ -154,6 +154,7 @@ flowchart TB
             proc["tracepoint-process\n(execve / exit)"]
             sig["tracepoint-signal\n(stop an armed process)"]
             lsm["lsm-exec-network\n(listed executables only)"]
+            digest["lsm-exec-digest\n(executable SHA-256 from IMA at exec)"]
             guard["lsm-bpf-guard\n(the agent's maps and links are its own)"]
             tamper["lsm-tamper-guard\n(no unsigned stop, trace or unpin; licensed)"]
             wref["lsm-write-refusal\n(a writer past a count under watched directories)"]

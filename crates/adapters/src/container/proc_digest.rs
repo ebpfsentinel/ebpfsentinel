@@ -15,13 +15,15 @@
 //!    next exec of the same binary costs one `fstat`, and a binary rewritten
 //!    in place is read again rather than answered from the cache.
 //!
-//! IMA is not used. Its measurement list is a log of what was measured under
+//! IMA's measurement list is not read. It is a log of what was measured under
 //! a policy the host configured, read from securityfs as root, keyed by path
 //! and appended to for the life of the boot: answering "what is this pid
 //! running" from it means a policy the agent does not control, a parse of a
 //! file that only grows, and a path to join on, which is the very thing a
-//! digest is meant to stop trusting. fs-verity answers that question about
-//! one open file, and the contents answer it everywhere else.
+//! digest is meant to stop trusting. Where the BPF LSM and IMA are both
+//! active, the agent instead asks IMA's hash of the executable at the exec
+//! itself, keyed by device and inode (`crate::ebpf::exec_digest`), and this
+//! read answers only what the kernel did not.
 //!
 //! The file is opened through the process's own link, so what is hashed is
 //! the file the process has mapped, even when its name now points at an

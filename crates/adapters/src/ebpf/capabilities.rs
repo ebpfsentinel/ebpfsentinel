@@ -242,6 +242,16 @@ pub const CATALOGUE: &[Capability] = &[
                    to start the agent",
     },
     Capability {
+        id: "executable_digest",
+        unlocks: "each executable's SHA-256 taken from IMA's hash at the exec, on hosts where \
+                  IMA is also active, and kept on the file until it is written",
+        probe: ProbeKind::AttachStatus,
+        since: KernelVersion::FLOOR,
+        needs_lsm: true,
+        fallback: "the agent reads each executable itself, once per file, and the digest it \
+                   keeps is the same SHA-256",
+    },
+    Capability {
         id: "write_refusal",
         unlocks: "a write-open refused past a count, before a byte is written",
         probe: ProbeKind::AttachStatus,
@@ -358,6 +368,7 @@ mod tests {
         "immediate_signal",
         "dlp_whole_record",
         "network_executables",
+        "executable_digest",
         "write_refusal",
         "self_protection",
         "tamper_protection",

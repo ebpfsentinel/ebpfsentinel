@@ -32,6 +32,8 @@
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //! | `bpf_cgroup_read_xattr`         | 6.17   | `int(*)(struct cgroup *cgroup, const char *name__str, struct bpf_dynptr *value_p) __ksym;`                                                       |
 //! | `bpf_xdp_pull_data`             | 6.18   | `int(*)(struct xdp_md *x, u32 len) __ksym;`                                                                                                      |
+//! | `bpf_get_task_exe_file`         | 6.12   | `struct file *(*)(struct task_struct *task) __ksym;`                                                                                             |
+//! | `bpf_put_file`                  | 6.12   | `void(*)(struct file *file) __ksym;`                                                                                                             |
 //! | `bpf_strcmp`                    | 6.17   | `int(*)(const char *s1__ign, const char *s2__ign) __ksym;`                                                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
@@ -51,6 +53,12 @@
 /// they are declared as ZSTs.
 #[repr(C)]
 pub struct task_struct {
+    _unused: [u8; 0],
+}
+
+/// A kernel `struct file`, held only as a pointer handed back to the kernel.
+#[repr(C)]
+pub struct file {
     _unused: [u8; 0],
 }
 
@@ -518,6 +526,19 @@ unsafe extern "C" {
     /// a read faults, `-E2BIG` past `XATTR_SIZE_MAX` bytes and `-ERANGE`
     /// for an address outside kernel memory.
     pub fn bpf_strcmp(s1: *const core::ffi::c_char, s2: *const core::ffi::c_char) -> i32;
+
+    // ── Kernel 6.12 file references ──────────────────────────
+    //
+    // Registered for LSM programs only. The file comes back referenced or
+    // null, and the verifier refuses a program that leaves a path holding
+    // it without `bpf_put_file`.
+
+    /// Take a reference on the executable of `task`'s address space.
+    /// Kernel 6.12. Null for a task with no address space or no executable.
+    pub fn bpf_get_task_exe_file(task: *mut task_struct) -> *mut file;
+
+    /// Release a reference `bpf_get_task_exe_file` took. Kernel 6.12.
+    pub fn bpf_put_file(file: *mut file);
 }
 
 // ── Host-target stubs ────────────────────────────────────────────

@@ -258,6 +258,22 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // delivered and not a process stopped, which is why the service goes
         // and looks afterwards and this counter is never read as a kill
         // count.
+        // Every exec seen with the offsets in place, then where its digest
+        // came from: hashed by IMA as SHA-256, answered from the file's
+        // unchanged entry, or left to the agent's own read because IMA used
+        // another algorithm or failed, the file has fs-verity on, is larger
+        // than the kernel hashes, or could not be read. `invalidated` is an
+        // entry dropped because its file was opened for writing or truncated.
+        "EXEC_DIGEST_METRICS" => &[
+            (0, "execs"),
+            (1, "computed"),
+            (2, "reused"),
+            (3, "unavailable"),
+            (4, "verity"),
+            (5, "too_large"),
+            (6, "unreadable"),
+            (7, "invalidated"),
+        ],
         // Every internet socket created or connected by a task with an
         // executable, then what the allow-list said. `unreadable` is a call
         // whose executable the kernel could not read, decided as outside
@@ -709,6 +725,10 @@ mod tests {
             ebpf_common::workload_policy::WORKLOAD_METRIC_COUNT,
         ),
         ("SIGNAL_METRICS", ebpf_common::signal::SIGNAL_METRIC_COUNT),
+        (
+            "EXEC_DIGEST_METRICS",
+            ebpf_common::exec_digest::EXEC_DIGEST_METRIC_COUNT,
+        ),
         (
             "EXEC_NET_METRICS",
             ebpf_common::exec_network::EXEC_NET_METRIC_COUNT,

@@ -9,10 +9,12 @@
 //!   kernel. The file is read-only for as long as verity is on and every page
 //!   read from it is checked against that digest, so the answer holds for the
 //!   life of the process. `fsverity digest <file>` prints it.
-//! - [`DigestSource::Content`] is the SHA-256 of the file's contents, read by
-//!   the agent once per file and kept until the file changes. It is what
-//!   `sha256sum <file>` prints and what a release's `SHA256SUMS` lists, and it
-//!   holds as of the read: a file rewritten afterwards is read again.
+//! - [`DigestSource::Content`] is the SHA-256 of the file's contents, taken
+//!   once per file and kept until the file changes: by the kernel's IMA at the
+//!   exec where the host runs the BPF LSM and IMA, by the agent's own read
+//!   everywhere else. Both are what `sha256sum <file>` prints and what a
+//!   release's `SHA256SUMS` lists, and both hold as of the hash: a file
+//!   written afterwards is hashed again.
 //!
 //! The written form carries the source as a prefix, `fsverity-sha256:` or
 //! `sha256:`, so a rule written against one can never match the other by
@@ -37,7 +39,8 @@ const CONTENT_PREFIX: &str = "sha256:";
 pub enum DigestSource {
     /// The kernel's fs-verity measurement of a file that has verity on.
     FsVerity,
-    /// The SHA-256 of the file's contents, read by the agent.
+    /// The SHA-256 of the file's contents, taken by IMA at the exec or read
+    /// by the agent.
     Content,
 }
 

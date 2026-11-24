@@ -229,6 +229,7 @@ suite_profiles:
   "151": datapath
   "152": datapath
   "153": datapath
+  "154": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -426,6 +427,14 @@ coverage:
     kernel_min: "6.18"
     profile: datapath
     notes: "Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets"
+
+  - kind: ebpf_program
+    feature: lsm-exec-digest
+    suites: ["154"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "The executable's SHA-256 taken from IMA's hash at bprm_committed_creds and kept against device and inode, dropped at file_open for writing and at path_truncate: 154 reads the process table's digest against sha256sum, a second exec answered from the entry and an append dropping it. Needs the BPF LSM and IMA active at boot; the suite skips where either is not"
 
   - kind: ebpf_program
     feature: lsm-bpf-guard
