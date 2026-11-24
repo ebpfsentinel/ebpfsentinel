@@ -362,7 +362,7 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
     }
 
-    fn edge(local: u8, remote: u8, port: u16, role: EdgeRole, counts: TcpCounts) -> RawTcpEdge {
+    fn edge(local: u8, remote: u8, port: u16, role: EdgeRole, counts: &TcpCounts) -> RawTcpEdge {
         RawTcpEdge {
             id: TcpEdgeId {
                 local: ip(local),
@@ -371,7 +371,7 @@ mod tests {
                 role,
                 cgroup: 0,
             },
-            counts,
+            counts: *counts,
         }
     }
 
@@ -392,8 +392,8 @@ mod tests {
             ..TcpCounts::default()
         };
         let (service, recorder) = service(vec![
-            (vec![edge(1, 2, 443, EdgeRole::Client, opened)], 3),
-            (vec![edge(1, 2, 443, EdgeRole::Client, opened)], 3),
+            (vec![edge(1, 2, 443, EdgeRole::Client, &opened)], 3),
+            (vec![edge(1, 2, 443, EdgeRole::Client, &opened)], 3),
         ]);
         service.poll(0);
         service.poll(0);
@@ -414,10 +414,10 @@ mod tests {
             retransmits: 5,
             ..TcpCounts::default()
         };
-        let mut mine = edge(1, 2, 443, EdgeRole::Client, retransmits);
+        let mut mine = edge(1, 2, 443, EdgeRole::Client, &retransmits);
         mine.id.cgroup = 42;
         let (service, _) = service(vec![(
-            vec![mine, edge(1, 3, 80, EdgeRole::Client, retransmits)],
+            vec![mine, edge(1, 3, 80, EdgeRole::Client, &retransmits)],
             0,
         )]);
         assert!(service.edges_of(42).is_empty());
@@ -434,7 +434,7 @@ mod tests {
             resets_sent: 40,
             ..TcpCounts::default()
         };
-        let (service, recorder) = service(vec![(vec![edge(1, 9, 0, EdgeRole::Server, reset)], 0)]);
+        let (service, recorder) = service(vec![(vec![edge(1, 9, 0, EdgeRole::Server, &reset)], 0)]);
         service.poll(0);
         let edges = recorder.edges.lock().unwrap();
         assert_eq!(edges[0].0, NO_LISTENER);
@@ -444,15 +444,15 @@ mod tests {
 
     #[test]
     fn the_mirror_of_an_edge_is_the_other_socket_of_the_same_connection() {
-        let id = edge(1, 2, 5432, EdgeRole::Client, TcpCounts::default()).id;
+        let id = edge(1, 2, 5432, EdgeRole::Client, &TcpCounts::default()).id;
         let mirror = mirror_of(&id).expect("a connection has two ends");
         assert_eq!(mirror.local, ip(2));
         assert_eq!(mirror.remote, ip(1));
         assert_eq!(mirror.role, EdgeRole::Server);
-        let mut held = edge(2, 1, 5432, EdgeRole::Server, TcpCounts::default()).id;
+        let mut held = edge(2, 1, 5432, EdgeRole::Server, &TcpCounts::default()).id;
         held.cgroup = 99;
         assert_eq!(without_cgroup(&held), mirror);
-        assert!(mirror_of(&edge(1, 2, 0, EdgeRole::Server, TcpCounts::default()).id).is_none());
+        assert!(mirror_of(&edge(1, 2, 0, EdgeRole::Server, &TcpCounts::default()).id).is_none());
     }
 
     fn probes(from: u8, resets: u64) -> RawTcpEdge {
@@ -461,7 +461,7 @@ mod tests {
             from,
             0,
             EdgeRole::Server,
-            TcpCounts {
+            &TcpCounts {
                 resets_sent: resets,
                 ..TcpCounts::default()
             },
@@ -515,10 +515,13 @@ mod tests {
             rtt,
             ..TcpCounts::default()
         };
-        let (service, _) = service(vec![(vec![edge(1, 2, 5432, EdgeRole::Client, sampled)], 0)]);
+        let (service, _) = service(vec![(
+            vec![edge(1, 2, 5432, EdgeRole::Client, &sampled)],
+            0,
+        )]);
         let minute = 60_000_000_000;
         service.poll(minute * 2);
-        let pair = RttPair::of(&edge(1, 2, 5432, EdgeRole::Client, sampled).id)
+        let pair = RttPair::of(&edge(1, 2, 5432, EdgeRole::Client, &sampled).id)
             .expect("a client edge has a pair");
         assert_eq!(service.round_trips(minute * 2, 1)[&pair], rtt);
         assert_eq!(service.round_trips(minute * 4, 2).len(), 0);

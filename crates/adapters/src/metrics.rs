@@ -3680,6 +3680,18 @@ mod tests {
                     sum_us: 700,
                     count: 1,
                 },
+                send: TcpSendLatency {
+                    acked: TcpRtt {
+                        buckets: {
+                            let mut b = [0; RTT_BUCKETS];
+                            b[4] = 1;
+                            b
+                        },
+                        sum_us: 700,
+                        count: 1,
+                    },
+                    ..TcpSendLatency::default()
+                },
                 ..TcpCounts::default()
             },
         );

@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(send_stage(BPF_SOCK_OPS_TSTAMP_SND_HW_CB), None);
         assert_eq!(send_stage(BPF_SOCK_OPS_TSTAMP_SENDMSG_CB), None);
         assert_eq!(send_stage(BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB), None);
-        assert!(TCP_SEND_STAGE_ACKED < TCP_SEND_STAGES);
+        const { assert!(TCP_SEND_STAGE_ACKED < TCP_SEND_STAGES) };
     }
 
     #[test]

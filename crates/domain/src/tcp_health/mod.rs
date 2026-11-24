@@ -429,7 +429,7 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    fn edge(port: u16, counts: TcpCounts) -> RawTcpEdge {
+    fn edge(port: u16, counts: &TcpCounts) -> RawTcpEdge {
         RawTcpEdge {
             id: TcpEdgeId {
                 local: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -438,20 +438,20 @@ mod tests {
                 role: EdgeRole::Server,
                 cgroup: 7,
             },
-            counts,
+            counts: *counts,
         }
     }
 
     #[test]
     fn the_totals_of_a_workload_are_its_edges_as_last_read() {
         let mut deltas = TcpEdgeDeltas::default();
-        let mut other = edge(80, TcpCounts::default());
+        let mut other = edge(80, &TcpCounts::default());
         other.id.cgroup = 9;
         deltas.advance(
             &[
                 edge(
                     443,
-                    TcpCounts {
+                    &TcpCounts {
                         retransmits: 4,
                         ..TcpCounts::default()
                     },
@@ -463,7 +463,7 @@ mod tests {
         deltas.advance(
             &[edge(
                 443,
-                TcpCounts {
+                &TcpCounts {
                     retransmits: 6,
                     ..TcpCounts::default()
                 },
@@ -483,7 +483,7 @@ mod tests {
         let first = deltas.advance(
             &[edge(
                 443,
-                TcpCounts {
+                &TcpCounts {
                     opened: 3,
                     retransmits: 1,
                     ..TcpCounts::default()
@@ -498,7 +498,7 @@ mod tests {
         let second = deltas.advance(
             &[edge(
                 443,
-                TcpCounts {
+                &TcpCounts {
                     opened: 5,
                     retransmits: 1,
                     closed: 2,
@@ -521,7 +521,7 @@ mod tests {
         let still = deltas.advance(
             &[edge(
                 443,
-                TcpCounts {
+                &TcpCounts {
                     opened: 5,
                     retransmits: 1,
                     closed: 2,
@@ -539,7 +539,7 @@ mod tests {
         deltas.advance(
             &[edge(
                 22,
-                TcpCounts {
+                &TcpCounts {
                     failed: 9,
                     ..TcpCounts::default()
                 },
@@ -549,7 +549,7 @@ mod tests {
         let after = deltas.advance(
             &[edge(
                 22,
-                TcpCounts {
+                &TcpCounts {
                     failed: 1,
                     ..TcpCounts::default()
                 },
@@ -577,8 +577,8 @@ mod tests {
         assert_eq!(total.resets_received, 4);
         assert_eq!(EdgeRole::Client.as_str(), "client");
         assert_eq!(EdgeRole::Server.as_str(), "server");
-        assert!(edge(0, TcpCounts::default()).id.is_no_listener());
-        assert!(!edge(443, TcpCounts::default()).id.is_no_listener());
+        assert!(edge(0, &TcpCounts::default()).id.is_no_listener());
+        assert!(!edge(443, &TcpCounts::default()).id.is_no_listener());
     }
 
     #[test]
@@ -598,16 +598,16 @@ mod tests {
             rtt: r,
             ..TcpCounts::default()
         };
-        let first = deltas.advance(&[edge(443, with(rtt(1, 2, 900)))], 0);
+        let first = deltas.advance(&[edge(443, &with(rtt(1, 2, 900)))], 0);
         assert_eq!(first.edges[0].counts.rtt, rtt(1, 2, 900));
 
-        let second = deltas.advance(&[edge(443, with(rtt(1, 5, 2_100)))], 0);
+        let second = deltas.advance(&[edge(443, &with(rtt(1, 5, 2_100)))], 0);
         assert_eq!(second.edges[0].counts.rtt, rtt(0, 3, 1_200));
 
-        let unchanged = deltas.advance(&[edge(443, with(rtt(1, 5, 2_100)))], 0);
+        let unchanged = deltas.advance(&[edge(443, &with(rtt(1, 5, 2_100)))], 0);
         assert_eq!(unchanged.edges.len(), 0);
 
-        let reloaded = deltas.advance(&[edge(443, with(rtt(0, 1, 400)))], 0);
+        let reloaded = deltas.advance(&[edge(443, &with(rtt(0, 1, 400)))], 0);
         assert_eq!(reloaded.edges[0].counts.rtt, rtt(0, 1, 400));
     }
 
@@ -623,15 +623,15 @@ mod tests {
             ..TcpCounts::default()
         };
         let mut deltas = TcpEdgeDeltas::default();
-        let first = deltas.advance(&[edge(443, with(stages(2, 2, 1)))], 0);
+        let first = deltas.advance(&[edge(443, &with(stages(2, 2, 1)))], 0);
         assert_eq!(first.edges[0].counts.send, stages(2, 2, 1));
         assert!(!first.edges[0].counts.send.is_empty());
 
-        let second = deltas.advance(&[edge(443, with(stages(5, 4, 4)))], 0);
+        let second = deltas.advance(&[edge(443, &with(stages(5, 4, 4)))], 0);
         assert_eq!(second.edges[0].counts.send, stages(3, 2, 3));
 
         // The ack stage alone going back is the object loaded again.
-        let reloaded = deltas.advance(&[edge(443, with(stages(6, 5, 1)))], 0);
+        let reloaded = deltas.advance(&[edge(443, &with(stages(6, 5, 1)))], 0);
         assert_eq!(reloaded.edges[0].counts.send, stages(6, 5, 1));
         assert!(TcpSendLatency::default().is_empty());
     }
