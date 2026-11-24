@@ -196,18 +196,17 @@ fn argv(ctx: &LsmContext, pid_tgid: u64) -> bool {
         if n <= 0 || n as u32 > PROCESS_ARGV_CHUNK {
             break;
         }
-        let n = n as usize;
-        if n < PROCESS_ARGV_CHUNK as usize {
-            // A whole argument and its NUL.
-            args_read += 1;
-            off = at + n;
-            at_user += n as u64;
-        } else {
-            // The chunk filled: the argument goes on where the read stopped,
-            // over the NUL the kfunc put at the end of the chunk.
-            off = at + n - 1;
-            at_user += (n - 1) as u64;
-        }
+        // Without a branch: two paths per read, 64 reads deep, are more
+        // states than the verifier walks. `n` is in 1..=512 here, so `full`
+        // is 1 exactly when the chunk filled and the argument goes on where
+        // the read stopped, over the NUL the kfunc put at the end of the
+        // chunk; otherwise a whole argument and its NUL were read.
+        const _: () = assert!(PROCESS_ARGV_CHUNK == 1 << 9);
+        let full = (n as u32 >> 9) as usize;
+        let step = n as usize - full;
+        args_read += 1 - full as u32;
+        off = at + step;
+        at_user += step as u64;
         reads += 1;
     }
     if off == 0 {
