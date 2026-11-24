@@ -29,7 +29,7 @@ DEST_PREFIX="2001:db8:99::"
 BACKEND_V6="2001:db8:99::30"
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool curl
     require_tool jq
 

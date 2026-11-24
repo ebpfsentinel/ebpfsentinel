@@ -24,7 +24,7 @@ load '../lib/scrub_helpers'
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 12
+    require_kernel 6 18
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"

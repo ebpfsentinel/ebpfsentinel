@@ -21,7 +21,7 @@ DOCUMENTS=40
 DIRECTORIES=10
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_tool python3
     require_root

@@ -36,7 +36,7 @@ DIRECTORIES=40
 PACKAGE=ebpfsentinel-test-corpus
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_root
     local tool
     for tool in jq python3 tar gzip zstd rsync git dpkg dpkg-deb updatedb logrotate ffmpeg sqlite3; do

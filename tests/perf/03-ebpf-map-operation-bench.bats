@@ -23,7 +23,7 @@ MAP_OPS_REPORT="/tmp/ebpfsentinel-map-ops-latest.json"
 setup_file() {
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         require_root
-        require_kernel 5 17
+        require_kernel 6 18
         require_tool bpftool
     fi
     require_tool jq

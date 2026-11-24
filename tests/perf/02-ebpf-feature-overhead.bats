@@ -17,7 +17,7 @@ IPERF_DURATION=10
 setup_file() {
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         require_root
-        require_kernel 5 17
+        require_kernel 6 18
         require_tool bpftool
     fi
     require_tool iperf3

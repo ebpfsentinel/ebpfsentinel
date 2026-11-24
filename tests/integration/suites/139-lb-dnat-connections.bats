@@ -25,7 +25,7 @@ LB_PORTS=(9001 9002 9003)
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool curl
     require_tool ncat
 

@@ -22,7 +22,7 @@ TI_SRV_PORT=18889
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool bpftool
     require_tool ncat
     require_tool python3

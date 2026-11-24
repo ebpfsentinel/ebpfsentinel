@@ -30,7 +30,7 @@ PROBE_IMAGE="docker.io/library/busybox:1.36"
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_tool curl
     # Only ../vagrant-runtimes carries the runtimes; elsewhere the skip says

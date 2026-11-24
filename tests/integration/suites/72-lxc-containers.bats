@@ -22,7 +22,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool lxc-execute
     require_tool ncat
     require_tool jq

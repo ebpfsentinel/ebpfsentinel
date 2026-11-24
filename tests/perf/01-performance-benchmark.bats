@@ -48,7 +48,7 @@ MAX_BASELINE_NOISE_PCT="${MAX_BASELINE_NOISE_PCT:-25}"
 setup_file() {
     if [ "${EBPF_2VM_MODE:-false}" != "true" ]; then
         [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root
-        require_kernel 5 17
+        require_kernel 6 18
         require_tool bpftool
     fi
     require_tool iperf3

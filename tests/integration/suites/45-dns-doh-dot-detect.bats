@@ -24,7 +24,7 @@ load '../lib/dns_encrypted_helpers'
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool curl
 
     export PROJECT_ROOT

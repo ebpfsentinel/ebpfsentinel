@@ -13,7 +13,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_root
     export PROJECT_ROOT

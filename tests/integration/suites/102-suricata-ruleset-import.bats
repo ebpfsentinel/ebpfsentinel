@@ -24,7 +24,7 @@ SECOND_SID=9100003
 REFUSED_SID=9100002
 
 setup_file() {
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool ncat
     require_tool jq
     require_root

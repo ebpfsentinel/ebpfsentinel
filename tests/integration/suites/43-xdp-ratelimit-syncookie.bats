@@ -29,7 +29,7 @@ SPOOF_COUNT="${SPOOF_COUNT:-500}"
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_tool bc
 

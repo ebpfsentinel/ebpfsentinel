@@ -29,7 +29,7 @@ HTTP_PORT=8880
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_tool openssl
     require_tool python3

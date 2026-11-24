@@ -31,7 +31,7 @@ LB_RING_SIZE="${LB_MAGLEV_RING_SIZE:-65537}"
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool curl
     require_tool python3
 

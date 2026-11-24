@@ -28,7 +28,7 @@ WHITELIST_PROBE_SRC="${WHITELIST_PROBE_SRC:-10.200.0.50}"
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool jq
     require_tool bc
 

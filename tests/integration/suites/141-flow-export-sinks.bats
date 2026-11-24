@@ -40,7 +40,7 @@ NFT_TABLE="ebpfsentinel_flow_suite"
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool python3
     require_tool ncat
     require_tool nft

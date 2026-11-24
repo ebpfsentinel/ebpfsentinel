@@ -43,7 +43,7 @@ captured_on_bridge() {
 
 setup_file() {
     require_root
-    require_kernel 6 12
+    require_kernel 6 18
     require_tool docker
     require_tool bpftool
     require_tool curl
