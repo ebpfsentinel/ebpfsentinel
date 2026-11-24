@@ -51,7 +51,9 @@ use std::path::{Path, PathBuf};
 
 use adapters::ebpf::ATTRIBUTION_JOIN_HOOK;
 use adapters::ebpf::bpf_guard::{self, BPF_GUARD_CMD_PROGRAM_3, BPF_GUARD_CMD_PROGRAM_4};
+use adapters::ebpf::kfunc;
 use adapters::ebpf::kfunc_loader::{self, KfuncLoadedProgram, RefusedProgram};
+use adapters::ebpf::workload_firewall_attach::{LABEL_KFUNC, LABELLED_PROGRAMS, label_offsets};
 use anyhow::{Result, bail};
 use aya_obj::generated::{bpf_attr, bpf_cmd, bpf_prog_info, bpf_prog_type};
 
@@ -171,27 +173,40 @@ fn load(path: &Path, ifindex: Option<u32>) -> Outcome {
         Ok(b) => b,
         Err(e) => return Outcome::Refused(format!("read {}: {e}", path.display())),
     };
-    let sites = match kfunc_loader::find_kfunc_sites(&bytes) {
-        Ok(s) => s.len(),
-        Err(e) => return Outcome::Refused(format!("kfunc sites: {e}")),
-    };
     let object = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
+    // The labelled workload builds read two struct fields at offsets only
+    // the running kernel's BTF gives; the agent writes them over the
+    // sentinels before loading, and so does this.
+    let labels = (object == WORKLOAD_FIREWALL_OBJECT).then(label_offsets);
+    let bytes = match &labels {
+        Some(Ok(pairs)) => match kfunc_loader::patch_field_offsets(&bytes, pairs) {
+            Ok(patched) => patched,
+            Err(e) => return Outcome::Refused(format!("label offsets: {e}")),
+        },
+        _ => bytes,
+    };
+    let sites = match kfunc_loader::find_kfunc_sites(&bytes) {
+        Ok(s) => s.len(),
+        Err(e) => return Outcome::Refused(format!("kfunc sites: {e}")),
+    };
     let bound = ifindex.filter(|_| kfunc_loader::uses_dev_bound_metadata_kfuncs(&bytes));
     let loaded =
         match kfunc_loader::load_object_token_unpinned(&bytes, bound, optional_programs(object)) {
             Ok(loaded) => loaded,
             Err(e) => return Outcome::Refused(e.to_string()),
         };
-    if let Some(required) = required_here(object)
-        && let Some(refused) = loaded.refused.iter().find(|p| p.name == required)
-    {
-        return Outcome::Refused(format!(
-            "`{required}` is the program for this kernel and was refused: {}",
-            refused.reason
-        ));
+    let labelled_ready = matches!(labels, Some(Ok(_)))
+        && kfunc::vmlinux_func_param_count(LABEL_KFUNC).is_ok_and(|count| count.is_some());
+    for required in required_here(object, labelled_ready) {
+        if let Some(refused) = loaded.refused.iter().find(|p| p.name == required) {
+            return Outcome::Refused(format!(
+                "`{required}` is the program for this kernel and was refused: {}",
+                refused.reason
+            ));
+        }
     }
     Outcome::Loaded {
         sites,
@@ -206,19 +221,29 @@ fn optional_programs(object: &str) -> &'static [&'static str] {
     match object {
         bpf_guard::BPF_GUARD_OBJECT => &[BPF_GUARD_CMD_PROGRAM_3, BPF_GUARD_CMD_PROGRAM_4],
         "cgroup-attribution" => &[ATTRIBUTION_JOIN_HOOK],
+        WORKLOAD_FIREWALL_OBJECT => LABELLED_PROGRAMS,
         _ => &[],
     }
 }
 
-/// Of the optional programs in `object`, the one this kernel must take: the
+/// The object whose socket hooks have labelled builds.
+const WORKLOAD_FIREWALL_OBJECT: &str = "cgroup-workload-firewall";
+
+/// Of the optional programs in `object`, the ones this kernel must take: the
 /// guard's `bpf` program written for the arity the running kernel's BTF gives
-/// the hook. Where that BTF is unreadable nothing is required, and the guard
-/// itself would refuse to start for the same reason.
-fn required_here(object: &str) -> Option<&'static str> {
-    (object == bpf_guard::BPF_GUARD_OBJECT)
-        .then(bpf_guard::resolve_layout)
-        .and_then(Result::ok)
-        .map(|layout| layout.cmd_program)
+/// the hook, and the labelled workload builds once the BTF gave their offsets
+/// and declares the kfunc they call (`labelled_ready`). Where that BTF is
+/// unreadable nothing is required, and the agent would fall back for the same
+/// reason.
+fn required_here(object: &str, labelled_ready: bool) -> Vec<&'static str> {
+    match object {
+        bpf_guard::BPF_GUARD_OBJECT => bpf_guard::resolve_layout()
+            .ok()
+            .map(|layout| vec![layout.cmd_program])
+            .unwrap_or_default(),
+        WORKLOAD_FIREWALL_OBJECT if labelled_ready => LABELLED_PROGRAMS.to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 fn describe(program: &KfuncLoadedProgram) -> Loaded {
