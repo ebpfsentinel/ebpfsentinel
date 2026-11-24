@@ -581,7 +581,7 @@ pub fn patch_field_offsets(elf: &[u8], pairs: &[(i16, i16)]) -> Result<Vec<u8>, 
         let Some(code) = out.get_mut(start..start.saturating_add(size)) else {
             continue;
         };
-        for insn in code.chunks_exact_mut(8) {
+        for insn in code.as_chunks_mut::<8>().0 {
             if insn[0] != BPF_LDX_MEM_DW {
                 continue;
             }
@@ -2389,7 +2389,9 @@ mod tests {
             super::patch_field_offsets(&elf, &[(0x7f00, 2_456), (0x7f08, 128)]).expect("parses");
         let text = &patched[64..64 + code.len()];
         let offsets: Vec<i16> = text
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|i| i16::from_le_bytes([i[2], i[3]]))
             .collect();
         assert_eq!(offsets, vec![2_456, 128, 16, 0x7f00]);

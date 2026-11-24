@@ -94,7 +94,7 @@ pub struct LineagePlan {
 /// calling task runs and its lineage, each selector given with the bit it
 /// holds.
 /// The labels the kernel reads off a task's cgroup, each with the selectors
-/// that name it and nothing else, and those selectors' bits ORed.
+/// that name it and nothing else, and the union of those selectors' bits.
 ///
 /// A selector naming a label beside anything else is left to userspace,
 /// which reads the label with the rest when it resolves the cgroup: the

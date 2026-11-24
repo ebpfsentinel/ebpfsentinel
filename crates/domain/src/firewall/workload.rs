@@ -385,24 +385,7 @@ impl WorkloadSelector {
                     .to_string(),
             });
         }
-        if let Some(label) = self.cgroup_label.as_deref()
-            && label.len() > WORKLOAD_LABEL_MAX_LEN
-        {
-            return Err(FirewallError::InvalidWorkloadSelector {
-                reason: format!(
-                    "cgroup_label is {} bytes, more than the {WORKLOAD_LABEL_MAX_LEN} the kernel \
-                     reads off a cgroup",
-                    label.len()
-                ),
-            });
-        }
-        if let Some(label) = self.cgroup_label.as_deref()
-            && label.chars().any(char::is_control)
-        {
-            return Err(FirewallError::InvalidWorkloadSelector {
-                reason: "cgroup_label contains a control character".to_string(),
-            });
-        }
+        self.validate_cgroup_label()?;
         if self.parent.is_some() && self.ancestor.is_some() {
             return Err(FirewallError::InvalidWorkloadSelector {
                 reason: "a workload selector names a parent or an ancestor, not both: the \
@@ -456,6 +439,30 @@ impl WorkloadSelector {
                      letters, digits, '-' and '.', starting and ending alphanumeric, at most \
                      {SERVICE_ACCOUNT_MAX_LEN} characters"
                 ),
+            });
+        }
+        Ok(())
+    }
+
+    /// A cgroup label the kernel can read whole and the agent can compare
+    /// byte for byte: no longer than the value read off the cgroup, and no
+    /// control character.
+    fn validate_cgroup_label(&self) -> Result<(), FirewallError> {
+        let Some(label) = self.cgroup_label.as_deref() else {
+            return Ok(());
+        };
+        if label.len() > WORKLOAD_LABEL_MAX_LEN {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: format!(
+                    "cgroup_label is {} bytes, more than the {WORKLOAD_LABEL_MAX_LEN} the kernel \
+                     reads off a cgroup",
+                    label.len()
+                ),
+            });
+        }
+        if label.chars().any(char::is_control) {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: "cgroup_label contains a control character".to_string(),
             });
         }
         Ok(())
