@@ -59,6 +59,7 @@ const KFUNC_EXPORTS: &[&str] = &[
     "bpf_skb_set_fou_encap",
     "bpf_skb_set_xfrm_info",
     "bpf_sock_ops_enable_tx_tstamp",
+    "bpf_strcmp",
     "bpf_xdp_ct_lookup",
     "bpf_xdp_get_xfrm_state",
     "bpf_xdp_metadata_rx_hash",

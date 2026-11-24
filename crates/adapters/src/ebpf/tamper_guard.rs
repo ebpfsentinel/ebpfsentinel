@@ -42,6 +42,9 @@ use super::write_refusal::{key_from_stat, resolve_offsets, stat_dev};
 /// The object's file name.
 pub const TAMPER_GUARD_OBJECT: &str = "lsm-tamper-guard";
 
+/// The kfunc the cgroup hook compares a file name with.
+pub const NAME_COMPARISON: &str = "bpf_strcmp";
+
 /// Each program, the hook function the kernel's BTF names for it, and the
 /// parameters the program reads that hook with.
 pub const TAMPER_GUARD_PROGRAMS: [(&str, &str, u32); 5] = [
@@ -106,6 +109,21 @@ pub fn resolve_layout() -> Result<TamperGuardConfig, String> {
                 "the kernel's `{hook}` takes {found} arguments where `{program}` reads {params}"
             ));
         }
+    }
+    // The cgroup hook compares the file name with the kernel's own string
+    // comparison. Every kernel from the floor on declares it for every
+    // program type, so its absence means a kernel that is not what its
+    // release says, and the guard is not attached rather than loaded to fail.
+    match kfunc::vmlinux_func_param_count(NAME_COMPARISON)
+        .map_err(|e| format!("the kernel BTF is unreadable: {e}"))?
+    {
+        Some(2) => {}
+        Some(found) => {
+            return Err(format!(
+                "the kernel's `{NAME_COMPARISON}` takes {found} arguments where the guard passes 2"
+            ));
+        }
+        None => return Err(format!("the kernel declares no `{NAME_COMPARISON}`")),
     }
     let [
         task_group_leader,
@@ -644,5 +662,19 @@ mod tests {
         assert!(layout.task_thread_pid > 0);
         assert!(layout.file_dentry > 0);
         assert_eq!(layout.valid, 0, "the layout is never armed by itself");
+    }
+
+    #[test]
+    fn the_built_guard_compares_names_with_the_kernel_and_nothing_else() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-tamper-guard"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        let called = super::super::kfunc_loader::called_kfuncs(&elf).expect("kfunc sites parse");
+        assert_eq!(called, vec![NAME_COMPARISON.to_string()]);
     }
 }

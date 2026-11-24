@@ -13,6 +13,8 @@
 #![no_std]
 #![no_main]
 
+use core::ffi::c_char;
+
 use aya_ebpf::helpers::generated::{bpf_probe_read_kernel, bpf_probe_read_kernel_str};
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray, RingBuf},
@@ -35,6 +37,7 @@ use ebpf_common::tamper_guard::{
     tamper_guard_signal_bit,
 };
 use ebpf_helpers::increment_metric;
+use ebpf_helpers::kfuncs::bpf_strcmp;
 
 /// The signal set and the offsets, written last by userspace.
 #[btf_map]
@@ -260,35 +263,25 @@ fn gate(config: &TamperGuardConfig, kind: u8, inode: TamperGuardInode, dentry: *
 }
 
 /// Whether the dentry's name is `cgroup.kill` or `cgroup.freeze`.
+///
+/// The kernel compares the name where it lies: `bpf_strcmp` reads both
+/// strings without faulting, so the name is neither copied to the stack nor
+/// walked byte by byte here. Every program type may call it from the agent's
+/// kernel floor on, and it never sleeps, so this hook cannot be refused it.
 #[inline(always)]
 fn names_kill_or_freeze(config: &TamperGuardConfig, dentry: *const u8) -> bool {
     let Some(name) = read_ptr(dentry, config.dentry_name) else {
         return false;
     };
-    let mut buf = [0u8; TAMPER_GUARD_NAME_BYTES];
-    let rc = unsafe {
-        bpf_probe_read_kernel_str(
-            buf.as_mut_ptr() as *mut core::ffi::c_void,
-            TAMPER_GUARD_NAME_BYTES as u32,
-            name as *const core::ffi::c_void,
-        )
-    };
-    if rc <= 0 {
-        return false;
+    let kill = *b"cgroup.kill\0";
+    let freeze = *b"cgroup.freeze\0";
+    // SAFETY: `bpf_strcmp` reads both arguments with a non-faulting kernel
+    // read and answers an error for an address outside kernel memory; the
+    // two words are NUL-terminated stack arrays that outlive the calls.
+    unsafe {
+        bpf_strcmp(name as *const c_char, kill.as_ptr() as *const c_char) == 0
+            || bpf_strcmp(name as *const c_char, freeze.as_ptr() as *const c_char) == 0
     }
-    starts_with(&buf, b"cgroup.kill\0") || starts_with(&buf, b"cgroup.freeze\0")
-}
-
-#[inline(always)]
-fn starts_with(buf: &[u8; TAMPER_GUARD_NAME_BYTES], word: &[u8]) -> bool {
-    let mut i = 0;
-    while i < word.len() && i < TAMPER_GUARD_NAME_BYTES {
-        if buf[i] != word[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// The slot, or `None` until userspace has written a complete one.

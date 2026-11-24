@@ -32,6 +32,7 @@
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //! | `bpf_cgroup_read_xattr`         | 6.17   | `int(*)(struct cgroup *cgroup, const char *name__str, struct bpf_dynptr *value_p) __ksym;`                                                       |
 //! | `bpf_xdp_pull_data`             | 6.18   | `int(*)(struct xdp_md *x, u32 len) __ksym;`                                                                                                      |
+//! | `bpf_strcmp`                    | 6.17   | `int(*)(const char *s1__ign, const char *s2__ign) __ksym;`                                                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
@@ -505,6 +506,18 @@ unsafe extern "C" {
     /// it is not set or cannot be read.
     pub fn bpf_cgroup_read_xattr(cgroup: *mut cgroup, name: *const u8, value: *mut BpfDynptr)
     -> i32;
+
+    // ── Kernel 6.17 string comparison ────────────────────────
+    //
+    // Registered for every program type and never sleeping. Both strings
+    // are read with a non-faulting kernel read, so a pointer read out of a
+    // kernel structure is passed as it is, without a copy.
+
+    /// Compare two NUL-terminated kernel strings. Kernel 6.17. Returns `0`
+    /// when equal, `-1` or `1` by the first differing byte, `-EFAULT` when
+    /// a read faults, `-E2BIG` past `XATTR_SIZE_MAX` bytes and `-ERANGE`
+    /// for an address outside kernel memory.
+    pub fn bpf_strcmp(s1: *const core::ffi::c_char, s2: *const core::ffi::c_char) -> i32;
 }
 
 // ── Host-target stubs ────────────────────────────────────────────
