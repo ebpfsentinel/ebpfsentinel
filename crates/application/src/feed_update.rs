@@ -187,8 +187,8 @@ pub fn parse_feed_data(
 ///
 /// The local API answers `null` rather than `[]` when nothing is in force,
 /// which is an empty list here and not an error. Decisions that do not become
-/// indicators are counted and logged by reason, so a range or a captcha left
-/// out is never silent.
+/// indicators are counted and logged by reason, so a captcha or a scope other
+/// than an address or a range left out is never silent.
 fn parse_crowdsec_decisions(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainError> {
     let parsed: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| DomainError::EngineError(format!("CrowdSec decisions parse error: {e}")))?;
@@ -675,9 +675,13 @@ mod tests {
             {"id":3,"origin":"crowdsec","scenario":"crowdsecurity/http-probing","scope":"Ip","type":"captcha","value":"203.0.113.10","duration":"4h"}
         ]"#;
         let parsed = parse_feed_data(&feed, body).unwrap();
-        assert_eq!(parsed.iocs.len(), 1);
+        // A ban on an address and a ban on a range are enforced; the captcha is not.
+        assert_eq!(parsed.iocs.len(), 2);
         assert_eq!(parsed.iocs[0].ip.to_string(), "203.0.113.9");
+        assert_eq!(parsed.iocs[0].prefix_len, None);
         assert_eq!(parsed.iocs[0].feed_id, "crowdsec");
+        assert_eq!(parsed.iocs[1].ip.to_string(), "198.51.100.0");
+        assert_eq!(parsed.iocs[1].prefix_len, Some(24));
 
         feed.max_iocs = 1;
         assert_eq!(parse_feed_data(&feed, b"null").unwrap().iocs.len(), 0);
