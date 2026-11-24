@@ -56,8 +56,9 @@ RestartSec=2s
 # socket error in the agent's last log line.
 TimeoutStopSec=20s
 
-# The warden confines itself before it serves (no new privileges, Landlock,
-# a seccomp filter); these hold from the first instruction, before that.
+# The warden confines itself before it serves (no new privileges, a seccomp
+# filter); these hold from the first instruction, before that, and fence
+# its writes.
 # ProtectSystem=full rather than strict: a canary the file watch plants may
 # sit in any data directory the configuration names. Tunables stay writable:
 # the warden turns on TCP syncookies at start.

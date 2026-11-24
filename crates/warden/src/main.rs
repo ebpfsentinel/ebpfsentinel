@@ -224,8 +224,8 @@ fn serve(
     }
     // Everything privileged that is not an answer is done: confine before the
     // first connection is read.
-    match ebpfsentinel_warden::confine::confine_for_serving(&policy) {
-        Ok(posture) => eprintln!("[warden] confined: {posture}"),
+    match ebpfsentinel_warden::confine::confine() {
+        Ok(()) => eprintln!("[warden] confined: no new privileges, seccomp filter"),
         Err(e) => {
             eprintln!("[warden] refusing to serve unconfined: {e}");
             return ExitCode::FAILURE;

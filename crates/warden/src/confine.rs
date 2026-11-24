@@ -3,111 +3,38 @@
 //! Once the privileged setup is done (the pcap pool and module BTF opened, the
 //! listening socket bound), the warden has nothing left to gain from the
 //! capabilities a container runtime or systemd gave it that it does not use
-//! for an answer, so it takes three steps it cannot undo, in this order:
+//! for an answer, so it takes two steps it cannot undo, in this order:
 //!
 //! 1. `PR_SET_NO_NEW_PRIVS`: no `execve` it could still make would raise a
 //!    privilege. Kubernetes refuses `allowPrivilegeEscalation: false` beside
 //!    `CAP_SYS_ADMIN`, so this is the line that holds in a pod.
-//! 2. Landlock, where the kernel has it: no execution anywhere, and no file
-//!    created, written, truncated, renamed or removed outside the directories
-//!    it names (the bpffs it pins links on). Reads are left open, because the
-//!    file watch, the DLP scan and the runtime stores read host paths the
-//!    agent's configuration names at runtime. A kernel without Landlock is a
-//!    weaker posture, logged, never a refusal to serve.
-//! 3. A seccomp filter: the system calls the broker makes are allowed, the
+//! 2. A seccomp filter: the system calls the broker makes are allowed, the
 //!    ones that would change what the host runs or mounts kill the process,
 //!    and any other answers `EPERM`. A thread may not create a namespace and
 //!    `setns` enters a network namespace and nothing else.
+//!
+//! No Landlock domain: a task inside one may not reach the `/proc` entry of a
+//! task outside it (the kernel applies its ptrace rule to the `exe` link, the
+//! mappings and the descriptors), and every answer the warden gives about a
+//! host process is read there. Writes are fenced by the read-only root the
+//! compose file, the chart and the unit give it instead.
 //!
 //! An unknown call answers `EPERM` rather than killing so that a call this
 //! list missed fails one request with an error the agent logs, instead of
 //! taking every agent's datapath helper down. The calls that matter are named
 //! and kill.
 
-use std::ffi::CString;
 use std::io;
-use std::mem;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 
-use crate::policy::WardenPolicy;
-
-/// What the warden ended up confined by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Posture {
-    /// The Landlock ABI the kernel answered with, `None` where it has none or
-    /// it is disabled.
-    pub landlock_abi: Option<u32>,
-}
-
-impl std::fmt::Display for Posture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.landlock_abi {
-            Some(abi) => write!(f, "no new privileges, Landlock ABI {abi}, seccomp filter"),
-            None => write!(
-                f,
-                "no new privileges, seccomp filter, no Landlock (this kernel does not offer it: \
-                 writes and execution are fenced by seccomp and the mounts alone)"
-            ),
-        }
-    }
-}
-
-/// What the warden may still change beneath one directory once confined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Writes {
-    /// Create, write, replace and remove anything: the directory the socket
-    /// is bound in, the directory link pins are kept in.
-    Anything,
-    /// Create a regular file and write it, nothing else: a directory a
-    /// canary is planted in.
-    NewFiles,
-}
-
-/// Confine the calling process, every thread of it included, leaving writes
-/// possible only beneath the directories `writable` names, each as far as its
-/// [`Writes`] says.
+/// Confine the calling process, every thread of it included: no new
+/// privileges, then the seccomp filter.
 ///
 /// # Errors
 ///
-/// `PR_SET_NO_NEW_PRIVS` or the seccomp filter was refused, or Landlock was
-/// offered and then refused a ruleset. A directory in `writable` that cannot
-/// be opened is logged and left unwritable, not an error.
-pub fn confine(writable: &[(&Path, Writes)]) -> Result<Posture, String> {
+/// `PR_SET_NO_NEW_PRIVS` or the seccomp filter was refused.
+pub fn confine() -> Result<(), String> {
     no_new_privs()?;
-    let landlock_abi = landlock(writable)?;
-    seccomp()?;
-    Ok(Posture { landlock_abi })
-}
-
-/// Confine a warden about to serve `policy`: link pins and held programs may
-/// be written in their directories, created first so the rule has a directory to hold, and a
-/// canary may be created in the directory of each canary path the policy
-/// names. Nothing else on the host stays writable, the socket included: it is
-/// bound before.
-///
-/// # Errors
-///
-/// As [`confine`].
-pub fn confine_for_serving(policy: &WardenPolicy) -> Result<Posture, String> {
-    let pins = crate::link_pins::pin_dir();
-    let held = crate::held_programs::held_dir();
-    for dir in [&pins, &held] {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("[warden] pin directory {}: {e}", dir.display());
-        }
-    }
-    let canary_dirs: Vec<&Path> = policy
-        .canaries
-        .iter()
-        .filter_map(|c| Path::new(c).parent())
-        .collect();
-    let mut writable = vec![
-        (pins.as_path(), Writes::Anything),
-        (held.as_path(), Writes::Anything),
-    ];
-    writable.extend(canary_dirs.into_iter().map(|d| (d, Writes::NewFiles)));
-    confine(&writable)
+    seccomp()
 }
 
 fn no_new_privs() -> Result<(), String> {
@@ -116,164 +43,6 @@ fn no_new_privs() -> Result<(), String> {
     if rc != 0 {
         return Err(format!(
             "PR_SET_NO_NEW_PRIVS: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-// Landlock's interface, from `include/uapi/linux/landlock.h`.
-const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
-const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
-const FS_EXECUTE: u64 = 1 << 0;
-const FS_WRITE_FILE: u64 = 1 << 1;
-const FS_REMOVE_DIR: u64 = 1 << 4;
-const FS_REMOVE_FILE: u64 = 1 << 5;
-const FS_MAKE_CHAR: u64 = 1 << 6;
-const FS_MAKE_DIR: u64 = 1 << 7;
-const FS_MAKE_REG: u64 = 1 << 8;
-const FS_MAKE_SOCK: u64 = 1 << 9;
-const FS_MAKE_FIFO: u64 = 1 << 10;
-const FS_MAKE_BLOCK: u64 = 1 << 11;
-const FS_MAKE_SYM: u64 = 1 << 12;
-const FS_REFER: u64 = 1 << 13;
-const FS_TRUNCATE: u64 = 1 << 14;
-const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
-
-/// What changes a file system, per ABI: the first ABI knows neither moving a
-/// file between directories nor truncating one.
-fn fs_writes(abi: u32) -> u64 {
-    let mut writes = FS_WRITE_FILE
-        | FS_REMOVE_DIR
-        | FS_REMOVE_FILE
-        | FS_MAKE_CHAR
-        | FS_MAKE_DIR
-        | FS_MAKE_REG
-        | FS_MAKE_SOCK
-        | FS_MAKE_FIFO
-        | FS_MAKE_BLOCK
-        | FS_MAKE_SYM;
-    if abi >= 2 {
-        writes |= FS_REFER;
-    }
-    if abi >= 3 {
-        writes |= FS_TRUNCATE;
-    }
-    writes
-}
-
-#[repr(C)]
-struct RulesetAttr {
-    handled_access_fs: u64,
-    handled_access_net: u64,
-    scoped: u64,
-}
-
-#[repr(C, packed)]
-struct PathBeneathAttr {
-    allowed_access: u64,
-    parent_fd: i32,
-}
-
-fn landlock(writable: &[(&Path, Writes)]) -> Result<Option<u32>, String> {
-    // SAFETY: a version query passes no attribute and size zero.
-    let abi = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<RulesetAttr>(),
-            0_usize,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        )
-    };
-    if abi < 1 {
-        return Ok(None);
-    }
-    let abi = u32::try_from(abi).unwrap_or(1);
-    let writes = fs_writes(abi);
-    let attr = RulesetAttr {
-        handled_access_fs: writes | FS_EXECUTE,
-        handled_access_net: 0,
-        scoped: if abi >= 6 {
-            SCOPE_ABSTRACT_UNIX_SOCKET
-        } else {
-            0
-        },
-    };
-    // The kernel reads as much of the attribute as the ABI it speaks knows:
-    // the network field came with the fourth, the scopes with the sixth.
-    let size = match abi {
-        1..=3 => mem::size_of::<u64>(),
-        4 | 5 => 2 * mem::size_of::<u64>(),
-        _ => mem::size_of::<RulesetAttr>(),
-    };
-    // SAFETY: `attr` is live for the call and `size` is no larger than it.
-    let ruleset = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            &raw const attr,
-            size,
-            0_u32,
-        )
-    };
-    if ruleset < 0 {
-        return Err(format!("Landlock ruleset: {}", io::Error::last_os_error()));
-    }
-    let ruleset = i32::try_from(ruleset).map_err(|_| "Landlock ruleset fd".to_owned())?;
-    let result = landlock_rules(ruleset, writable, writes);
-    // SAFETY: `ruleset` was opened above and is closed once, here.
-    unsafe { libc::close(ruleset) };
-    result.map(|()| Some(abi))
-}
-
-fn landlock_rules(ruleset: i32, writable: &[(&Path, Writes)], writes: u64) -> Result<(), String> {
-    for (dir, scope) in writable {
-        let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
-            continue;
-        };
-        // SAFETY: `path` is NUL-terminated and outlives the call.
-        let fd = unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY,
-            )
-        };
-        if fd < 0 {
-            eprintln!(
-                "[warden] {} is not writable after confinement: {}",
-                dir.display(),
-                io::Error::last_os_error()
-            );
-            continue;
-        }
-        let rule = PathBeneathAttr {
-            allowed_access: match scope {
-                Writes::Anything => writes,
-                Writes::NewFiles => FS_MAKE_REG | FS_WRITE_FILE,
-            },
-            parent_fd: fd,
-        };
-        // SAFETY: `rule` is live for the call and `fd` open.
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_add_rule,
-                ruleset,
-                LANDLOCK_RULE_PATH_BENEATH,
-                &raw const rule,
-                0_u32,
-            )
-        };
-        let error = io::Error::last_os_error();
-        // SAFETY: `fd` was opened above and is closed once, here.
-        unsafe { libc::close(fd) };
-        if rc != 0 {
-            return Err(format!("Landlock rule for {}: {error}", dir.display()));
-        }
-    }
-    // SAFETY: `ruleset` is an open Landlock ruleset; no pointer is passed.
-    let rc = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset, 0_u32) };
-    if rc != 0 {
-        return Err(format!(
-            "Landlock restrict_self: {}",
             io::Error::last_os_error()
         ));
     }
@@ -479,9 +248,6 @@ pub const ALLOWED: &[libc::c_long] = &[
     libc::SYS_fanotify_mark,
     libc::SYS_fsconfig,
     libc::SYS_pidfd_open,
-    libc::SYS_landlock_create_ruleset,
-    libc::SYS_landlock_add_rule,
-    libc::SYS_landlock_restrict_self,
     #[cfg(target_arch = "x86_64")]
     libc::SYS_arch_prctl,
     #[cfg(target_arch = "x86_64")]

@@ -76,9 +76,9 @@ services:
     security_opt:
       # Delegation does fsconfig and the broker speaks netlink. The runtime's
       # own profiles are left off because the warden installs a stricter one
-      # of its own before it serves: no new privileges, Landlock fencing
-      # writes and execution, and a seccomp filter that kills execve, mount,
-      # module loading, ptrace and namespace creation.
+      # of its own before it serves: no new privileges and a seccomp filter
+      # that kills execve, mount, module loading, ptrace and namespace
+      # creation. Writes are fenced by the read-only root below.
       - apparmor=unconfined
       - seccomp=unconfined
     volumes:

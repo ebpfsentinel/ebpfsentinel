@@ -168,8 +168,8 @@ daemonset:
     # capabilities live on the warden ONLY - the agent stays `cap-drop: ALL`.
     # It issues fsconfig + netlink + AF_PACKET + bpf, so the runtime's AppArmor
     # and seccomp profiles are off; the warden installs a stricter confinement
-    # of its own before it serves (no new privileges, Landlock fencing writes
-    # and execution, a seccomp filter that kills execve, mount, module
+    # of its own before it serves (no new privileges, a seccomp filter that
+    # kills execve, mount, module
     # loading, ptrace and namespace creation). Kubernetes refuses
     # `allowPrivilegeEscalation: false` beside CAP_SYS_ADMIN, which is why the
     # warden sets no-new-privileges itself.
