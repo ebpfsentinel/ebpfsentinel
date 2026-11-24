@@ -137,6 +137,15 @@
     },
     {
       "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "the agent reads each executable itself, once per file, and the digest it keeps is the same SHA-256",
+      "id": "executable_digest",
+      "needs_lsm": true,
+      "probe": "attach_status",
+      "since": "6.18",
+      "unlocks": "each executable's SHA-256 taken from IMA's hash at the exec, on hosts where IMA is also active, and kept on the file until it is written"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
       "fallback": "a fanotify permission group refuses on at most 4,096 marked inodes, and where that cannot run the mass encryption detection and its stop remain",
       "id": "write_refusal",
       "needs_lsm": true,
