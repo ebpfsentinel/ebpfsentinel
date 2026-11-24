@@ -2,7 +2,7 @@
 # scripts/audit-config-fixtures.py; exactly one of reason, gap per line, and
 # gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 8
+gap_ceiling = 2
 
 [keys."AgentConfig.enterprise"]
 reason = "captured opaquely for the enterprise loader, whose own gate walks its keys"
@@ -39,21 +39,3 @@ gap = "no suite yet names a rootful Podman container read from its store with th
 
 [keys."PodmanEnricherConfig.rootless_storage"]
 gap = "no suite yet names a rootless Podman container read from its store with the socket off"
-
-[keys."SuricataImportConfig.datasets"]
-gap = "dataset and datarep are checked against Suricata's own verdicts in the domain tests; no suite yet loads a ruleset naming a set"
-
-[keys."DatasetConfig.type"]
-gap = "no suite yet loads a ruleset naming a set, so no fixture declares one"
-
-[keys."DatasetConfig.path"]
-gap = "no suite yet loads a ruleset naming a set, so no fixture declares one"
-
-[keys."SuricataImportConfig.reputation"]
-gap = "iprep is checked against Suricata's own verdicts in the domain tests; no suite yet loads a ruleset reading a reputation list"
-
-[keys."ReputationConfig.categories"]
-gap = "no suite yet loads a ruleset reading a reputation list, so no fixture names the categories file"
-
-[keys."ReputationConfig.lists"]
-gap = "no suite yet loads a ruleset reading a reputation list, so no fixture names one"
