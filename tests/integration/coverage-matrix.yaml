@@ -230,6 +230,7 @@ suite_profiles:
   "152": datapath
   "153": datapath
   "154": datapath
+  "155": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -1001,11 +1002,11 @@ coverage:
 
   - kind: domain_module
     feature: ids
-    suites: ["12", "25", "38", "39", "55", "59", "66", "130"]
+    suites: ["12", "25", "38", "39", "55", "59", "66", "130", "155"]
     topology: 2vm
     kernel_min: "6.18"
     profile: datapath
-    notes: "Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert)"
+    notes: "Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert); imported Suricata dataset, datarep and iprep keywords raise their rules on matching DNS names and addresses, and an iprep naming an undeclared category is refused at import, in 155"
 
   - kind: domain_module
     feature: ips
