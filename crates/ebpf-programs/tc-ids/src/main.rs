@@ -22,18 +22,19 @@ use ebpf_common::{
         SMALL_PACKET_CAPTURE,
     },
     firewall::{
-        FW_EMPTY_IDS_CAPTURE_PORTS, FW_EMPTY_IDS_CAPTURE_PROTOS, FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
-        FW_EMPTY_TENANTS,
+        FW_EMPTY_IDS_CAPTURE_PORTS, FW_EMPTY_IDS_CAPTURE_PROTOS, FW_EMPTY_IDS_PATTERNS,
+        FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS, FW_EMPTY_TENANTS,
     },
     ids::{
-        IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
-        IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
-        IDS_CAPTURE_PORT_ENTRIES, IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_L7_FLOW_DROPPED,
-        IDS_METRIC_MATCHED, IDS_METRIC_PACKETS_CAPTURED, IDS_METRIC_PACKETS_LOST,
-        IDS_METRIC_PACKETS_TRUNCATED, IDS_METRIC_TOTAL_SEEN, IdsCaptureKey, IDS_MIRROR_COPY_MARK, IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD,
-        IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
-        IdsWorkloadScopeKey, L7_DENIED_FLOWS_MAX_ENTRIES, L7FlowKey, L7FlowVerdict,
-        WORKLOAD_LINK_MAX_ENTRIES, is_mirror_copy,
+        IDS_ACTION_DROP, IDS_CAPTURE_PORT_ENTRIES, IDS_METRIC_CGROUP_ATTRIBUTED,
+        IDS_METRIC_CGROUP_TENANT_RESOLVED, IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED,
+        IDS_METRIC_DROPPED, IDS_METRIC_ERRORS, IDS_METRIC_EVENTS_DROPPED,
+        IDS_METRIC_L7_FLOW_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_PACKETS_CAPTURED,
+        IDS_METRIC_PACKETS_LOST, IDS_METRIC_PACKETS_TRUNCATED, IDS_METRIC_TOTAL_SEEN,
+        IDS_MIRROR_COPY_MARK, IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD,
+        IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsCaptureKey, IdsPatternKey, IdsPatternValue,
+        IdsSamplingConfig, IdsWorkloadScopeKey, L7_DENIED_FLOWS_MAX_ENTRIES, L7FlowKey,
+        L7FlowVerdict, WORKLOAD_LINK_MAX_ENTRIES, is_mirror_copy,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -969,7 +970,12 @@ fn drop_refused_l7_flow(ctx: &TcContext, flow: &FlowMeta, rule_hash: u32) -> i32
         let tuple = if (flow.flags & FLAG_IPV6) != 0 {
             CtTuple::v6(flow.src_addr, flow.dst_addr, flow.src_port, flow.dst_port)
         } else {
-            CtTuple::v4(flow.src_addr[0], flow.dst_addr[0], flow.src_port, flow.dst_port)
+            CtTuple::v4(
+                flow.src_addr[0],
+                flow.dst_addr[0],
+                flow.src_port,
+                flow.dst_port,
+            )
         };
         let mut opts = BpfCtOpts::tcp();
         // SAFETY: the context is this program's own `__sk_buff`.

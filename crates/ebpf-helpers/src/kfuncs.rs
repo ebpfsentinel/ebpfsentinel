@@ -512,8 +512,11 @@ unsafe extern "C" {
     /// into the memory behind `value`. Kernel 6.17+. Returns the value's
     /// length, `-ERANGE` when it does not fit, another negative errno when
     /// it is not set or cannot be read.
-    pub fn bpf_cgroup_read_xattr(cgroup: *mut cgroup, name: *const u8, value: *mut BpfDynptr)
-    -> i32;
+    pub fn bpf_cgroup_read_xattr(
+        cgroup: *mut cgroup,
+        name: *const u8,
+        value: *mut BpfDynptr,
+    ) -> i32;
 
     // ── Kernel 6.17 string comparison ────────────────────────
     //

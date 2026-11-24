@@ -66,8 +66,8 @@ use aya_ebpf::{
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
         bpf_dynptr_from_mem, bpf_get_current_ancestor_cgroup_id, bpf_get_current_cgroup_id,
-        bpf_get_current_task, bpf_get_current_task_btf, bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
-        bpf_skb_load_bytes,
+        bpf_get_current_task, bpf_get_current_task_btf, bpf_get_current_uid_gid,
+        bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id, bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
     programs::{SkBuffContext, SockAddrContext},
@@ -88,21 +88,21 @@ use ebpf_common::quarantine::{
     QUARANTINE_OUTCOME_OBSERVED, QUARANTINE_OUTCOME_REFUSED, QuarantineEntry, QuarantineEvent,
 };
 use ebpf_common::workload_policy::{
-    WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
-    WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
-    WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL, WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6,
-    WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND, WORKLOAD_LABEL_KEY_LEN, WORKLOAD_LABEL_MAX_LEN,
-    WORKLOAD_LABEL_XATTR, WORKLOAD_POLICY_MAX_SELECTORS, WORKLOAD_TASK_CGROUPS_SENTINEL,
-    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
+    WORKLOAD_ACTION_DENY, WORKLOAD_CSS_SET_DFL_CGRP_SENTINEL, WORKLOAD_DNS_MAX_PAYLOAD,
+    WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE, WORKLOAD_DNS_RINGBUF_BYTES,
+    WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6,
+    WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS,
+    WORKLOAD_HOOK_SENDMSG, WORKLOAD_LABEL_KEY_LEN, WORKLOAD_LABEL_MAX_LEN, WORKLOAD_LABEL_XATTR,
     WORKLOAD_LINEAGE_MAX_DEPTH, WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED,
     WORKLOAD_METRIC_BIND, WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
     WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_LINEAGE_TRUNCATED, WORKLOAD_METRIC_NO_RULE,
     WORKLOAD_METRIC_REFUSED, WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED,
     WORKLOAD_METRIC_WOULD_REFUSE, WORKLOAD_MODE_ENFORCE, WORKLOAD_PEER_MAX_ADDRS,
     WORKLOAD_PEER_MAX_TARGETS, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER,
-    WORKLOAD_RULE_SENT, WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey,
-    WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
+    WORKLOAD_POLICY_MAX_SELECTORS, WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY,
+    WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WORKLOAD_RULE_SENT, WORKLOAD_TASK_CGROUPS_SENTINEL,
+    WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
+    WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
 use ebpf_helpers::kfuncs::{BpfDynptr, bpf_cgroup_read_xattr, cgroup};
 use ebpf_helpers::raw_skb;
