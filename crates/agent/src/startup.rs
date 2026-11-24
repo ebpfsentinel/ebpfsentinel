@@ -9522,6 +9522,16 @@ pub fn try_load_tc_nat(
         )?;
     }
 
+    let degraded: Vec<_> = ingress_loader
+        .degraded_programs()
+        .iter()
+        .chain(egress_loader.degraded_programs())
+        .cloned()
+        .collect();
+    for line in tunnel_rules_without_kfuncs(&degraded, &config.nat) {
+        warn!("{line}");
+    }
+
     let nat_mgr =
         NatMapManager::from_ingress_egress(ingress_loader.ebpf_mut(), egress_loader.ebpf_mut())?;
 
@@ -9532,6 +9542,44 @@ pub fn try_load_tc_nat(
     }
 
     Ok((ingress_loader, egress_loader, nat_mgr, rdrs))
+}
+
+/// The configured NAT rules that take no effect because the kernel lost the
+/// tunnel kfuncs their programs call, one sentence each.
+///
+/// `xfrm_interface` and `fou` register those kfuncs when they are loaded, and
+/// a stock image loads them only once a tunnel of that kind exists. The
+/// translation loads without them; what goes is the steering through an
+/// `xfrmi` device or the FOU header, and the operator reads which rule that is
+/// rather than finding it out from a packet that left unwrapped.
+fn tunnel_rules_without_kfuncs(
+    degraded: &[adapters::ebpf::kfunc_loader::DegradedProgram],
+    nat: &infrastructure::config::NatConfig,
+) -> Vec<String> {
+    let lost = |kfunc: &str| degraded.iter().any(|d| d.kfuncs.iter().any(|k| k == kfunc));
+    let xfrm_lost = lost("bpf_skb_get_xfrm_info") || lost("bpf_skb_set_xfrm_info");
+    let fou_lost = lost("bpf_skb_set_fou_encap");
+    let mut lines = Vec::new();
+    for rule in nat.snat_rules.iter().chain(&nat.dnat_rules) {
+        if !rule.enabled {
+            continue;
+        }
+        if xfrm_lost && rule.ipsec.is_some() {
+            lines.push(format!(
+                "NAT rule {} names an xfrmi device, but this kernel has no xfrm kfuncs \
+                 (load the xfrm_interface module): the rule translates without the IPsec steering",
+                rule.id
+            ));
+        }
+        if fou_lost && rule.fou.is_some() {
+            lines.push(format!(
+                "NAT rule {} adds a FOU header, but this kernel has no bpf_skb_set_fou_encap \
+                 (load the fou module): the rule translates without the encapsulation",
+                rule.id
+            ));
+        }
+    }
+    lines
 }
 
 /// Load the TC scrub program: attach TC ingress, write scrub config to eBPF
@@ -9963,6 +10011,48 @@ mod tests {
         .with_dns(config.workload_dns().unwrap())
         .unwrap();
         enforcement_without_ebpf(&config, &policy).unwrap()
+    }
+
+    fn nat_with_tunnels() -> infrastructure::config::NatConfig {
+        AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\nnat:\n  enabled: true\n  snat_rules:\n    \
+             - id: via-ipsec\n      type: masquerade\n      interface: eth0\n      ipsec: { if_id: 7 }\n    \
+             - id: via-fou\n      type: masquerade\n      interface: eth0\n      fou: { dport: 5555 }\n    \
+             - id: plain\n      type: masquerade\n      interface: eth0\n",
+        )
+        .unwrap()
+        .nat
+    }
+
+    fn lost(kfuncs: &[&str]) -> Vec<adapters::ebpf::kfunc_loader::DegradedProgram> {
+        vec![adapters::ebpf::kfunc_loader::DegradedProgram {
+            name: "tc_nat_egress".to_string(),
+            kfuncs: kfuncs.iter().map(ToString::to_string).collect(),
+            declared: false,
+            reason: "not declared".to_string(),
+        }]
+    }
+
+    #[test]
+    fn a_tunnel_rule_is_named_when_its_kfunc_is_gone() {
+        let lines = tunnel_rules_without_kfuncs(
+            &lost(&["bpf_skb_set_xfrm_info", "bpf_skb_set_fou_encap"]),
+            &nat_with_tunnels(),
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("via-ipsec") && lines[0].contains("xfrm_interface"));
+        assert!(lines[1].contains("via-fou") && lines[1].contains("fou module"));
+    }
+
+    #[test]
+    fn nothing_is_said_when_the_kfuncs_are_there_or_no_rule_needs_them() {
+        assert!(tunnel_rules_without_kfuncs(&[], &nat_with_tunnels()).is_empty());
+        let only_fou =
+            tunnel_rules_without_kfuncs(&lost(&["bpf_skb_set_fou_encap"]), &nat_with_tunnels());
+        assert_eq!(only_fou.len(), 1);
+        assert!(only_fou[0].contains("via-fou"));
+        let plain = infrastructure::config::NatConfig::default();
+        assert!(tunnel_rules_without_kfuncs(&lost(&["bpf_skb_set_xfrm_info"]), &plain).is_empty());
     }
 
     const NO_ENFORCE: &str = "agent:\n  interfaces: [eth0]\n";

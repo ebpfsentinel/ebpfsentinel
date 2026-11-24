@@ -163,7 +163,18 @@ fn is_dev_bound_metadata_kfunc(name: &str) -> bool {
 /// rewritten to `r0 = -EOPNOTSUPP` and the program loaded again: the program
 /// reads the non-zero return as "not here" and takes the path it had before
 /// the kfunc existed. Every other kfunc stays a hard requirement.
-pub const OPTIONAL_KFUNCS: &[&str] = &["bpf_probe_read_user_dynptr"];
+///
+/// The three tunnel kfuncs are registered by `xfrm_interface` and `fou`, two
+/// modules a stock image loads only when a tunnel of that kind is made. The
+/// translation itself needs neither: without them a rule naming an `xfrmi`
+/// device or a FOU header is the one thing that takes no effect, which the
+/// agent says at start-up, rather than every NAT rule going with them.
+pub const OPTIONAL_KFUNCS: &[&str] = &[
+    "bpf_probe_read_user_dynptr",
+    "bpf_skb_get_xfrm_info",
+    "bpf_skb_set_xfrm_info",
+    "bpf_skb_set_fou_encap",
+];
 
 /// Whether `name` is one of [`OPTIONAL_KFUNCS`].
 fn is_optional_kfunc(name: &str) -> bool {
@@ -462,7 +473,9 @@ fn missing_module(
         let Some(module) = super::kfunc::owning_module(&site.name) else {
             continue;
         };
-        if resolves(&site.name) {
+        // A program does without an optional kfunc, so its module missing
+        // degrades the program rather than refusing the object.
+        if is_optional_kfunc(&site.name) || resolves(&site.name) {
             continue;
         }
         push_unique(&mut modules, module);
@@ -2472,56 +2485,80 @@ mod tests {
             site(3, "bpf_skb_ct_lookup"),
             site(3, "bpf_ct_release"),
             site(5, "bpf_skb_ct_lookup"),
-            site(7, "bpf_skb_set_fou_encap"),
+            site(7, "bpf_xdp_ct_lookup"),
         ];
         let programs = std::collections::HashMap::from([
             (3, vec!["tc_conntrack".to_string()]),
             (5, vec!["tc_conntrack_egress".to_string()]),
-            (7, vec!["tc_nat_egress".to_string()]),
+            (7, vec!["xdp_firewall".to_string()]),
         ]);
         let refusal = super::missing_module(&sites, &|n| n == "bpf_dynptr_from_skb", &programs)
             .expect("a refusal");
         let text = refusal.to_string();
         assert!(
             matches!(&refusal, super::KfuncLoaderError::ModuleNotLoaded { modules, .. }
-                if modules == &["nf_conntrack", "fou"]),
+                if modules == &["nf_conntrack"]),
             "{text}"
         );
-        assert_eq!(
-            text,
-            "`tc_conntrack`, `tc_conntrack_egress` and `tc_nat_egress` call \
-             `bpf_skb_ct_lookup`, `bpf_ct_release` and `bpf_skb_set_fou_encap`, registered by \
-             kernel modules `nf_conntrack` and `fou`, which are not loaded on this host (absent \
-             from /sys/kernel/btf): load them with `modprobe nf_conntrack fou` or list them in \
-             /etc/modules-load.d, then restart the agent"
+        assert!(
+            text.starts_with(
+                "`tc_conntrack`, `tc_conntrack_egress` and `xdp_firewall` call \
+                 `bpf_skb_ct_lookup`, `bpf_ct_release` and `bpf_xdp_ct_lookup`, registered by \
+                 kernel module `nf_conntrack`, which is not loaded"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("load it with `modprobe nf_conntrack`"),
+            "{text}"
         );
     }
 
     #[test]
-    fn a_call_from_a_shared_subprogram_names_every_program_and_one_module_reads_singular() {
+    fn a_call_from_a_shared_subprogram_names_every_program() {
         let sites = vec![super::KfuncSite {
             section_index: 2,
             offset: 0,
-            name: "bpf_skb_get_xfrm_info".to_string(),
+            name: "bpf_ct_release".to_string(),
         }];
         let programs = std::collections::HashMap::from([
-            (4, vec!["tc_nat_ingress".to_string()]),
-            (6, vec!["tc_nat_ingress_v6".to_string()]),
+            (4, vec!["tc_conntrack".to_string()]),
+            (6, vec!["tc_conntrack_egress".to_string()]),
         ]);
         let text = super::missing_module(&sites, &|_| false, &programs)
             .expect("refusal")
             .to_string();
         assert!(
-            text.starts_with(
-                "`tc_nat_ingress` and `tc_nat_ingress_v6` call `bpf_skb_get_xfrm_info`, \
-                 registered by kernel module `xfrm_interface`, which is not loaded"
-            ),
+            text.starts_with("`tc_conntrack` and `tc_conntrack_egress` call `bpf_ct_release`"),
             "{text}"
         );
-        assert!(
-            text.contains("load it with `modprobe xfrm_interface`"),
-            "{text}"
-        );
+    }
+
+    #[test]
+    fn a_missing_tunnel_module_degrades_the_program_rather_than_refusing_it() {
+        let site = |name: &str| super::KfuncSite {
+            section_index: 2,
+            offset: 0,
+            name: name.to_string(),
+        };
+        let sites = vec![
+            site("bpf_skb_get_xfrm_info"),
+            site("bpf_skb_set_xfrm_info"),
+            site("bpf_skb_set_fou_encap"),
+        ];
+        let programs = std::collections::HashMap::from([(2, vec!["tc_nat_egress".to_string()])]);
+        assert!(super::missing_module(&sites, &|_| false, &programs).is_none());
+        for kfunc in [
+            "bpf_skb_get_xfrm_info",
+            "bpf_skb_set_xfrm_info",
+            "bpf_skb_set_fou_encap",
+        ] {
+            assert!(super::is_optional_kfunc(kfunc), "{kfunc}");
+            assert!(
+                super::super::kfunc::owning_module(kfunc).is_some(),
+                "{kfunc}"
+            );
+        }
     }
 
     #[test]
@@ -3116,8 +3153,16 @@ mod tests {
     }
 
     #[test]
-    fn the_dynptr_user_read_is_the_only_optional_kfunc() {
-        assert_eq!(OPTIONAL_KFUNCS, &["bpf_probe_read_user_dynptr"]);
+    fn the_dynptr_user_read_and_the_tunnel_kfuncs_are_the_optional_ones() {
+        assert_eq!(
+            OPTIONAL_KFUNCS,
+            &[
+                "bpf_probe_read_user_dynptr",
+                "bpf_skb_get_xfrm_info",
+                "bpf_skb_set_xfrm_info",
+                "bpf_skb_set_fou_encap",
+            ]
+        );
         assert!(is_optional_kfunc("bpf_probe_read_user_dynptr"));
         assert!(!is_optional_kfunc("bpf_copy_from_user_dynptr"));
         assert!(!is_optional_kfunc("bpf_xdp_ct_lookup"));
