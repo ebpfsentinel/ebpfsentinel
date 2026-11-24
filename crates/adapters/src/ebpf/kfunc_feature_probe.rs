@@ -1,18 +1,21 @@
-//! Kernel facts a future program would rest on, asked rather than inferred.
+//! Kernel facts a program rests on, asked rather than inferred.
 //!
-//! Each entry here names the one thing it would be used for, and nothing in
-//! the agent uses any of them yet: the point is that the day one is wired,
-//! whether this host offers it is already a reading on the operational
-//! endpoint rather than a kernel version somebody has to interpret.
+//! Each entry here names the one thing it is used for. Only the copy of a
+//! task's user string is wired so far, and the program reading arguments at
+//! exec is attached only where this probe confirmed it; for the others the
+//! point is that the day one is wired, whether this host offers it is already
+//! a reading on the operational endpoint rather than a kernel version somebody
+//! has to interpret.
 //!
 //! - **kprobe sessions**: one program run on a function's entry and on its
 //!   return, with `bpf_session_is_return` and `bpf_session_cookie`, instead of
 //!   a kprobe, a kretprobe and a map correlating the two. The probe loads a
 //!   kprobe program with the session attach type that calls both kfuncs,
 //!   which only a kernel offering sessions accepts.
-//! - **`bpf_copy_from_user_str`**: a string copied out of user memory, which
-//!   is what reading a process's real argument vector at exec needs. The
-//!   probe loads a sleepable LSM program that calls it.
+//! - **`bpf_copy_from_user_task_str`**: a string copied out of a task's user
+//!   memory, which is how the process program reads the argument vector at
+//!   exec. The probe loads a sleepable LSM program that calls it on the
+//!   current task.
 //! - **`bpf_sk_assign_tcp_reqsk`**: a validated SYN cookie handed to the stack
 //!   as a request socket, rather than the stack revalidating a cookie it did
 //!   not issue. A call needs a listening socket looked up first, which a probe
@@ -73,6 +76,11 @@ pub(crate) mod insn {
     /// `*(u64 *)(dst + off) = imm`.
     pub(crate) fn store_dw_imm(dst: u8, off: i16, imm: i32) -> u64 {
         encode(0x7a, dst, 0, off, imm)
+    }
+
+    /// A call to the helper numbered `id`.
+    pub(crate) fn call_helper(id: i32) -> u64 {
+        encode(0x85, 0, 0, 0, id)
     }
 
     /// A call to the vmlinux kfunc whose BTF id is `btf_id`.
@@ -142,7 +150,7 @@ const ENTRIES: [Entry; 3] = [
     Entry {
         name: "copy_from_user_str",
         consumer: "the real argument vector of a process, read at exec",
-        kfuncs: &["bpf_copy_from_user_str"],
+        kfuncs: &["bpf_copy_from_user_task_str"],
         program: Some(copy_from_user_str_program),
         unconfirmed: "",
     },
@@ -186,13 +194,17 @@ fn kprobe_session_program(funcs: &HashMap<String, u32>) -> Option<(&'static str,
     ))
 }
 
+/// `bpf_get_current_task_btf`, the trusted task pointer the copy is aimed at.
+const HELPER_GET_CURRENT_TASK_BTF: i32 = 158;
+
 /// A sleepable LSM program copying into a zeroed sixteen-byte stack buffer
-/// from a null user pointer. The copy would fail at run time; the verifier
+/// from a null pointer in the current task's user memory, the shape of the
+/// process program's call. The copy would fail at run time; the verifier
 /// accepts the call only where the kfunc is offered to sleepable programs.
 fn copy_from_user_str_program(
     funcs: &HashMap<String, u32>,
 ) -> Option<(&'static str, ProbeProgram)> {
-    let copy = *funcs.get("bpf_copy_from_user_str")?;
+    let copy = *funcs.get("bpf_copy_from_user_task_str")?;
     let hook = *funcs.get(SLEEPABLE_PROBE_HOOK)?;
     Some((
         "a sleepable LSM program calling it",
@@ -204,11 +216,13 @@ fn copy_from_user_str_program(
             insns: vec![
                 insn::store_dw_imm(10, -8, 0),
                 insn::store_dw_imm(10, -16, 0),
+                insn::call_helper(HELPER_GET_CURRENT_TASK_BTF),
+                insn::mov_reg(4, 0),
                 insn::mov_reg(1, 10),
                 insn::add_imm(1, -16),
                 insn::mov_imm(2, 16),
                 insn::mov_imm(3, 0),
-                insn::mov_imm(4, 0),
+                insn::mov_imm(5, 0),
                 insn::call_kfunc(copy),
                 insn::mov_imm(0, 0),
                 insn::exit(),
@@ -386,6 +400,10 @@ mod tests {
             [0x85, 0x20, 0, 0, 0x04, 0x03, 0x02, 0x01]
         );
         assert_eq!(
+            insn::call_helper(158).to_le_bytes(),
+            [0x85, 0, 0, 0, 158, 0, 0, 0]
+        );
+        assert_eq!(
             insn::add_imm(1, -16).to_le_bytes()[4..],
             [0xf0, 0xff, 0xff, 0xff]
         );
@@ -428,6 +446,27 @@ mod tests {
                 .expect("reason")
                 .starts_with("declared, not confirmed")
         );
+    }
+
+    #[test]
+    fn the_copy_program_aims_the_kfunc_at_the_current_task() {
+        let t = everything();
+        let (_, program) = copy_from_user_str_program(&t).expect("program");
+        assert_eq!(program.attach_btf_id, t[SLEEPABLE_PROBE_HOOK]);
+        assert_eq!(program.prog_flags, PROBE_F_SLEEPABLE);
+        let helper = program
+            .insns
+            .iter()
+            .position(|i| *i == insn::call_helper(HELPER_GET_CURRENT_TASK_BTF))
+            .expect("the task is asked for");
+        assert_eq!(program.insns[helper + 1], insn::mov_reg(4, 0));
+        let call = program
+            .insns
+            .iter()
+            .position(|i| *i == insn::call_kfunc(t["bpf_copy_from_user_task_str"]))
+            .expect("the kfunc is called");
+        assert!(helper < call);
+        assert!(program.insns[helper..call].contains(&insn::mov_imm(5, 0)));
     }
 
     #[test]
@@ -498,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_kernel_without_the_lsm_hooks_cannot_host_the_sleepable_copy() {
-        let t = table(&["bpf_copy_from_user_str"]);
+        let t = table(&["bpf_copy_from_user_task_str"]);
         let features = evaluate(&Ok(t), &mut |_| Ok(()));
         let copy = by_name(&features, "copy_from_user_str");
         assert_eq!(copy.usable, Some(false));

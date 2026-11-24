@@ -2148,6 +2148,7 @@ mod tests {
             start_ns: None,
             parent_pid: parent,
             parent_start_ns: None,
+            command_line: None,
         }
     }
 

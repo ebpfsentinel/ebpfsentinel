@@ -45,6 +45,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
 // program does not reference is a harmless no-op, so a single union list is
 // applied to every program.
 const KFUNC_EXPORTS: &[&str] = &[
+    "bpf_copy_from_user_task_str",
     "bpf_ct_change_timeout",
     "bpf_ct_release",
     "bpf_dynptr_from_skb",

@@ -225,6 +225,7 @@ suite_profiles:
   "147": datapath
   "148": datapath
   "150": datapath
+  "151": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -474,11 +475,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tracepoint-process
-    suites: ["67", "70", "perf/07"]
+    suites: ["67", "70", "151", "perf/07"]
     topology: none
     kernel_min: "6.18"
     profile: datapath
-    notes: "Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07"
+    notes: "Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, 151 reads the arguments the sleepable LSM program copied at exec and the /proc fallback without the BPF LSM, exec() cost measured in perf/07"
 
   - kind: ebpf_program
     feature: tracepoint-signal
@@ -1293,11 +1294,11 @@ coverage:
 
   - kind: capability
     feature: copy_from_user_str
-    suites: ["86"]
+    suites: ["86", "151"]
     topology: none
     kernel_min: "6.18"
     profile: datapath
-    notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
+    notes: "86 reads the report; 151 shows a process with the arguments it was started with although it rewrote them at once, which only the copy made at exec can see, and the /proc fallback without the BPF LSM"
 
   - kind: capability
     feature: tcp_reqsk_assign

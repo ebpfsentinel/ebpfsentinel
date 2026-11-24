@@ -29,7 +29,7 @@
     },
     {
       "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
-      "fallback": "nothing changes: no shipped program rests on it yet",
+      "fallback": "arguments are read from /proc/<pid>/cmdline after the exec, which a process that has already exited leaves empty",
       "id": "copy_from_user_str",
       "needs_lsm": true,
       "probe": "sleepable_lsm",

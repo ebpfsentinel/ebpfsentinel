@@ -46,6 +46,11 @@ pub struct ProcessLifecycleEvent {
     pub parent_pid: Option<u32>,
     /// When the parent started, read with its pid.
     pub parent_start_ns: Option<u64>,
+    /// The arguments of an exec as the kernel read them from the new image,
+    /// joined and bounded by [`super::command_line::from_argv`] and not yet
+    /// redacted. `None` on every other event, and on an exec the kernel did
+    /// not read, where the table falls back to `/proc/<pid>/cmdline`.
+    pub command_line: Option<String>,
 }
 
 impl ProcessLifecycleEvent {
@@ -65,6 +70,7 @@ impl ProcessLifecycleEvent {
             start_ns: None,
             parent_pid: None,
             parent_start_ns: None,
+            command_line: None,
         }
     }
 }

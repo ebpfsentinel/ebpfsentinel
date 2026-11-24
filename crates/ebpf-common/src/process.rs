@@ -33,6 +33,9 @@ pub const PROCESS_EVENT_EXIT: u8 = 2;
 /// Event kind: a process forked a new process (not a thread). The record
 /// describes the child; its parent is the task that forked it.
 pub const PROCESS_EVENT_FORK: u8 = 3;
+/// Event kind: the arguments a task was started with, sent as a
+/// [`ProcessArgv`] just before the exec record of the same task.
+pub const PROCESS_EVENT_ARGV: u8 = 4;
 
 /// Metric index: exec notifications written to the ring buffer.
 pub const PROCESS_METRIC_EXEC: u32 = 0;
@@ -61,8 +64,15 @@ pub const PROCESS_METRIC_UNRESOLVED: u32 = 6;
 /// Only a node whose agent reads a namespace other than the initial one, a
 /// container node, counts here: the tasks of the machine around it.
 pub const PROCESS_METRIC_OUTSIDE_NAMESPACE: u32 = 7;
+/// Metric index: argument records written to the ring buffer.
+pub const PROCESS_METRIC_ARGV: u32 = 8;
+/// Metric index: execs whose arguments were not sent, because the ring was
+/// more than half full, the layout was never written or the first read
+/// failed. Userspace then reads `/proc/<pid>/cmdline` as it would with no
+/// kernel copy at all, so the counter says how often that race is run.
+pub const PROCESS_METRIC_ARGV_LOST: u32 = 9;
 /// Total number of process metric slots (one past the last index).
-pub const PROCESS_METRIC_COUNT: u32 = 8;
+pub const PROCESS_METRIC_COUNT: u32 = 10;
 
 /// Deepest pid namespace nesting the kernel allows (`MAX_PID_NS_LEVEL`), so
 /// one more than the highest level a `struct pid` holds a number at.
@@ -84,6 +94,62 @@ pub const PROCESS_COMM_LEN: usize = 16;
 /// records of eighty bytes with their ring header, which is the burst it has
 /// to absorb between two drains.
 pub const PROCESS_EVENTS_RINGBUF_BYTES: u32 = 256 * 4096;
+
+/// Most bytes of arguments an argument record carries, the same bound the
+/// command line read from `/proc` is held to.
+pub const PROCESS_ARGV_BOUND: u32 = 4096;
+
+/// Bytes one kernel read of an argument may write. An argument longer than
+/// this is read again from where the previous read stopped.
+pub const PROCESS_ARGV_CHUNK: u32 = 512;
+
+/// Most reads one exec spends on its arguments. Every argument costs one
+/// read and a long one a read per chunk, so this bounds the loop the
+/// verifier walks whatever the argument count.
+pub const PROCESS_ARGV_MAX_READS: u32 = 64;
+
+/// Where `linux_binprm` keeps what the argument read needs, for the running
+/// kernel, as userspace read it from BTF.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProcessArgvLayout {
+    /// Byte offset of `linux_binprm.p`, the user address of the first
+    /// argument once the strings are copied into the new image.
+    pub binprm_p: u32,
+    /// Byte offset of `linux_binprm.argc`.
+    pub binprm_argc: u32,
+    /// Nonzero once userspace wrote the layout.
+    pub valid: u32,
+    pub _pad: u32,
+}
+
+/// The arguments of one exec, as the kernel read them from the new image.
+///
+/// The bytes are what `/proc/<pid>/cmdline` holds: each argument followed by
+/// a NUL, in order. The tail past the last read reaches into the chunk a
+/// final read may write, which is why the buffer is one chunk longer than
+/// the bound.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessArgv {
+    /// The same header an exec record carries, kind `PROCESS_EVENT_ARGV`.
+    pub header: ProcessEvent,
+    /// How many arguments the task was started with.
+    pub argc: u32,
+    /// How many were read whole. Fewer than `argc` means the line was cut.
+    pub args_read: u32,
+    /// Bytes of `bytes` written.
+    pub len: u32,
+    pub _pad: u32,
+    pub bytes: [u8; (PROCESS_ARGV_BOUND + PROCESS_ARGV_CHUNK) as usize],
+}
+
+// Enough reads to fill the bound with arguments of a chunk each.
+const _: () = assert!(PROCESS_ARGV_MAX_READS * PROCESS_ARGV_CHUNK >= PROCESS_ARGV_BOUND);
+// Half the ring, the share argument records may take, holds a hundred.
+const _: () = assert!(
+    PROCESS_EVENTS_RINGBUF_BYTES / 2 / (core::mem::size_of::<ProcessArgv>() as u32 + 8) >= 100
+);
 
 /// Where `task_struct` keeps what the parent walk reads, for the running
 /// kernel, as userspace read it from BTF.
@@ -162,6 +228,9 @@ unsafe impl aya::Pod for ProcessEvent {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ProcessLayout {}
 
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ProcessArgvLayout {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,10 +274,35 @@ mod tests {
         assert_ne!(PROCESS_EVENT_FORK, 0);
         assert_ne!(PROCESS_EVENT_FORK, PROCESS_EVENT_EXEC);
         assert_ne!(PROCESS_EVENT_FORK, PROCESS_EVENT_EXIT);
+        assert_ne!(PROCESS_EVENT_ARGV, 0);
+        assert_ne!(PROCESS_EVENT_ARGV, PROCESS_EVENT_EXEC);
+        assert_ne!(PROCESS_EVENT_ARGV, PROCESS_EVENT_EXIT);
+        assert_ne!(PROCESS_EVENT_ARGV, PROCESS_EVENT_FORK);
+    }
+
+    #[test]
+    fn the_argument_record_starts_with_the_event_and_has_no_implicit_padding() {
+        assert_eq!(mem::offset_of!(ProcessArgv, header), 0);
+        assert_eq!(mem::offset_of!(ProcessArgv, argc), 72);
+        assert_eq!(mem::offset_of!(ProcessArgv, args_read), 76);
+        assert_eq!(mem::offset_of!(ProcessArgv, len), 80);
+        assert_eq!(mem::offset_of!(ProcessArgv, bytes), 88);
+        assert_eq!(
+            mem::size_of::<ProcessArgv>(),
+            88 + (PROCESS_ARGV_BOUND + PROCESS_ARGV_CHUNK) as usize
+        );
+        assert_eq!(mem::align_of::<ProcessArgv>(), 8);
+    }
+
+    #[test]
+    fn the_argument_layout_is_four_words() {
+        assert_eq!(mem::size_of::<ProcessArgvLayout>(), 16);
+        assert_eq!(ProcessArgvLayout::default().valid, 0);
     }
 
     #[test]
     fn the_metric_count_is_one_past_the_last_slot() {
-        assert_eq!(PROCESS_METRIC_COUNT, PROCESS_METRIC_OUTSIDE_NAMESPACE + 1);
+        assert_eq!(PROCESS_METRIC_ARGV, PROCESS_METRIC_OUTSIDE_NAMESPACE + 1);
+        assert_eq!(PROCESS_METRIC_COUNT, PROCESS_METRIC_ARGV_LOST + 1);
     }
 }

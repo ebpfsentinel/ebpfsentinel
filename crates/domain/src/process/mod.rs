@@ -16,6 +16,7 @@
 //! kernel cannot help with - a lost exit notification - and the eviction it
 //! performs is the oldest exec first, counted so the operator sees it.
 
+pub mod command_line;
 pub mod detection;
 pub mod digest;
 pub mod engine;

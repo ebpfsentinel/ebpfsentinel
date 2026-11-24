@@ -137,7 +137,8 @@ pub const CATALOGUE: &[Capability] = &[
         probe: ProbeKind::SleepableLsm,
         since: KernelVersion::FLOOR,
         needs_lsm: true,
-        fallback: "nothing changes: no shipped program rests on it yet",
+        fallback: "arguments are read from /proc/<pid>/cmdline after the exec, which a \
+                   process that has already exited leaves empty",
     },
     Capability {
         id: "tcp_reqsk_assign",
@@ -367,13 +368,20 @@ mod tests {
     }
 
     #[test]
-    fn the_unused_kfunc_facts_keep_their_consumer_and_gain_no_fourth() {
+    fn the_probed_kfunc_facts_keep_their_consumer_and_only_the_wired_one_has_a_fallback() {
+        /// The probed facts a shipped program rests on, each with a fallback
+        /// of its own rather than "nothing changes".
+        const WIRED: &[&str] = &["copy_from_user_str"];
         let probed = kfunc_feature_probe::entry_consumers();
         let unused: Vec<&Capability> = CATALOGUE
             .iter()
             .filter(|c| c.fallback.starts_with("nothing changes"))
             .collect();
-        assert_eq!(unused.len(), probed.len());
+        assert_eq!(unused.len() + WIRED.len(), probed.len());
+        for id in WIRED {
+            let entry = find(id).expect("a wired fact is in the catalogue");
+            assert!(!entry.fallback.starts_with("nothing changes"), "{id}");
+        }
         for (name, consumer) in probed {
             let entry = find(name).expect("every probed kfunc fact is in the catalogue");
             assert_eq!(entry.unlocks, consumer, "{name} lost its consumer sentence");

@@ -564,6 +564,9 @@ pub struct DnsRuleReport {
 }
 
 /// What became of the two process tracepoints on this host.
+// Each flag is a separate fact reported as it stands, not a state of one
+// machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Serialize, ToSchema)]
 pub struct ProcessTracingReport {
     /// True only when every tracepoint attached. A partial set is reported
@@ -577,6 +580,13 @@ pub struct ProcessTracingReport {
     /// Whether the table keeps command lines, which is off unless the
     /// configuration asked for it.
     pub command_line: bool,
+    /// The kernel copies each started process's arguments at exec. False
+    /// means they are read from `/proc/<pid>/cmdline` once the exec is seen,
+    /// which a process that has already exited leaves empty.
+    pub command_line_kernel: bool,
+    /// Why the kernel does not read the arguments, in one sentence. `None`
+    /// when it does, or when command lines are not kept.
+    pub command_line_reason: Option<String>,
     /// The kernel reads each process's parent and start time, and forks are
     /// followed. False on a kernel whose BTF does not describe the fields,
     /// where the parent comes from `/proc` once the process is seen.
@@ -1080,6 +1090,8 @@ fn process_tracing_report(status: adapters::ebpf::ProcessTracingStatus) -> Proce
         tracepoints: status.tracepoints,
         reason: status.reason,
         command_line: status.command_line,
+        command_line_kernel: status.command_line_kernel,
+        command_line_reason: status.command_line_reason,
         lineage: status.lineage,
         lineage_reason: status.lineage_reason,
     }

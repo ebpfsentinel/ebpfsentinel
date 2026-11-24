@@ -19,6 +19,9 @@ use super::state::AppState;
 // ── Response DTOs ─────────────────────────────────────────────────
 
 /// What the agent can say about the two tracepoints behind the table.
+// Each flag is a separate fact reported as it stands, not a state of one
+// machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Serialize, ToSchema)]
 pub struct ProcessTracingResponse {
     /// Every tracepoint is attached and the table is being filled.
@@ -31,6 +34,13 @@ pub struct ProcessTracingResponse {
     /// Command lines are being kept. Off by default: an argument vector
     /// carries secrets often enough that keeping it is a decision.
     pub command_line: bool,
+    /// The kernel copies each started process's arguments at exec. False
+    /// means they are read from `/proc/<pid>/cmdline` once the exec is seen,
+    /// which a process that has already exited leaves empty.
+    pub command_line_kernel: bool,
+    /// Why the kernel does not read the arguments, in one sentence. `None`
+    /// when it does, or when command lines are not kept.
+    pub command_line_reason: Option<String>,
     /// The kernel reads each process's parent and start time, and forks are
     /// followed. False on a kernel whose BTF does not describe the fields,
     /// where the parent comes from `/proc` once the process is seen.
@@ -170,6 +180,8 @@ fn tracing_response() -> ProcessTracingResponse {
         tracepoints: status.tracepoints,
         reason: status.reason,
         command_line: status.command_line,
+        command_line_kernel: status.command_line_kernel,
+        command_line_reason: status.command_line_reason,
         lineage: status.lineage,
         lineage_reason: status.lineage_reason,
     }

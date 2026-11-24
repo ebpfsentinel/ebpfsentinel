@@ -18204,6 +18204,7 @@
           "attached",
           "tracepoints",
           "command_line",
+          "command_line_kernel",
           "lineage"
         ],
         "properties": {
@@ -18214,6 +18215,17 @@
           "command_line": {
             "type": "boolean",
             "description": "Whether the table keeps command lines, which is off unless the\nconfiguration asked for it."
+          },
+          "command_line_kernel": {
+            "type": "boolean",
+            "description": "The kernel copies each started process's arguments at exec. False\nmeans they are read from `/proc/<pid>/cmdline` once the exec is seen,\nwhich a process that has already exited leaves empty."
+          },
+          "command_line_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the kernel does not read the arguments, in one sentence. `None`\nwhen it does, or when command lines are not kept."
           },
           "lineage": {
             "type": "boolean",
@@ -18249,6 +18261,7 @@
           "attached",
           "tracepoints",
           "command_line",
+          "command_line_kernel",
           "lineage"
         ],
         "properties": {
@@ -18259,6 +18272,17 @@
           "command_line": {
             "type": "boolean",
             "description": "Command lines are being kept. Off by default: an argument vector\ncarries secrets often enough that keeping it is a decision."
+          },
+          "command_line_kernel": {
+            "type": "boolean",
+            "description": "The kernel copies each started process's arguments at exec. False\nmeans they are read from `/proc/<pid>/cmdline` once the exec is seen,\nwhich a process that has already exited leaves empty."
+          },
+          "command_line_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the kernel does not read the arguments, in one sentence. `None`\nwhen it does, or when command lines are not kept."
           },
           "lineage": {
             "type": "boolean",

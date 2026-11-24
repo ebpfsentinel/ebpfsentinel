@@ -3186,6 +3186,8 @@ pub async fn run(
                             tracepoints: Vec::new(),
                             reason: Some(e.to_string()),
                             command_line: config.process_table.capture_command_line,
+                            command_line_kernel: false,
+                            command_line_reason: None,
                             lineage: false,
                             lineage_reason: None,
                         },
@@ -3201,6 +3203,8 @@ pub async fn run(
                 tracepoints: Vec::new(),
                 reason: Some("the process table is turned off in the configuration".to_string()),
                 command_line: false,
+                command_line_kernel: false,
+                command_line_reason: None,
                 lineage: false,
                 lineage_reason: None,
             });
@@ -6974,8 +6978,14 @@ pub fn try_load_process_tracing(
     adapters::ebpf::ProcessTracingStatus,
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-process")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // The argument read at exec is a sleepable LSM program, which a kernel
+    // without the BPF LSM refuses: the tracepoints load without it and the
+    // table reads arguments from /proc instead.
+    let mut loader = EbpfLoader::load_with_pin_path_optional(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        adapters::ebpf::process_attach::PROCESS_OPTIONAL_PROGRAMS,
+    )?;
     adapters::ebpf::pidns::publish_or_warn(
         loader.ebpf_mut(),
         &host_proc_root(),
@@ -7000,15 +7010,18 @@ pub fn try_load_process_tracing(
         );
     }
 
+    let capture = config.process_table.capture_command_line;
+    let argv_refusal = if capture {
+        adapters::ebpf::process_attach::prepare_argv(&mut loader)
+    } else {
+        None
+    };
+
     // The tracepoints read tasks and nothing else, so no cgroup path is
     // resolved and the warden has nothing to broker: the BPF token the agent
     // loaded with is what the attach is checked against.
     let mut attacher = adapters::ebpf::ProcessTracingAttacher::new();
-    let status = attacher.attach_all(
-        &loader,
-        config.process_table.capture_command_line,
-        lineage_reason,
-    );
+    let status = attacher.attach_all(&loader, capture, argv_refusal, lineage_reason);
     Ok((loader, metrics_rdr, reader, attacher, status))
 }
 
@@ -8930,7 +8943,11 @@ fn kernel_reading_objects() -> [(&'static str, &'static str, &'static [&'static 
         adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_4,
     ];
     [
-        ("tracepoint-process", PINS, &[]),
+        (
+            "tracepoint-process",
+            PINS,
+            adapters::ebpf::process_attach::PROCESS_OPTIONAL_PROGRAMS,
+        ),
         ("tracepoint-signal", PINS, &[]),
         ("tracepoint-drop-reason", PINS, &[]),
         ("tracepoint-tcp-health", PINS, &[]),

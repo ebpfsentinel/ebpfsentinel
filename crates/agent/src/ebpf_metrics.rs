@@ -235,6 +235,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "ingress_would_refuse"),
             (6, "reply_admitted"),
         ],
+        // `command_line_read` is an exec whose arguments the kernel copied
+        // at exec; `command_line_lost` is one it could not, the ring being
+        // over the share left to arguments or the copy failing, whose
+        // arguments are then read from /proc after the exec.
         "PROCESS_METRICS" => &[
             (0, "exec"),
             (1, "exit"),
@@ -244,6 +248,8 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "thread_fork"),
             (6, "lineage_unresolved"),
             (7, "outside_namespace"),
+            (8, "command_line_read"),
+            (9, "command_line_lost"),
         ],
         // What became of each arming: the signal went out, the kernel's own
         // protected set refused it, the window closed before the target made

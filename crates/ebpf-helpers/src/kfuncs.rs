@@ -26,6 +26,7 @@
 //! | `bpf_xdp_metadata_rx_vlan_tag`  | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
 //! | `bpf_xdp_get_xfrm_state`        | 6.8    | `struct xfrm_state *(*)(struct xdp_md *ctx, struct bpf_xfrm_state_opts *opts, u32 opts__sz) __ksym;`                                             |
 //! | `bpf_xdp_xfrm_state_release`    | 6.8    | `void(*)(struct xfrm_state *x) __ksym;`                                                                                                          |
+//! | `bpf_copy_from_user_task_str`   | 6.15   | `int(*)(void *dst, u32 dst__sz, const void __user *unsafe_ptr__ign, struct task_struct *tsk, u64 flags) __ksym;`                                 |
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
@@ -450,6 +451,22 @@ unsafe extern "C" {
         skb: *mut core::ffi::c_void,
         encap: *mut BpfFouEncap,
         type_: i32,
+    ) -> i32;
+
+    // ── Kernel 6.15 user memory of another task ────────────────
+
+    /// Copy one NUL-terminated string at the user address `unsafe_ptr` of
+    /// `tsk` into `dst`, at most `dst_sz` bytes, always NUL-terminated.
+    /// Kernel 6.15, `KF_SLEEPABLE`: only a sleepable program may call it,
+    /// since reading another address space can fault pages in. Returns the
+    /// bytes written including the NUL, `dst_sz` when the string was cut,
+    /// negative errno otherwise.
+    pub fn bpf_copy_from_user_task_str(
+        dst: *mut core::ffi::c_void,
+        dst_sz: u32,
+        unsafe_ptr: *const core::ffi::c_void,
+        tsk: *mut task_struct,
+        flags: u64,
     ) -> i32;
 }
 

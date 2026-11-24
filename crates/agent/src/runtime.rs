@@ -2052,6 +2052,8 @@ pub async fn start_host_observation(
             tracepoints: Vec::new(),
             reason: Some("the process table is turned off in the configuration".to_string()),
             command_line: false,
+            command_line_kernel: false,
+            command_line_reason: None,
             lineage: false,
             lineage_reason: None,
         });
@@ -2624,6 +2626,8 @@ fn start_process_tracing(
                 tracepoints: Vec::new(),
                 reason: Some(e.to_string()),
                 command_line: config.process_table.capture_command_line,
+                command_line_kernel: false,
+                command_line_reason: None,
                 lineage: false,
                 lineage_reason: None,
             });

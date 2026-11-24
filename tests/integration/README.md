@@ -211,7 +211,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.18 | datapath | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
 | `tc-threatintel` | 17, 33, 67 | 2vm | 6.18 | datapath | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | 90 | none | 6.18 | datapath | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on |
-| `tracepoint-process` | 67, 70, perf/07 | none | 6.18 | datapath | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
+| `tracepoint-process` | 67, 70, 151, perf/07 | none | 6.18 | datapath | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, 151 reads the arguments the sleepable LSM program copied at exec and the /proc fallback without the BPF LSM, exec() cost measured in perf/07 |
 | `tracepoint-signal` | 82, 93 | none | 6.18 | datapath | Signals the named task at its next syscall: the mass encryption run stopped in 82, the reverse shell stopped in 93 |
 | `tracepoint-tcp-health` | 71 | none | 6.18 | datapath | Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back |
 | `uprobe-crypto` | 104 | none | 6.18 | datapath | Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. Suite 104 rewrites the body of each document twice, once with bytes it made itself and once through EVP_EncryptUpdate, and only the second reaches a verdict, on the crypto rate |
@@ -332,7 +332,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|---|---|---|---|
 | `attribution` | 70 | none | 6.18 | datapath | The workload named on a flow |
 | `bpf_lsm` | 83, 86 | none | 6.18 | datapath | A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86 |
-| `copy_from_user_str` | 86 | none | 6.18 | datapath | No shipped program rests on it yet, so the report in 86 is all there is to assert |
+| `copy_from_user_str` | 86, 151 | none | 6.18 | datapath | 86 reads the report; 151 shows a process with the arguments it was started with although it rewrote them at once, which only the copy made at exec can see, and the /proc fallback without the BPF LSM |
 | `dlp_whole_record` | 150 | none | 6.18 | datapath | A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name |
 | `file_kfuncs` | 77 | none | 6.18 | datapath | Probed and reported in 77 |
 | `immediate_signal` | 82 | none | 6.18 | datapath | A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only |
@@ -444,7 +444,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/nat/rules` | 16, 21 |
 | `/api/v1/nat/status` | 16, 21 |
 | `/api/v1/netpol/replay` | 87 |
-| `/api/v1/processes` | 67 |
+| `/api/v1/processes` | 151, 67 |
 | `/api/v1/processes/{pid}` | 72 |
 | `/api/v1/qos/classifiers` | 28 |
 | `/api/v1/qos/classifiers/{id}` | 28 |
@@ -482,9 +482,9 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/policies/{id}` | 31 |
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 141, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
-| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
-| `/readyz` | 01, 02, 06, 07, 106, 132, 140, 141, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
+| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 141, 151, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
+| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
+| `/readyz` | 01, 02, 06, 07, 106, 132, 140, 141, 151, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
 
 <!-- coverage:end -->
 

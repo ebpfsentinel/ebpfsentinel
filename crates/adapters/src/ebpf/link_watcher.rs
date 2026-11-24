@@ -686,6 +686,7 @@ impl OwnerReporting {
             start_ns: None,
             parent_pid: None,
             parent_start_ns: None,
+            command_line: None,
         })
     }
 }

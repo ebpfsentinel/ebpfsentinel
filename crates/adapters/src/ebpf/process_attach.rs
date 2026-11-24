@@ -9,12 +9,21 @@
 //! else, which is why this module degrades rather than failing the start: the
 //! reason is published, so an operator reading a flow with no process can
 //! find out why instead of guessing.
+//!
+//! The arguments of a started process are read by a fourth program, a
+//! sleepable LSM program on `bprm_committed_creds`, which copies them out of
+//! the new image with `bpf_copy_from_user_task_str` before the exec record is
+//! written. It is attached only when command lines are kept, the BPF LSM is
+//! active and the kernel loaded it; otherwise the table reads
+//! `/proc/<pid>/cmdline` after the exec, as it always did, and the status says
+//! why. Its hook is fixed when it loads, so it stays with the agent rather
+//! than being handed to the warden.
 
 use std::os::fd::OwnedFd;
 use std::sync::{Mutex, OnceLock};
 
 use aya::maps::{Array, MapData};
-use ebpf_common::process::ProcessLayout;
+use ebpf_common::process::{ProcessArgvLayout, ProcessLayout};
 use tracing::{info, warn};
 
 use super::kfunc;
@@ -36,6 +45,116 @@ pub const PROCESS_HOOKS: &[(&str, &str)] = &[
     ("process_fork", "sched_process_fork"),
     ("process_exit", "sched_process_exit"),
 ];
+
+/// The sleepable program reading a started process's arguments.
+pub const PROCESS_ARGV_PROGRAM: &str = "process_exec_argv";
+
+/// The programs of the process object a kernel may refuse while the rest of
+/// the object still loads, as every load of it names them.
+pub const PROCESS_OPTIONAL_PROGRAMS: &[&str] = &[PROCESS_ARGV_PROGRAM];
+
+/// Where the running kernel keeps the two `linux_binprm` fields the argument
+/// read needs: the user address of the first argument and their count.
+///
+/// # Errors
+///
+/// Returns the member the kernel's BTF does not describe, in one sentence.
+pub fn resolve_argv_layout() -> Result<ProcessArgvLayout, String> {
+    const MEMBERS: [&str; 2] = ["p", "argc"];
+    let found = kfunc::vmlinux_struct_member_offsets("linux_binprm", &MEMBERS)
+        .map_err(|e| format!("the kernel BTF does not describe `linux_binprm`: {e}"))?;
+    let at = |i: usize| -> Result<u32, String> {
+        found
+            .get(i)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("the kernel BTF has no `linux_binprm.{}`", MEMBERS[i]))
+    };
+    Ok(ProcessArgvLayout {
+        binprm_p: at(0)?,
+        binprm_argc: at(1)?,
+        valid: 1,
+        _pad: 0,
+    })
+}
+
+/// Write `layout` into the object's `PROCESS_ARGV_LAYOUT`.
+///
+/// # Errors
+///
+/// Returns an error when the map is missing or the write is refused.
+pub fn write_argv_layout(
+    ebpf: &mut dyn MapStore,
+    layout: &ProcessArgvLayout,
+) -> anyhow::Result<()> {
+    let mut map: Array<MapData, ProcessArgvLayout> = Array::try_from(
+        ebpf.take_map("PROCESS_ARGV_LAYOUT")
+            .ok_or_else(|| anyhow::anyhow!("map 'PROCESS_ARGV_LAYOUT' not found"))?,
+    )?;
+    map.set(0, layout, 0)
+        .map_err(|e| anyhow::anyhow!("PROCESS_ARGV_LAYOUT write failed: {e}"))
+}
+
+/// What the host said about each thing the kernel read of arguments needs,
+/// in the order they are asked.
+#[derive(Debug, Clone, Default)]
+pub struct ArgvWitnesses<'a> {
+    /// Why the BPF LSM cannot host a program here, `None` when it can.
+    pub lsm: Option<&'a str>,
+    /// The kfunc probe's verdict on the copy, and its reason.
+    pub probe: Option<(Option<bool>, Option<&'a str>)>,
+    /// Why the kernel refused the program when the object loaded.
+    pub refused: Option<&'a str>,
+}
+
+/// Why the kernel does not read arguments at exec, `None` when nothing stands
+/// in the way. A probe that could not answer is no reason: the load already
+/// asked the kernel, and its refusal is the witness that counts.
+#[must_use]
+pub fn argv_refusal(w: &ArgvWitnesses<'_>) -> Option<String> {
+    if let Some(reason) = w.lsm {
+        return Some(format!("the BPF LSM is not active: {reason}"));
+    }
+    if let Some((Some(false), reason)) = w.probe {
+        return Some(format!(
+            "the kernel does not offer bpf_copy_from_user_task_str: {}",
+            reason.unwrap_or("the probe was refused")
+        ));
+    }
+    w.refused
+        .map(|reason| format!("the kernel refused `{PROCESS_ARGV_PROGRAM}`: {reason}"))
+}
+
+/// Ask the host, then write the layout the program reads: `None` when the
+/// argument read can be attached, the reason it cannot otherwise.
+pub fn prepare_argv(loader: &mut EbpfLoader) -> Option<String> {
+    let lsm = super::lsm_probe::status();
+    let probe = super::kfunc_feature_probe::cached()
+        .and_then(|all| all.iter().find(|f| f.name == "copy_from_user_str"))
+        .map(|f| (f.usable, f.reason.as_deref()));
+    let witnesses = ArgvWitnesses {
+        lsm: if lsm.active {
+            None
+        } else {
+            Some(
+                lsm.reason
+                    .as_deref()
+                    .unwrap_or("bpf is not among the active modules"),
+            )
+        },
+        probe,
+        refused: loader.refused_program(PROCESS_ARGV_PROGRAM),
+    };
+    if let Some(reason) = argv_refusal(&witnesses) {
+        return Some(reason);
+    }
+    match resolve_argv_layout() {
+        Ok(layout) => write_argv_layout(loader.ebpf_mut(), &layout)
+            .err()
+            .map(|e| e.to_string()),
+        Err(reason) => Some(reason),
+    }
+}
 
 /// Where the running kernel keeps the four fields the parent walk reads.
 ///
@@ -152,6 +271,9 @@ pub fn write_layout(ebpf: &mut dyn MapStore, layout: &ProcessLayout) -> anyhow::
 /// `attached` false with a `reason` is the degraded case: the agent runs, the
 /// process table stays empty, and the sentence says which tracepoint the
 /// kernel refused and with what errno.
+// Each flag is a separate fact the endpoint reports as it stands, not a
+// state of one machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessTracingStatus {
     /// Both tracepoints are attached and the table is being filled.
@@ -162,6 +284,13 @@ pub struct ProcessTracingStatus {
     pub reason: Option<String>,
     /// Whether argv is being captured into the table.
     pub command_line: bool,
+    /// Whether the kernel reads the arguments at exec. False means they are
+    /// read from `/proc/<pid>/cmdline` afterwards, which a process that has
+    /// already exited leaves empty.
+    pub command_line_kernel: bool,
+    /// Why the kernel does not read the arguments, in one sentence. `None`
+    /// when it does, or when command lines are not kept at all.
+    pub command_line_reason: Option<String>,
     /// Whether the kernel reads each process's parent and start time. False
     /// when the layout could not be read from BTF, in which case the parent
     /// comes from `/proc` after the fact and forks are not followed.
@@ -195,11 +324,14 @@ pub fn status() -> ProcessTracingStatus {
         .clone()
 }
 
-/// Holds the tracepoint links alive. Dropping it detaches both programs,
+/// Holds the tracepoint links alive. Dropping it detaches every program,
 /// which is what a reload that turns the table off does.
 #[derive(Default)]
 pub struct ProcessTracingAttacher {
     links: Vec<OwnedFd>,
+    /// The argument read at exec, held apart: losing it costs the kernel's
+    /// command line and nothing else.
+    argv_link: Option<OwnedFd>,
 }
 
 impl ProcessTracingAttacher {
@@ -212,13 +344,15 @@ impl ProcessTracingAttacher {
     ///
     /// Returns the status rather than an error: no caller treats a refused
     /// tracepoint as fatal, and a `Result` would invite one to.
-    /// `command_line` only travels into the status, so the endpoint can say
-    /// whether argv is being kept without the reader going to the config.
-    /// `lineage_reason` is why the layout was not written, `None` when it was.
+    /// `command_line` says whether argv is kept; when it is and
+    /// `argv_refusal` is `None` ([`prepare_argv`]), the argument read is
+    /// attached after the tracepoints. `lineage_reason` is why the layout was
+    /// not written, `None` when it was.
     pub fn attach_all(
         &mut self,
         loader: &EbpfLoader,
         command_line: bool,
+        argv_refusal: Option<String>,
         lineage_reason: Option<String>,
     ) -> ProcessTracingStatus {
         let mut attached = Vec::with_capacity(PROCESS_HOOKS.len());
@@ -233,6 +367,7 @@ impl ProcessTracingAttacher {
                     // is worse than neither: the table would fill with dead
                     // pids and name the wrong binary on a reused one.
                     self.links.clear();
+                    self.argv_link = None;
                     warn!(
                         program,
                         tracepoint,
@@ -244,6 +379,8 @@ impl ProcessTracingAttacher {
                         tracepoints: Vec::new(),
                         reason: Some(reason),
                         command_line,
+                        command_line_kernel: false,
+                        command_line_reason: None,
                         lineage: false,
                         lineage_reason: lineage_reason.clone(),
                     };
@@ -252,21 +389,51 @@ impl ProcessTracingAttacher {
                 }
             }
         }
+        let command_line_reason = if command_line {
+            self.attach_argv(loader, argv_refusal).err()
+        } else {
+            self.argv_link = None;
+            None
+        };
+        let command_line_kernel = self.argv_link.is_some();
+        if let Some(reason) = &command_line_reason {
+            warn!(
+                reason,
+                "arguments read from /proc after the exec, not by the kernel at exec"
+            );
+        }
         let lineage = lineage_reason.is_none();
         info!(
             tracepoints = attached.len(),
-            command_line, lineage, "process tracing attached"
+            command_line, command_line_kernel, lineage, "process tracing attached"
         );
         let status = ProcessTracingStatus {
             attached: true,
             tracepoints: attached,
             reason: None,
             command_line,
+            command_line_kernel,
+            command_line_reason,
             lineage,
             lineage_reason,
         };
         publish_status(status.clone());
         status
+    }
+
+    /// Attach the argument read at exec, unless `refusal` says why not.
+    fn attach_argv(&mut self, loader: &EbpfLoader, refusal: Option<String>) -> Result<(), String> {
+        self.argv_link = None;
+        if let Some(reason) = refusal {
+            return Err(reason);
+        }
+        let prog_fd = loader.program_fd(PROCESS_ARGV_PROGRAM).ok_or_else(|| {
+            format!("program `{PROCESS_ARGV_PROGRAM}` is not in the loaded object")
+        })?;
+        let link = super::kfunc_attach::attach_lsm(PROCESS_ARGV_PROGRAM, prog_fd)
+            .map_err(|e| e.to_string())?;
+        self.argv_link = Some(link);
+        Ok(())
     }
 
     /// Attach one program to its tracepoint. There is nothing per-attacher
@@ -284,10 +451,11 @@ impl ProcessTracingAttacher {
 
     /// Detach every tracepoint, leaving the agent running with no table.
     pub fn detach_all(&mut self) {
-        if self.links.is_empty() {
+        if self.links.is_empty() && self.argv_link.is_none() {
             return;
         }
         self.links.clear();
+        self.argv_link = None;
         info!("process tracing detached");
         publish_status(ProcessTracingStatus::default());
     }
@@ -308,6 +476,75 @@ mod tests {
         tracepoints.sort_unstable();
         tracepoints.dedup();
         assert_eq!(tracepoints.len(), PROCESS_HOOKS.len());
+    }
+
+    #[test]
+    fn the_argument_read_is_attached_where_every_witness_allows_it() {
+        assert_eq!(argv_refusal(&ArgvWitnesses::default()), None);
+        let unknown = ArgvWitnesses {
+            probe: Some((None, Some("it needs CAP_BPF"))),
+            ..ArgvWitnesses::default()
+        };
+        assert_eq!(
+            argv_refusal(&unknown),
+            None,
+            "a probe with no answer is no reason"
+        );
+        let confirmed = ArgvWitnesses {
+            probe: Some((Some(true), None)),
+            ..ArgvWitnesses::default()
+        };
+        assert_eq!(argv_refusal(&confirmed), None);
+    }
+
+    #[test]
+    fn the_first_witness_against_the_argument_read_is_the_reason_given() {
+        let all = ArgvWitnesses {
+            lsm: Some("bpf is not in lsm="),
+            probe: Some((Some(false), Some("not declared"))),
+            refused: Some("invalid argument"),
+        };
+        assert_eq!(
+            argv_refusal(&all).as_deref(),
+            Some("the BPF LSM is not active: bpf is not in lsm=")
+        );
+        let probe = ArgvWitnesses {
+            lsm: None,
+            ..all.clone()
+        };
+        assert_eq!(
+            argv_refusal(&probe).as_deref(),
+            Some("the kernel does not offer bpf_copy_from_user_task_str: not declared")
+        );
+        let refused = ArgvWitnesses {
+            lsm: None,
+            probe: None,
+            ..all
+        };
+        assert_eq!(
+            argv_refusal(&refused).as_deref(),
+            Some("the kernel refused `process_exec_argv`: invalid argument")
+        );
+    }
+
+    #[test]
+    fn the_argument_read_is_the_one_program_the_object_may_lose() {
+        assert_eq!(PROCESS_OPTIONAL_PROGRAMS, &[PROCESS_ARGV_PROGRAM]);
+        assert!(
+            PROCESS_HOOKS
+                .iter()
+                .all(|(p, _)| *p != PROCESS_ARGV_PROGRAM)
+        );
+    }
+
+    #[test]
+    fn the_running_kernel_describes_the_argument_read() {
+        if !std::path::Path::new("/sys/kernel/btf/vmlinux").exists() {
+            return;
+        }
+        let layout = resolve_argv_layout().expect("linux_binprm carries p and argc");
+        assert_eq!(layout.valid, 1);
+        assert_ne!(layout.binprm_p, layout.binprm_argc);
     }
 
     #[test]
@@ -360,6 +597,8 @@ mod tests {
             tracepoints: vec!["sched_process_exec".to_string()],
             reason: None,
             command_line: true,
+            command_line_kernel: true,
+            command_line_reason: None,
             lineage: true,
             lineage_reason: None,
         };
@@ -378,6 +617,8 @@ mod tests {
             tracepoints: vec!["sched_process_exec".to_string()],
             reason: None,
             command_line: false,
+            command_line_kernel: false,
+            command_line_reason: None,
             lineage: true,
             lineage_reason: None,
         };

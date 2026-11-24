@@ -2995,6 +2995,9 @@ pub struct DnsRuleReport {
 
 /// What became of the two process tracepoints. Defaulted on decode, so an
 /// older agent that reports none still answers this command.
+// Each flag is a separate fact reported as it stands, not a state of one
+// machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Deserialize, Serialize, Default)]
 pub struct ProcessTracingReport {
     pub attached: bool,
@@ -3004,6 +3007,10 @@ pub struct ProcessTracingReport {
     pub reason: Option<String>,
     #[serde(default)]
     pub command_line: bool,
+    #[serde(default)]
+    pub command_line_kernel: bool,
+    #[serde(default)]
+    pub command_line_reason: Option<String>,
     #[serde(default)]
     pub lineage: bool,
     #[serde(default)]

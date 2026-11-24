@@ -1347,6 +1347,15 @@ pub async fn cmd_processes_list(
     println!("Process table");
     println!("  Tracepoints:  {}", yes_no(resp.tracing.attached));
     println!("  Command line: {}", yes_no(resp.tracing.command_line));
+    if resp.tracing.command_line {
+        println!(
+            "  Read at exec: {}",
+            yes_no(resp.tracing.command_line_kernel)
+        );
+    }
+    if let Some(reason) = &resp.tracing.command_line_reason {
+        println!("  From /proc:   {reason}");
+    }
     if let Some(reason) = &resp.tracing.reason {
         println!("  Reason:       {reason}");
     }
@@ -6231,6 +6240,15 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
         "  Cmdline:    {}",
         yes_no(resp.process_tracing.command_line)
     );
+    if resp.process_tracing.command_line {
+        println!(
+            "  At exec:    {}",
+            yes_no(resp.process_tracing.command_line_kernel)
+        );
+    }
+    if let Some(reason) = &resp.process_tracing.command_line_reason {
+        println!("  From /proc: {reason}");
+    }
     if !resp.process_tracing.tracepoints.is_empty() {
         println!(
             "  Hooks:      {}",

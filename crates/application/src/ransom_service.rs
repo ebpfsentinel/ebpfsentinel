@@ -1059,6 +1059,7 @@ mod tests {
             start_ns: Some(u64::from(pid)),
             parent_pid: parent,
             parent_start_ns: parent.map(u64::from),
+            command_line: None,
         }
     }
 

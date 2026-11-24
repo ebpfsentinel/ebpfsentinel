@@ -304,7 +304,13 @@ impl ProcessTableService {
             };
         }
 
-        if let Some(reader) = &self.details
+        // The kernel's copy of the arguments wins over `/proc`: it was read
+        // from the new image before the process could exit or rewrite its
+        // own argv, and `/proc` stays the source where the kernel read none.
+        let mut command_line = event.command_line.filter(|_| self.capture_command_line);
+        let read_proc = entry.parent_pid.is_none() || command_line.is_none();
+        if read_proc
+            && let Some(reader) = &self.details
             && let Some(details) = reader.read_details(pid)
         {
             // The kernel's parent wins: it was read before the parent had a
@@ -312,15 +318,15 @@ impl ProcessTableService {
             if entry.parent_pid.is_none() {
                 entry.parent_pid = details.parent_pid;
             }
-            // Redacted here, at the one place argv enters the table, so a
-            // secret matched by the closed list never reaches the table, an
-            // alert, a freeze or a screen.
-            if self.capture_command_line {
-                entry.command_line = details
-                    .command_line
-                    .map(|line| domain::process::redact::redact_command_line(&line));
+            if self.capture_command_line && command_line.is_none() {
+                command_line = details.command_line;
             }
         }
+        // Redacted here, at the one place argv enters the table, whichever
+        // source it came from, so a secret matched by the closed list never
+        // reaches the table, an alert, a freeze or a screen.
+        entry.command_line =
+            command_line.map(|line| domain::process::redact::redact_command_line(&line));
 
         entry.container = self.resolve_container(pid, event.cgroup_id).await;
 
@@ -977,6 +983,7 @@ mod tests {
             start_ns: None,
             parent_pid: None,
             parent_start_ns: None,
+            command_line: None,
         }
     }
 
@@ -1088,6 +1095,7 @@ mod tests {
             start_ns: None,
             parent_pid: None,
             parent_start_ns: None,
+            command_line: None,
         }
     }
 
@@ -1215,6 +1223,30 @@ mod tests {
             on.get(42).unwrap().command_line.as_deref(),
             Some("curl -u user:[redacted] https://example.test")
         );
+    }
+
+    #[tokio::test]
+    async fn the_kernel_copy_of_the_arguments_wins_and_is_redacted_the_same_way() {
+        let on = ProcessTableService::new(16, true).with_details(Arc::new(FixedDetails));
+        let mut event = exec(42, 1);
+        event.command_line = Some("mysql --password=hunter2 -h db".to_string());
+        on.apply(event).await;
+        let entry = on.get(42).unwrap();
+        assert_eq!(
+            entry.command_line.as_deref(),
+            Some("mysql --password=[redacted] -h db")
+        );
+        // The parent still comes from `/proc` where the kernel gave none.
+        assert_eq!(entry.parent_pid, Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_kernel_copy_of_the_arguments_is_dropped_while_capture_is_off() {
+        let off = ProcessTableService::new(16, false).with_details(Arc::new(FixedDetails));
+        let mut event = exec(42, 1);
+        event.command_line = Some("curl -s https://example.test".to_string());
+        off.apply(event).await;
+        assert!(off.get(42).unwrap().command_line.is_none());
     }
 
     #[tokio::test]

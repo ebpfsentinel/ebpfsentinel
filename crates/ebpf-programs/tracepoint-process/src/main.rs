@@ -30,19 +30,23 @@ use aya_ebpf::{
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
         bpf_get_current_task, bpf_get_current_uid_gid, bpf_ktime_get_boot_ns,
-        bpf_probe_read_kernel,
+        bpf_probe_read_kernel, generated::bpf_get_current_task_btf,
     },
-    macros::{btf_map, raw_tracepoint},
-    programs::RawTracePointContext,
+    macros::{btf_map, lsm, raw_tracepoint},
+    programs::{LsmContext, RawTracePointContext},
 };
 use ebpf_common::process::{
+    PROCESS_ARGV_BOUND, PROCESS_ARGV_CHUNK, PROCESS_ARGV_MAX_READS, PROCESS_EVENT_ARGV,
     PROCESS_EVENT_EXEC, PROCESS_EVENT_EXIT, PROCESS_EVENT_FORK, PROCESS_EVENTS_RINGBUF_BYTES,
-    PROCESS_METRIC_COUNT, PROCESS_METRIC_DROPPED, PROCESS_METRIC_EXEC, PROCESS_METRIC_EXIT,
-    PROCESS_METRIC_FORK, PROCESS_METRIC_OUTSIDE_NAMESPACE, PROCESS_METRIC_THREAD_EXIT,
-    PROCESS_METRIC_THREAD_FORK, PROCESS_METRIC_UNRESOLVED, PROCESS_PID_NS_LEVELS,
-    PROCESS_UPID_SIZE, ProcessEvent, ProcessLayout,
+    PROCESS_METRIC_ARGV, PROCESS_METRIC_ARGV_LOST, PROCESS_METRIC_COUNT, PROCESS_METRIC_DROPPED,
+    PROCESS_METRIC_EXEC, PROCESS_METRIC_EXIT, PROCESS_METRIC_FORK,
+    PROCESS_METRIC_OUTSIDE_NAMESPACE, PROCESS_METRIC_THREAD_EXIT, PROCESS_METRIC_THREAD_FORK,
+    PROCESS_METRIC_UNRESOLVED, PROCESS_PID_NS_LEVELS, PROCESS_UPID_SIZE, ProcessArgv,
+    ProcessArgvLayout, ProcessEvent, ProcessLayout,
 };
-use ebpf_helpers::increment_metric;
+use ebpf_helpers::kfuncs::{bpf_copy_from_user_task_str, task_struct};
+use ebpf_helpers::ringbuf::avail_data;
+use ebpf_helpers::{increment_metric, opaque_usize};
 
 ebpf_helpers::pidns_view!();
 
@@ -59,7 +63,8 @@ static PROCESS_EVENTS: RingBuf<ProcessEvent, { PROCESS_EVENTS_RINGBUF_BYTES as u
     RingBuf::new();
 
 /// Per-CPU process counters. Index: 0=exec, 1=exit, 2=dropped, 3=thread_exit,
-/// 4=fork, 5=thread_fork, 6=unresolved, 7=outside_namespace.
+/// 4=fork, 5=thread_fork, 6=unresolved, 7=outside_namespace, 8=argv,
+/// 9=argv_lost.
 #[btf_map]
 static PROCESS_METRICS: PerCpuArray<u64, { PROCESS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
@@ -67,6 +72,17 @@ static PROCESS_METRICS: PerCpuArray<u64, { PROCESS_METRIC_COUNT as usize }> = Pe
 /// userspace from BTF before the tracepoints are attached.
 #[btf_map]
 static PROCESS_LAYOUT: Array<ProcessLayout, 1> = Array::new();
+
+/// Where the running kernel keeps the fields of `linux_binprm` the argument
+/// read needs, written by userspace from BTF before the hook is attached.
+#[btf_map]
+static PROCESS_ARGV_LAYOUT: Array<ProcessArgvLayout, 1> = Array::new();
+
+/// Unread bytes above which an argument record is not sent: half the ring.
+/// The exec, fork and exit records keep the other half, so a burst of
+/// starts costs the table command lines, which `/proc` can still answer,
+/// before it costs it processes, which nothing else reports.
+const ARGV_RING_SHARE: u64 = PROCESS_EVENTS_RINGBUF_BYTES as u64 / 2;
 
 // ── Programs ────────────────────────────────────────────────────────
 
@@ -91,6 +107,124 @@ pub fn process_exec(_ctx: RawTracePointContext) -> i32 {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_EXEC);
     }
     0
+}
+
+/// The arguments of a task that is replacing its image, read from the new
+/// image itself.
+///
+/// `bprm_committed_creds` runs in the exec'ing task once its new memory is
+/// in place and before the exec tracepoint fires, so this record reaches the
+/// ring ahead of the exec record it belongs to. The strings sit where
+/// `linux_binprm.p` points, the argument vector first and contiguous, each
+/// argument ending in a NUL: the same bytes `/proc/<pid>/cmdline` shows once
+/// the image runs, read before the image can exit or rewrite them.
+///
+/// `bpf_copy_from_user_task_str` may fault a page in, which is why the
+/// program is sleepable and why it is an LSM hook rather than the raw
+/// tracepoint the exec record comes from. It decides nothing: the hook
+/// returns nothing the kernel reads.
+#[lsm(hook = "bprm_committed_creds", sleepable)]
+pub fn process_exec_argv(ctx: LsmContext) -> i32 {
+    let pid_tgid = current_pid_tgid();
+    if pid_tgid == 0 {
+        return 0;
+    }
+    if argv(&ctx, pid_tgid) {
+        increment_metric!(PROCESS_METRICS, PROCESS_METRIC_ARGV);
+    } else {
+        increment_metric!(PROCESS_METRICS, PROCESS_METRIC_ARGV_LOST);
+    }
+    0
+}
+
+/// Read and send the arguments of the calling task, returning whether a
+/// record went.
+#[inline(always)]
+fn argv(ctx: &LsmContext, pid_tgid: u64) -> bool {
+    let Some(argv_layout) = PROCESS_ARGV_LAYOUT.get(0).copied().filter(|l| l.valid != 0) else {
+        return false;
+    };
+    let bprm = ctx.arg::<u64>(0);
+    let (mut at_user, read_p) = read::<u64>(bprm, argv_layout.binprm_p);
+    let (argc, read_argc) = read::<i32>(bprm, argv_layout.binprm_argc);
+    if !read_p || !read_argc || at_user == 0 {
+        return false;
+    }
+    let argc = if argc > 0 { argc as u32 } else { 0 };
+    if avail_data(&PROCESS_EVENTS) > ARGV_RING_SHARE {
+        return false;
+    }
+    let Some(mut entry) = PROCESS_EVENTS.reserve_untyped::<ProcessArgv>(0) else {
+        increment_metric!(PROCESS_METRICS, PROCESS_METRIC_DROPPED);
+        return false;
+    };
+    let record = entry.as_mut_ptr();
+    let mut header = current_event(PROCESS_EVENT_ARGV, pid_tgid as u32, (pid_tgid >> 32) as u32);
+    if let Some(layout) = layout() {
+        // SAFETY: a helper with no argument; the pointer it returns is only
+        // handed back to `bpf_probe_read_kernel` through `read`.
+        let task = unsafe { bpf_get_current_task() };
+        header.start_ns = start_of(task, &layout).0;
+    }
+    // SAFETY: a helper with no argument returning the calling task as the
+    // trusted pointer the kfunc below requires.
+    let task = unsafe { bpf_get_current_task_btf() }.cast::<task_struct>();
+
+    let mut off = 0usize;
+    let mut args_read = 0u32;
+    let mut reads = 0u32;
+    while reads < PROCESS_ARGV_MAX_READS && args_read < argc {
+        // Through a barrier so the compiler keeps the bound check below on
+        // the very register the destination is computed from.
+        let at = opaque_usize(off);
+        if at >= PROCESS_ARGV_BOUND as usize {
+            break;
+        }
+        // SAFETY: `record` is the reservation of a whole `ProcessArgv`,
+        // whose `bytes` hold the bound plus one chunk, and `at` is below
+        // the bound, so the chunk the kfunc may write stays inside them.
+        let n = unsafe {
+            let dst = (*record).bytes.as_mut_ptr().add(at);
+            bpf_copy_from_user_task_str(
+                dst.cast(),
+                PROCESS_ARGV_CHUNK,
+                at_user as *const core::ffi::c_void,
+                task,
+                0,
+            )
+        };
+        if n <= 0 || n as u32 > PROCESS_ARGV_CHUNK {
+            break;
+        }
+        let n = n as usize;
+        if n < PROCESS_ARGV_CHUNK as usize {
+            // A whole argument and its NUL.
+            args_read += 1;
+            off = at + n;
+            at_user += n as u64;
+        } else {
+            // The chunk filled: the argument goes on where the read stopped,
+            // over the NUL the kfunc put at the end of the chunk.
+            off = at + n - 1;
+            at_user += (n - 1) as u64;
+        }
+        reads += 1;
+    }
+    if off == 0 {
+        entry.discard(0);
+        return false;
+    }
+    // SAFETY: `record` is the live reservation; every field written here is
+    // inside it.
+    unsafe {
+        (*record).header = header;
+        (*record).argc = argc;
+        (*record).args_read = args_read;
+        (*record).len = off as u32;
+        (*record)._pad = 0;
+    }
+    entry.submit(0);
+    true
 }
 
 /// A task created another. `TP_PROTO(parent, child)`, run in the parent.
