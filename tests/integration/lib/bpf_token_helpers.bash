@@ -128,7 +128,12 @@ bpf_token_run() {
         for _fd in $(seq 3 30); do eval "exec ${_fd}>&-" 2>/dev/null || true; done
         export EBPFSENTINEL_BPFFS="$BPF_TOKEN_BPFFS"
         export EBPFSENTINEL_WARDEN_SOCK="$BPF_TOKEN_WARDEN_SOCK"
-        exec timeout "$secs" "$BPF_TOKEN_AGENT_STAGE" --config "$config" >>"$BPF_TOKEN_LOG" 2>&1
+        # The host's /sys/fs/bpf is root's, so the agent gets a private,
+        # world-writable one to pin in, as the unit file's
+        # TemporaryFileSystem=/sys/fs/bpf:mode=1777 gives it.
+        exec unshare --mount --propagation private sh -c \
+            'mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec "$@"' sh \
+            timeout "$secs" "$BPF_TOKEN_AGENT_STAGE" --config "$config" >>"$BPF_TOKEN_LOG" 2>&1
     ) || true
 
     kill "$BPF_TOKEN_WARDEN_PID" 2>/dev/null || true

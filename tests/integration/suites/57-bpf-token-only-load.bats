@@ -40,6 +40,9 @@ setup_file() {
 
     export DATA_DIR="/tmp/ebpfsentinel-bpf-token-data-$$"
     mkdir -p "$DATA_DIR"
+    # The agent drops to 65534 before its user namespace, so the directory
+    # it keeps its lock and stores in is that id's, as on a host.
+    chown 65534:65534 "$DATA_DIR"
 
     # A veth the agent can attach XDP/TC to. The harness shares the host network
     # namespace, so an interface created here is visible to the agent.

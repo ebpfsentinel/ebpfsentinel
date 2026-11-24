@@ -103,7 +103,7 @@ _run_copy() {
 _table_hash() {
     local i hash=""
     for i in $(seq 1 20); do
-        hash="$(api_get "/api/v1/processes/$1" 2>/dev/null | jq -r '.exe_hash // empty')"
+        hash="$(api_get "/api/v1/processes/$1" 2>/dev/null | jq -r '.identity.exe_hash // empty')"
         [ -n "$hash" ] && break
         sleep 0.5
     done

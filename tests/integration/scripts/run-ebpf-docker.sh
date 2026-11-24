@@ -155,7 +155,7 @@ docker run --rm \
         add-apt-repository -y universe >/dev/null 2>&1 || true
         apt-get update -qq >/dev/null 2>&1
         apt-get install -y -qq \
-            curl jq iproute2 iputils-ping ncat nmap procps bc openssl dnsutils bpftool \
+            curl jq iproute2 iputils-ping ncat nmap procps bc openssl dnsutils bpftool ethtool \
             >/dev/null 2>&1 || true
 
         # Install bats (not in default Ubuntu repos)

@@ -371,6 +371,13 @@ start_ebpf_agent() {
         # controlling-terminal EOF.
         if [ -x "$warden" ]; then
             echo "  [strategy] eBPF via warden broker: $warden" >&2
+            # The state directory the agent writes captures in, handed to it
+            # by the warden as the chart's init container does. A captures
+            # directory another suite created as root is given back too.
+            "$warden" prepare-state /var/lib/ebpfsentinel --uid 65534 \
+                >>"${AGENT_LOG_FILE}.warden" 2>&1 || true
+            [ ! -d /var/lib/ebpfsentinel/captures ] \
+                || chown 65534:65534 /var/lib/ebpfsentinel/captures 2>/dev/null || true
             # The agent execs itself inside a child user namespace, where any path
             # component owned by an unmapped uid (e.g. the 0750 /home/<user> build
             # tree) is inaccessible - to both exec and read. Stage the agent binary
@@ -741,7 +748,13 @@ wait_for_ebpf_loaded() {
         body="$(api_get /readyz 2>/dev/null)" || true
         local loaded
         loaded="$(echo "$body" | jq -r '.ebpf_loaded' 2>/dev/null)" || true
-        if [ "$loaded" = "true" ]; then
+        # /readyz flips on the xdp-firewall alone, while the process table,
+        # the LSM objects and the uprobe watcher come up after it: a suite
+        # reading any of them waits for the line start-up ends on.
+        if [ "$loaded" = "true" ] && {
+            [ ! -f "${AGENT_LOG_FILE:-}" ] \
+                || grep -q "agent ready, waiting for shutdown signal" "$AGENT_LOG_FILE"
+        }; then
             return 0
         fi
         # /readyz reports {"status":"not_ready","ebpf_loaded":false} both while

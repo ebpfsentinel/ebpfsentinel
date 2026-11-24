@@ -47,14 +47,14 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         return 1
     }
-    wait_for_uprobe_link ssl_write 20
-
     openssl req -x509 -newkey rsa:2048 -keyout "$DATA_DIR/tls.key" \
         -out "$DATA_DIR/tls.crt" -days 1 -nodes -subj '/CN=localhost' 2>/dev/null
     nohup openssl s_server -accept 9445 -cert "$DATA_DIR/tls.crt" \
         -key "$DATA_DIR/tls.key" -www >/dev/null 2>&1 &
     echo $! >"$DATA_DIR/tls_server.pid"
-    sleep 1
+    # The probes attach to a library some process has mapped: the server
+    # above is that process, so the link is awaited once it runs.
+    wait_for_uprobe_link ssl_write 20
 }
 
 teardown_file() {
@@ -163,6 +163,9 @@ _wait_for_more_alerts_than() {
     for size in 4095 16385; do
         sed "s/^  record_bytes: 16384$/  record_bytes: ${size}/" "$PREPARED_CONFIG" >"$bad"
         sed -i 's/^  http_port: 8080$/  http_port: 18080/' "$bad"
+        # The agent refuses a world-readable configuration before it reads
+        # a key, so the copy keeps the mode the prepared one has.
+        chmod 640 "$bad"
         run timeout 20 "$agent" --config "$bad"
         [ "$status" -ne 0 ]
         [[ "$output" == *"dlp.record_bytes"* ]]
