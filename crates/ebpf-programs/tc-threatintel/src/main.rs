@@ -98,10 +98,35 @@ fn reads_slot_b() -> bool {
     }
 }
 
+/// One lookup's answer. Every byte is written on every path: the payload of
+/// an `Option` left at `None` is undefined to LLVM, which then leaves the
+/// register carrying it unwritten where the two inlined lookups share their
+/// tail, and the verifier refuses a read of a register nothing wrote.
+#[derive(Clone, Copy)]
+struct Hit {
+    found: bool,
+    value: ThreatIntelValue,
+}
+
+const MISS: Hit = Hit {
+    found: false,
+    value: ThreatIntelValue {
+        action: 0,
+        feed_id: 0,
+        confidence: 0,
+        threat_type: 0,
+    },
+};
+
+#[inline(always)]
+fn found(value: ThreatIntelValue) -> Hit {
+    Hit { found: true, value }
+}
+
 /// The indicator deciding for one IPv4 address: the address itself when it
 /// is listed, otherwise the longest range holding it.
 #[inline(always)]
-fn lookup_v4(slot_b: bool, gates: u32, ip: u32) -> Option<ThreatIntelValue> {
+fn lookup_v4(slot_b: bool, gates: u32, ip: u32) -> Hit {
     if !feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4) {
         let key = ThreatIntelKey { ip };
         let hit = if slot_b {
@@ -110,7 +135,7 @@ fn lookup_v4(slot_b: bool, gates: u32, ip: u32) -> Option<ThreatIntelValue> {
             unsafe { THREATINTEL_IOCS_A.get(&key) }
         };
         if let Some(v) = hit {
-            return Some(*v);
+            return found(*v);
         }
     }
     if !feature_empty(gates, FW_EMPTY_THREAT_NETS_V4) {
@@ -121,15 +146,15 @@ fn lookup_v4(slot_b: bool, gates: u32, ip: u32) -> Option<ThreatIntelValue> {
             THREATINTEL_NETS_A.get(&key)
         };
         if let Some(v) = hit {
-            return Some(*v);
+            return found(*v);
         }
     }
-    None
+    MISS
 }
 
 /// The indicator deciding for one IPv6 address; see [`lookup_v4`].
 #[inline(always)]
-fn lookup_v6(slot_b: bool, gates: u32, addr: &[u8; 16]) -> Option<ThreatIntelValue> {
+fn lookup_v6(slot_b: bool, gates: u32, addr: &[u8; 16]) -> Hit {
     if !feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6) {
         let key = ThreatIntelKeyV6 {
             ip: ipv6_addr_to_u32x4(addr),
@@ -140,7 +165,7 @@ fn lookup_v6(slot_b: bool, gates: u32, addr: &[u8; 16]) -> Option<ThreatIntelVal
             unsafe { THREATINTEL_IOCS_V6_A.get(&key) }
         };
         if let Some(v) = hit {
-            return Some(*v);
+            return found(*v);
         }
     }
     if !feature_empty(gates, FW_EMPTY_THREAT_NETS_V6) {
@@ -151,22 +176,19 @@ fn lookup_v6(slot_b: bool, gates: u32, addr: &[u8; 16]) -> Option<ThreatIntelVal
             THREATINTEL_NETS_V6_A.get(&key)
         };
         if let Some(v) = hit {
-            return Some(*v);
+            return found(*v);
         }
     }
-    None
+    MISS
 }
 
 /// The stronger of the two ends' verdicts: a drop wins over an alert.
 #[inline(always)]
-fn stronger(
-    src: Option<ThreatIntelValue>,
-    dst: Option<ThreatIntelValue>,
-) -> Option<ThreatIntelValue> {
-    match (src, dst) {
-        (None, None) => None,
-        (Some(v), None) | (None, Some(v)) => Some(v),
-        (Some(s), Some(d)) => Some(if d.action > s.action { d } else { s }),
+fn stronger(src: Hit, dst: Hit) -> Hit {
+    if dst.found && (!src.found || dst.value.action > src.value.action) {
+        dst
+    } else {
+        src
     }
 }
 
@@ -326,13 +348,15 @@ fn process_threatintel_v4(
 
     // Source and destination: the address table, then the range trie, in
     // the slot read above; the stronger action of the two wins.
-    let Some(matched) = stronger(
+    let hit = stronger(
         lookup_v4(slot_b, gates, src_ip),
         lookup_v4(slot_b, gates, dst_ip),
-    ) else {
+    );
+    if !hit.found {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
-    };
+    }
+    let matched = hit.value;
 
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
@@ -386,13 +410,15 @@ fn process_threatintel_v6(
     };
 
     // IOC lookup: bloom filter pre-check for IPv6.
-    let Some(matched) = stronger(
+    let hit = stronger(
         lookup_v6(slot_b, gates, &src_raw),
         lookup_v6(slot_b, gates, &dst_raw),
-    ) else {
+    );
+    if !hit.found {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
-    };
+    }
+    let matched = hit.value;
 
     let src_addr = ipv6_addr_to_u32x4(&src_raw);
     let dst_addr = ipv6_addr_to_u32x4(&dst_raw);
