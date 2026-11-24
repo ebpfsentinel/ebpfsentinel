@@ -130,13 +130,6 @@ echo "Suites:  ${SUITES[*]}"
 echo "Image:   ${DOCKER_IMAGE}"
 echo ""
 
-# ── Detect host bpftool ───────────────────────────────────────────
-BPFTOOL_MOUNT=""
-HOST_BPFTOOL="$(command -v bpftool 2>/dev/null || true)"
-if [ -n "$HOST_BPFTOOL" ] && [ -x "$HOST_BPFTOOL" ]; then
-    BPFTOOL_MOUNT="-v ${HOST_BPFTOOL}:/usr/sbin/bpftool:ro"
-fi
-
 # ── Run in Docker ─────────────────────────────────────────────────
 # shellcheck disable=SC2086
 docker run --rm \
@@ -148,7 +141,7 @@ docker run --rm \
     -v /sys/kernel/btf:/sys/kernel/btf:ro \
     -v /sys/kernel/debug:/sys/kernel/debug:ro \
     -v "${PROJECT_ROOT}:/workspace:ro" \
-    $BPFTOOL_MOUNT \
+    -v /sys/kernel/security:/sys/kernel/security:ro \
     -w /workspace \
     -e AGENT_BIN=/workspace/target/release/ebpfsentinel-agent \
     -e EBPF_PROGRAM_DIR=/workspace/target/bpfel-unknown-none/release \
@@ -162,7 +155,7 @@ docker run --rm \
         add-apt-repository -y universe >/dev/null 2>&1 || true
         apt-get update -qq >/dev/null 2>&1
         apt-get install -y -qq \
-            curl jq iproute2 iputils-ping ncat nmap procps bc openssl dnsutils \
+            curl jq iproute2 iputils-ping ncat nmap procps bc openssl dnsutils bpftool \
             >/dev/null 2>&1 || true
 
         # Install bats (not in default Ubuntu repos)
