@@ -30,7 +30,7 @@ use ebpf_helpers::checksum::{
 };
 use ebpf_helpers::net::{Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP};
 use ebpf_helpers::trace::{self, NO_RULE, reason, stage};
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
+use ebpf_helpers::xdp::{frame_len, ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{
     eth::EthHdr,
@@ -132,7 +132,7 @@ static REJECT_SCRATCH: PerCpuArray<ScratchBuf, 1> = PerCpuArray::new();
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-#[xdp]
+#[xdp(frags)]
 pub fn xdp_firewall_reject(ctx: XdpContext) -> u32 {
     match try_reject(&ctx) {
         Ok(action) => action,
@@ -234,7 +234,7 @@ fn send_tcp_rst_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
     // Step 2: Truncate to fixed Eth(14) + IP(20) + TCP(20) = 54 bytes.
     // VLAN tag (if any) is stripped - the response is a clean packet.
     const RST4_LEN: usize = 14 + 20 + 20;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = RST4_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -328,7 +328,7 @@ fn send_tcp_rst_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Result<u32
 
     // Step 2: Truncate to fixed Eth(14) + IPv6(40) + TCP(20) = 74 bytes.
     const RST6_LEN: usize = 14 + 40 + 20;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = RST6_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -426,7 +426,7 @@ fn send_icmp_unreachable_v4(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> 
 
     // Step 2: Truncate to fixed Eth(14) + IP(20) + ICMP(8) + payload(28) = 70.
     const ICMP4_LEN: usize = 14 + 20 + 8 + 28;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = ICMP4_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -535,7 +535,7 @@ fn send_icmpv6_unreachable(ctx: &XdpContext, l3_off: usize, _l4_off: usize) -> R
 
     // Step 2: Truncate to fixed Eth(14) + IPv6(40) + ICMPv6(8) + payload(48) = 110.
     const ICMP6_LEN: usize = 14 + 40 + 8 + 48;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = ICMP6_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };

@@ -228,6 +228,7 @@ suite_profiles:
   "150": datapath
   "151": datapath
   "152": datapath
+  "153": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -1311,6 +1312,14 @@ coverage:
     notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
 
   - kind: capability
+    feature: xdp_pull_data
+    suites: ["86", "153"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "153 reads it active, attaches the firewall in driver mode on a 9000-byte veth and has a jumbo datagram dropped on a refused port and delivered whole elsewhere; a veth keeps the headers in the first buffer, so the pull itself is not made to fire"
+
+  - kind: capability
     feature: attribution
     suites: ["70"]
     topology: none
@@ -1560,6 +1569,15 @@ attack_suites:
     profile: datapath
     surfaces: ["xdp-ratelimit", "ddos"]
     notes: "A source completing its handshakes opens many times the half-open threshold one after another and is never refused; one past the threshold on SYNs a closed port reset is refused, then admitted again once its count has aged"
+
+  - suite: "153"
+    name: xdp-multi-buffer-frames
+    topology: none
+    lanes: ["local"]
+    kernel_min: "6.18"
+    profile: datapath
+    surfaces: ["xdp-firewall", "firewall"]
+    notes: "The XDP programs declare multi-buffer frames where the kernel lets them pull: on a 9000-byte veth the firewall attaches in driver mode, drops a jumbo datagram on a refused port and delivers one whole elsewhere, and publishes frags_pulled"
 
   - suite: "44"
     name: lb-dsr-maglev

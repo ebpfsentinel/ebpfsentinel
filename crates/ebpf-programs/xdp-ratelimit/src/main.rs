@@ -451,7 +451,7 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
 /// a body this large becomes a subprogram, the tail calls below then leave
 /// from a bpf-to-bpf callee rather than from the entry, and the x86 JIT of
 /// some kernels reads a stale tail-call counter there and oopses in softirq.
-#[xdp]
+#[xdp(frags)]
 #[inline(always)]
 pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
     let traced = trace::xdp(&ctx);

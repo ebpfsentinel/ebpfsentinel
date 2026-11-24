@@ -27,6 +27,7 @@ use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
 use super::signal_task::DirectSignalProbe;
 use super::workload_firewall_attach::CgroupLabelProbe;
+use super::xdp_pull_probe::XdpPullStatus;
 
 /// What to do where the BPF LSM is not active and the probe named no remedy.
 const LSM_BOOT_PARAMETER: &str =
@@ -304,6 +305,27 @@ pub fn file_kfunc_evidence(status: Option<&FileKfuncStatus>) -> Evidence {
     Evidence::Kfunc { declared, load }
 }
 
+/// The XDP pull probe's answer, restated as evidence.
+#[must_use]
+pub fn xdp_pull_evidence(status: Option<&XdpPullStatus>) -> Evidence {
+    let Some(status) = status else {
+        return Evidence::Kfunc {
+            declared: None,
+            load: Load::NotRun("startup has not run the XDP pull probe".to_string()),
+        };
+    };
+    let why = || status.reason.clone().unwrap_or_default();
+    let load = match status.loads {
+        Some(true) => Load::Loaded,
+        Some(false) => Load::Refused(why()),
+        None => Load::NotRun(why()),
+    };
+    Evidence::Kfunc {
+        declared: status.declared,
+        load,
+    }
+}
+
 /// One kfunc fact, restated as evidence.
 #[must_use]
 pub fn kfunc_feature_evidence(feature: &KfuncFeature) -> Evidence {
@@ -409,11 +431,12 @@ fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
         attribution_attach, bpf_guard, dlp_record, exec_network, file_kfunc_probe,
         kfunc_feature_probe, lsm_probe, process_attach, quarantine_map_manager, signal_attach,
-        tamper_guard, tcp_health, workload_firewall_attach, write_refusal,
+        tamper_guard, tcp_health, workload_firewall_attach, write_refusal, xdp_pull_probe,
     };
     match id {
         "bpf_lsm" => Some(lsm_evidence(lsm_probe::status())),
         "file_kfuncs" => Some(file_kfunc_evidence(file_kfunc_probe::cached())),
+        "xdp_pull_data" => Some(xdp_pull_evidence(xdp_pull_probe::cached())),
         "attribution" => {
             let s = attribution_attach::status();
             Some(attach_evidence(s.attached, s.reason))
@@ -613,6 +636,43 @@ mod tests {
         };
         assert_eq!(classify(file, false, &e), Some(Inactive::LsmInactive));
         assert_eq!(classify(file, true, &e), None);
+    }
+
+    #[test]
+    fn the_xdp_pull_is_active_only_where_its_probe_loaded() {
+        let pull = find("xdp_pull_data").expect("entry");
+        let loaded = xdp_pull_evidence(Some(&XdpPullStatus {
+            declared: Some(true),
+            loads: Some(true),
+            reason: None,
+        }));
+        assert_eq!(classify(pull, false, &loaded), None);
+
+        let undeclared = xdp_pull_evidence(Some(&XdpPullStatus {
+            declared: Some(false),
+            loads: Some(false),
+            reason: Some("this kernel does not declare bpf_xdp_pull_data".into()),
+        }));
+        assert_eq!(
+            classify(pull, false, &undeclared),
+            Some(Inactive::NotDeclared)
+        );
+
+        let refused = xdp_pull_evidence(Some(&XdpPullStatus {
+            declared: Some(true),
+            loads: Some(false),
+            reason: Some("the verifier said no".into()),
+        }));
+        assert_eq!(
+            classify(pull, false, &refused),
+            Some(Inactive::Refused("the verifier said no".into()))
+        );
+
+        let unprobed = xdp_pull_evidence(None);
+        assert_eq!(
+            classify(pull, false, &unprobed).expect("inactive").code(),
+            "not_probed"
+        );
     }
 
     #[test]

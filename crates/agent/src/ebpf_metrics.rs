@@ -103,6 +103,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "rejected"),
             (6, "mtu_exceeded"),
             (7, "reject_throttled"),
+            (8, "frags_pulled"),
         ],
         // The rate limiter counts what it let through rather than what it
         // recognised: slot 0 is incremented on every XDP_PASS, including the
@@ -403,6 +404,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "events_dropped"),
             (4, "total_seen"),
             (5, "mtu_exceeded"),
+            (6, "frags_pulled"),
         ],
         // The shaper's whole report: it emits no per-packet event, so there
         // is no `events_dropped` slot to read here.

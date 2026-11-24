@@ -170,6 +170,40 @@ fn is_optional_kfunc(name: &str) -> bool {
     OPTIONAL_KFUNCS.contains(&name)
 }
 
+/// How the XDP programs of an object load, decided once per load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct XdpLoadMode {
+    /// Loaded bound to a netdev, so the receive-metadata kfuncs resolve.
+    dev_bound: bool,
+    /// The host's verifier accepts `bpf_xdp_pull_data` in an XDP program
+    /// declaring multi-buffer frames (see [`super::xdp_pull_probe`]).
+    multi_buffer: bool,
+}
+
+impl XdpLoadMode {
+    /// Whether a call to `name` is replaced by `r0 = -EOPNOTSUPP` rather than
+    /// relocated: a receive-metadata kfunc off a bound device, and the pull
+    /// where the host refused it. The program's wrapper reads the non-zero
+    /// return as "not available here" and goes on as it did without it.
+    fn neutralizes(self, name: &str) -> bool {
+        (!self.dev_bound && is_dev_bound_metadata_kfunc(name))
+            || (!self.multi_buffer && name == super::xdp_pull_probe::XDP_PULL_KFUNC)
+    }
+
+    /// The flags an XDP program loads with. Where the pull is refused the
+    /// multi-buffer declaration goes with it, from every XDP program alike:
+    /// the kernel refuses a tail call between programs that disagree on it,
+    /// and a program declaring it on a host where it cannot pull would see
+    /// frames it cannot parse.
+    fn prog_flags(self, prog_type: u32, flags: u32) -> u32 {
+        if prog_type == BPF_PROG_TYPE_XDP && !self.multi_buffer {
+            flags & !BPF_F_XDP_HAS_FRAGS
+        } else {
+            flags
+        }
+    }
+}
+
 /// Errors surfaced while loading a kfunc-using program.
 #[derive(Debug, thiserror::Error)]
 pub enum KfuncLoaderError {
@@ -679,7 +713,18 @@ pub fn load_kfunc_programs<S: BuildHasher>(
         _ => None,
     };
 
-    let (targets, undeclared) = resolve_targets(resolver, &names)?;
+    let mode = XdpLoadMode {
+        dev_bound: dev_bound_ifindex.is_some(),
+        multi_buffer: super::xdp_pull_probe::usable(),
+    };
+    // A refused pull is never relocated, so it is not resolved either: the
+    // kernel it was refused on may not declare it at all.
+    let resolvable: Vec<String> = names
+        .iter()
+        .filter(|name| mode.multi_buffer || name.as_str() != super::xdp_pull_probe::XDP_PULL_KFUNC)
+        .cloned()
+        .collect();
+    let (targets, undeclared) = resolve_targets(resolver, &resolvable)?;
     let fd_array = build_fd_array(resolver, &targets)?;
 
     let program_meta = program_meta(elf, &obj, resolver)?;
@@ -719,12 +764,13 @@ pub fn load_kfunc_programs<S: BuildHasher>(
                 &names,
                 &targets,
                 &fd_array.module_slot,
-                dev_bound_ifindex.is_some(),
+                mode,
                 neutral,
             );
             insns
         };
         let insns = rewritten(&neutral);
+        let flags = mode.prog_flags(prog_type, flags);
 
         // Only XDP programs carry the device-bound metadata kfuncs; binding a
         // TC/uprobe program to a netdev would be meaningless (and rejected).
@@ -951,25 +997,27 @@ fn optional_kfunc_calls(insns: &[aya_obj::generated::bpf_insn], names: &[String]
 }
 
 /// Rewrite each kfunc-call sentinel in `insns` to its resolved `(btf_id,
-/// fd_array index)`. When `dev_bound` is false, device-bound-only metadata
-/// kfunc sites are instead neutralized to `r0 = -EOPNOTSUPP` so the program
-/// loads on a NIC without `xdp_metadata_ops` (the program's wrapper treats the
-/// non-zero return as "metadata unavailable"). A call to a kfunc named in
-/// `neutral` is neutralized the same way, whatever the device.
+/// fd_array index)`. A site [`XdpLoadMode::neutralizes`] is instead rewritten
+/// to `r0 = -EOPNOTSUPP`: off a bound device, the device-bound-only metadata
+/// kfuncs, so the program loads on a NIC without `xdp_metadata_ops` (the
+/// program's wrapper treats the non-zero return as "metadata unavailable");
+/// on a host that refused it, the pull, so the program never pulls. A call
+/// to a kfunc named in `neutral` is neutralized the same way, whatever the
+/// device.
 fn rewrite_kfunc_calls(
     insns: &mut [aya_obj::generated::bpf_insn],
     names: &[String],
     targets: &HashMap<String, KfuncTarget>,
     module_slot: &HashMap<String, i16>,
-    dev_bound: bool,
+    mode: XdpLoadMode,
     neutral: &[String],
 ) {
     for ins in insns {
         if ins.code == INSN_CALL && ins.src_reg() == BPF_PSEUDO_KFUNC_CALL {
             let idx = usize::try_from(ins.imm).expect("kfunc sentinel index is non-negative");
             let name = &names[idx];
-            if (!dev_bound && is_dev_bound_metadata_kfunc(name)) || neutral.contains(name) {
-                // Replace `call <metadata kfunc>` with `r0 = -EOPNOTSUPP`.
+            if mode.neutralizes(name) || neutral.contains(name) {
+                // Replace `call <kfunc>` with `r0 = -EOPNOTSUPP`.
                 ins.code = BPF_MOV64_IMM;
                 ins.set_dst_reg(0);
                 ins.set_src_reg(0);
@@ -1504,6 +1552,10 @@ pub(crate) const PROBE_TRACE_KPROBE_SESSION: u32 = bpf_attach_type::BPF_TRACE_KP
 pub(crate) const PROBE_PROG_TYPE_SYSCALL: u32 = bpf_prog_type::BPF_PROG_TYPE_SYSCALL as u32;
 /// `BPF_F_SLEEPABLE`, for the probes that build their own programs.
 pub(crate) const PROBE_F_SLEEPABLE: u32 = BPF_F_SLEEPABLE;
+/// `BPF_PROG_TYPE_XDP`, for the probes that build their own programs.
+pub(crate) const PROBE_PROG_TYPE_XDP: u32 = BPF_PROG_TYPE_XDP;
+/// `BPF_F_XDP_HAS_FRAGS`, for the probes that build their own programs.
+pub(crate) const PROBE_F_XDP_HAS_FRAGS: u32 = BPF_F_XDP_HAS_FRAGS;
 
 /// Load a probe program and close it at once.
 ///
@@ -2916,7 +2968,17 @@ mod tests {
         let module_slot = HashMap::new();
         let mut insns = [kfunc_call_sentinel(0)];
 
-        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, false, &[]);
+        rewrite_kfunc_calls(
+            &mut insns,
+            &names,
+            &targets,
+            &module_slot,
+            XdpLoadMode {
+                dev_bound: false,
+                multi_buffer: true,
+            },
+            &[],
+        );
 
         // The call became `r0 = -EOPNOTSUPP`, so the wrapper falls back.
         assert_eq!(insns[0].code, BPF_MOV64_IMM);
@@ -2939,12 +3001,81 @@ mod tests {
         let module_slot = HashMap::new();
         let mut insns = [kfunc_call_sentinel(0)];
 
-        rewrite_kfunc_calls(&mut insns, &names, &targets, &module_slot, true, &[]);
+        rewrite_kfunc_calls(
+            &mut insns,
+            &names,
+            &targets,
+            &module_slot,
+            XdpLoadMode {
+                dev_bound: true,
+                multi_buffer: true,
+            },
+            &[],
+        );
 
         // Device-bound: stays a kfunc call resolved to the real btf id, off 0.
         assert_eq!(insns[0].code, INSN_CALL);
         assert_eq!(insns[0].imm, 4242);
         assert_eq!(insns[0].off, 0);
+    }
+
+    fn pull_call(mode: XdpLoadMode) -> aya_obj::generated::bpf_insn {
+        let names = vec![super::super::xdp_pull_probe::XDP_PULL_KFUNC.to_owned()];
+        let mut targets = HashMap::new();
+        if mode.multi_buffer {
+            targets.insert(
+                names[0].clone(),
+                KfuncTarget {
+                    btf_id: 5151,
+                    module_name: None,
+                    module_btf_obj_id: None,
+                },
+            );
+        }
+        let mut insns = [kfunc_call_sentinel(0)];
+        rewrite_kfunc_calls(&mut insns, &names, &targets, &HashMap::new(), mode, &[]);
+        insns[0]
+    }
+
+    #[test]
+    fn a_refused_pull_becomes_a_refusal_the_program_reads_as_not_pulled() {
+        let insn = pull_call(XdpLoadMode {
+            dev_bound: true,
+            multi_buffer: false,
+        });
+        assert_eq!(insn.code, BPF_MOV64_IMM);
+        assert_eq!(insn.dst_reg(), 0);
+        assert_eq!(insn.imm, NEG_EOPNOTSUPP);
+    }
+
+    #[test]
+    fn an_accepted_pull_stays_a_call_to_its_btf_id() {
+        let insn = pull_call(XdpLoadMode {
+            dev_bound: false,
+            multi_buffer: true,
+        });
+        assert_eq!(insn.code, INSN_CALL);
+        assert_eq!(insn.imm, 5151);
+    }
+
+    #[test]
+    fn a_refused_pull_takes_the_multi_buffer_declaration_from_every_xdp_program() {
+        let refused = XdpLoadMode {
+            dev_bound: false,
+            multi_buffer: false,
+        };
+        let accepted = XdpLoadMode {
+            dev_bound: false,
+            multi_buffer: true,
+        };
+        let frags = BPF_F_XDP_HAS_FRAGS;
+        assert_eq!(refused.prog_flags(BPF_PROG_TYPE_XDP, frags), 0);
+        assert_eq!(accepted.prog_flags(BPF_PROG_TYPE_XDP, frags), frags);
+        // Only XDP carries the declaration; another program's flags stay.
+        assert_eq!(
+            refused.prog_flags(BPF_PROG_TYPE_LSM, BPF_F_SLEEPABLE),
+            BPF_F_SLEEPABLE
+        );
     }
 
     #[test]
@@ -3004,7 +3135,10 @@ mod tests {
             &names,
             &targets,
             &module_slot,
-            false,
+            XdpLoadMode {
+                dev_bound: false,
+                multi_buffer: true,
+            },
             &["bpf_probe_read_user_dynptr".to_owned()],
         );
 

@@ -46,6 +46,15 @@
       "unlocks": "a validated SYN cookie handed to the stack as a request socket, so the stack does not revalidate a cookie it did not issue"
     },
     {
+      "condition": "a kernel built with it",
+      "fallback": "the XDP programs load without declaring multi-buffer frames, as they loaded before the pull was used",
+      "id": "xdp_pull_data",
+      "needs_lsm": false,
+      "probe": "loaded",
+      "since": "6.18",
+      "unlocks": "frames larger than one buffer, such as jumbo frames and hardware GRO aggregates, parsed by the XDP firewall and load balancer when their headers fall past the first buffer"
+    },
+    {
       "condition": "turned on in the configuration and attached on the node",
       "fallback": "flows carry no workload name and everything else is unchanged",
       "id": "attribution",

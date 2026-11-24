@@ -180,7 +180,7 @@ _agent_xdp_link() {
 
     ip link add fp-dummy0 type dummy
     ip link set fp-dummy0 up
-    ip link set dev fp-dummy0 xdpgeneric obj "$obj" sec xdp
+    ip link set dev fp-dummy0 xdpgeneric obj "$obj" sec xdp.frags
 
     local waited=0 body="" entry=""
     while [ "$waited" -lt 20 ]; do
@@ -284,7 +284,7 @@ _agent_xdp_link() {
     # Both inside one reading of the inventory: the agent's program goes and
     # another takes the hook it held.
     bpftool link detach id "$link"
-    ip link set dev "$EBPF_VETH_HOST" xdp obj "$obj" sec xdp
+    ip link set dev "$EBPF_VETH_HOST" xdp obj "$obj" sec xdp.frags
 
     run wait_for_alert '[.[] | select(.rule_id == "network-path-program-replaced")] | first' 20 1
     ip link set dev "$EBPF_VETH_HOST" xdp off 2>/dev/null || true

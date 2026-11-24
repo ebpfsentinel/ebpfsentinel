@@ -22,7 +22,7 @@ use ebpf_common::{
         LB_ALG_LEAST_CONN, LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_DEFAULT_FLOWS,
         LB_FAMILY_V4, LB_FAMILY_V6, LB_FLOW_COUNTED, LB_FLOW_UNCOUNTED, LB_MAX_BACKENDS_V2,
         LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
-        LB_METRIC_MTU_EXCEEDED, LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND,
+        LB_METRIC_FRAGS_PULLED, LB_METRIC_MTU_EXCEEDED, LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND,
         LB_METRIC_TOTAL_SEEN, LB_MODE_L2DSR, LbBackendEntry, LbFlow, LbFlowKey, LbServiceConfigV2,
         LbServiceKey, MAGLEV_EMPTY, MAGLEV_RING_SIZE, MAX_LB_BACKEND_MAC, MAX_LB_BACKENDS_TOTAL,
         MAX_LB_SERVICES, MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32, lb_service_index,
@@ -36,7 +36,9 @@ use ebpf_helpers::net::{
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::trace::{self, NO_RULE, reason, stage};
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
+use ebpf_helpers::xdp::{
+    frame_len, ptr_at, ptr_at_mut, pull_past_first_buffer, skip_ipv6_ext_headers,
+};
 use ebpf_helpers::{
     add_metric, copy_16b_asm, copy_mac_asm, opaque_usize, ringbuf_has_backpressure,
 };
@@ -169,7 +171,13 @@ static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 // ── Entry Point ─────────────────────────────────────────────────────
 
-#[xdp]
+/// The program declares itself able to see frames larger than one buffer
+/// (jumbo frames, hardware GRO aggregates). When the headers of such a
+/// frame fall past its first buffer the parse fails; the head is then
+/// pulled into the first buffer and the parse runs once more. A parse
+/// fails only before the first counter, flow or event is written, so the
+/// second run starts from nothing.
+#[xdp(frags)]
 pub fn xdp_loadbalancer(ctx: XdpContext) -> u32 {
     let traced = trace::xdp(&ctx);
     increment_metric(traced, LB_METRIC_TOTAL_SEEN);
@@ -179,7 +187,12 @@ pub fn xdp_loadbalancer(ctx: XdpContext) -> u32 {
     // `&XdpContext` in a subprogram drops the trusted flag and the verifier
     // rejects the call with "arg#0 ... got scalar".
     let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
-    let action = match try_xdp_loadbalancer(&ctx, ctx_raw) {
+    let mut parsed = try_xdp_loadbalancer(ctx_raw);
+    if parsed.is_err() && unsafe { pull_past_first_buffer(ctx_raw) } {
+        increment_metric(traced, LB_METRIC_FRAGS_PULLED);
+        parsed = try_xdp_loadbalancer(ctx_raw);
+    }
+    let action = match parsed {
         Ok(action) => action,
         Err(()) => xdp_action::XDP_PASS,
     };
@@ -201,8 +214,13 @@ fn is_traced(ctx_raw: *mut core::ffi::c_void) -> bool {
     trace::xdp(&XdpContext::new(ctx_raw.cast()))
 }
 
-#[inline(always)]
-fn try_xdp_loadbalancer(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
+/// One parse and verdict. Kept out of line so the entry can run it a second
+/// time after a pull without carrying two copies of it; only the trusted
+/// context travels, by value, and the local `XdpContext` is rebuilt from it.
+#[inline(never)]
+fn try_xdp_loadbalancer(ctx_raw: *mut core::ffi::c_void) -> Result<u32, ()> {
+    let ctx_owned = XdpContext::new(ctx_raw.cast());
+    let ctx = &ctx_owned;
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
     let mut l3_offset = EthHdr::LEN;
@@ -268,7 +286,7 @@ fn process_v4(
         return reverse_v4(ctx, l3_offset, l4_offset, &reply);
     };
     let src_ip = u32::from_be_bytes(src_addr_raw);
-    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
+    let pkt_len = frame_len(ctx) as u64;
 
     let src_addr = [u32::from_ne_bytes(src_addr_raw), 0, 0, 0];
     let dst_addr = [u32::from_ne_bytes(dst_addr_raw), 0, 0, 0];
@@ -440,7 +458,7 @@ fn process_v6(
 
     // For IP hash, XOR-fold IPv6 src to u32
     let src_ip_folded = src_addr[0] ^ src_addr[1] ^ src_addr[2] ^ src_addr[3];
-    let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
+    let pkt_len = frame_len(ctx) as u64;
 
     let flow = LbFlowKey {
         src_addr,
@@ -1526,9 +1544,10 @@ fn emit_event(
         (*ptr).rss_hash = rss_h;
         (*ptr).rss_hash_type = rss_t;
         (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx_raw.cast_const()).unwrap_or(0);
-        // The linear frame, which is what the forwarded-bytes counter reads.
+        // The whole frame, every buffer of it, which is what the
+        // forwarded-bytes counter reads.
         let frame = XdpContext::new(ctx_raw.cast());
-        (*ptr).pkt_len = frame.data_end().saturating_sub(frame.data()) as u32;
+        (*ptr).pkt_len = frame_len(&frame) as u32;
         (*ptr)._pad = 0;
         event.submit(submit_flags(avail_data(&EVENTS)));
     }

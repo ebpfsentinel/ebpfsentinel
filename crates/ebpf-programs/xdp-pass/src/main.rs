@@ -12,7 +12,7 @@
 
 use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
 
-#[xdp]
+#[xdp(frags)]
 pub fn xdp_pass(_ctx: XdpContext) -> u32 {
     xdp_action::XDP_PASS
 }

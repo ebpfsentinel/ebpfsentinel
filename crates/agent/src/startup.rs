@@ -8994,6 +8994,14 @@ pub fn establish_bpf_token_at(
     }
     adapters::ebpf::file_kfunc_probe::init_cached();
     adapters::ebpf::kfunc_feature_probe::init_cached();
+    let pull = adapters::ebpf::xdp_pull_probe::init_cached();
+    if !pull.usable() {
+        info!(
+            reason = pull.reason.as_deref().unwrap_or(""),
+            "bpf_xdp_pull_data is not usable here: XDP programs load without declaring \
+             multi-buffer frames"
+        );
+    }
     register_module_btf_fds();
     bpf_handle
 }

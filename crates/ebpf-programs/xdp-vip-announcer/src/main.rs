@@ -68,7 +68,7 @@ static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding, { MAX_SELF_BINDINGS as usi
 #[btf_map]
 static VIP_ARP_REPLIES: PerCpuHashMap<u32, u64, { MAX_VIPS as usize }> = PerCpuHashMap::new();
 
-#[xdp]
+#[xdp(frags)]
 pub fn xdp_vip_announcer(ctx: XdpContext) -> u32 {
     match try_announce(&ctx) {
         Ok(action) => action,

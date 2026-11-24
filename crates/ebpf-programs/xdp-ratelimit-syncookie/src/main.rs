@@ -30,7 +30,7 @@ use ebpf_common::event::FLAG_IPV6;
 use ebpf_helpers::checksum::{compute_ipv4_csum, compute_tcp_csum_v4_24, compute_tcp_csum_v6_24};
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
 use ebpf_helpers::trace;
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
+use ebpf_helpers::xdp::{frame_len, ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 
@@ -45,7 +45,7 @@ static DDOS_METRICS: PerCpuArray<u64, { DDOS_METRIC_COUNT as usize }> = PerCpuAr
 /// the kernel still issues a valid cookie that round-trips via `tcp_syncookies`.
 const TH_BASE_LEN: u32 = 20;
 
-#[xdp]
+#[xdp(frags)]
 pub fn xdp_ratelimit_syncookie(ctx: XdpContext) -> u32 {
     match try_syncookie(&ctx) {
         Ok(action) => action,
@@ -115,7 +115,7 @@ fn send_syn_ack_v4(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     let mss = (value >> 32) as u16;
 
     const PKT_LEN: usize = 14 + 20 + 24;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = PKT_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };
@@ -217,7 +217,7 @@ fn send_syn_ack_v6(ctx: &XdpContext, sctx: *const SyncookieCtx) -> Result<u32, (
     let mss = (value >> 32) as u16;
 
     const PKT_LEN: usize = 14 + IPV6_HDR_LEN + 24;
-    let current_len = ctx.data_end().saturating_sub(ctx.data());
+    let current_len = frame_len(ctx);
     let delta = PKT_LEN as i32 - current_len as i32;
     if delta != 0 {
         let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) };

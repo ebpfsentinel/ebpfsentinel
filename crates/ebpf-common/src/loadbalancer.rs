@@ -316,7 +316,10 @@ pub const LB_METRIC_TOTAL_SEEN: u32 = 4;
 /// Metric index: packets dropped because they exceeded the output interface MTU.
 /// Incremented by `bpf_check_mtu` guard before XDP_TX/XDP_REDIRECT forwarding.
 pub const LB_METRIC_MTU_EXCEEDED: u32 = 5;
-pub const LB_METRIC_COUNT: u32 = 6;
+/// Metric index: frames larger than one buffer whose headers lay past the
+/// first fragment and were pulled into it so the service could be matched.
+pub const LB_METRIC_FRAGS_PULLED: u32 = 6;
+pub const LB_METRIC_COUNT: u32 = 7;
 
 // SAFETY: All types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
@@ -520,7 +523,8 @@ mod tests {
         assert_eq!(LB_METRIC_BYTES_FORWARDED, 2);
         assert_eq!(LB_METRIC_EVENTS_DROPPED, 3);
         assert_eq!(LB_METRIC_MTU_EXCEEDED, 5);
-        assert_eq!(LB_METRIC_COUNT, 6);
+        assert_eq!(LB_METRIC_FRAGS_PULLED, 6);
+        assert_eq!(LB_METRIC_COUNT, 7);
     }
 
     #[test]

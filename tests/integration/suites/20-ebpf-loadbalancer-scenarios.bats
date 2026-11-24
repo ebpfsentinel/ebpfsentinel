@@ -88,8 +88,8 @@ _create_backend_ns() {
         echo "no xdp-pass object at ${obj}: the backend veth would drop every redirected frame" >&2
         return 1
     }
-    ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdpdrv obj "$obj" sec xdp 2>/dev/null \
-        || ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdp obj "$obj" sec xdp || {
+    ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdpdrv obj "$obj" sec xdp.frags 2>/dev/null \
+        || ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdp obj "$obj" sec xdp.frags || {
             echo "xdp-pass did not attach to ${LB_BE_NS_IF}" >&2
             return 1
         }

@@ -326,7 +326,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `workload` | 67, 70, 92, 95, 149 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use, 149 the label a cgroup directory carries |
 | `zone` | 31 | 2vm | 6.18 | datapath | Zone-based policy |
 
-#### Capabilities above the floor (18)
+#### Capabilities above the floor (19)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -348,6 +348,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tcp_send_timestamps` | 152 | none | 6.18 | datapath | 152 reads the capability active, writes over connections to a listener in the test namespace and reads the time to scheduled, sent and acked back per edge, then turns send_latency off and reads the round trip still sampled with no write timed |
 | `workload_firewall` | 70, 72, 92, 98, 99 | none | 6.18 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99 |
 | `write_refusal` | 83, 84, 100 | none | 6.18 | datapath | At the LSM hook in 83 and through the fanotify permission group in 84; in 100 the ordinary workloads writing under a counted directory at the shipped threshold, and a package upgrade by the expected writer under a held one, refuse nothing |
+| `xdp_pull_data` | 86, 153 | none | 6.18 | datapath | 153 reads it active, attaches the firewall in driver mode on a 9000-byte veth and has a jumbo datagram dropped on a refused port and delivered whole elsewhere; a veth keeps the headers in the first buffer, so the pull itself is not made to fire |
 
 #### API paths (134)
 
@@ -398,7 +399,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 100, 150, 152, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 27, 60 |
@@ -485,7 +486,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
 | `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 141, 151, 152, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
-| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 152, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
+| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 152, 153, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
 | `/readyz` | 01, 02, 06, 07, 106, 132, 140, 141, 151, 152, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
 
 <!-- coverage:end -->

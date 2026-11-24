@@ -57,7 +57,7 @@ use ebpf_helpers::net::{
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::trace::{self, NO_RULE, fast_path, reason, stage};
-use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, pull_past_first_buffer, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
     eth::EthHdr,
@@ -206,9 +206,9 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as u
 
 /// Per-CPU packet counters. Index: 0=passed, 1=dropped, 2=errors,
 /// 3=events_dropped, 4=total_seen, 5=rejected, 6=mtu_exceeded,
-/// 7=reject_throttled.
+/// 7=reject_throttled, 8=frags_pulled.
 #[btf_map]
-static FIREWALL_METRICS: PerCpuArray<u64, 8> = PerCpuArray::new();
+static FIREWALL_METRICS: PerCpuArray<u64, 9> = PerCpuArray::new();
 
 /// Per-CPU scratch slot the conntrack state is laundered through.
 #[btf_map]
@@ -391,6 +391,7 @@ const METRIC_EVENTS_DROPPED: u32 = 3;
 const METRIC_TOTAL_SEEN: u32 = 4;
 const METRIC_REJECTED: u32 = 5;
 const METRIC_MTU_EXCEEDED: u32 = 6;
+const METRIC_FRAGS_PULLED: u32 = 8;
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -889,7 +890,14 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 /// XDP entry point. Delegates to try_xdp_firewall; on error the configured
 /// default policy is applied (default-allow passes per NFR15, default-deny
 /// drops so unparseable packets cannot bypass inspection).
-#[xdp]
+///
+/// The program declares itself able to see frames larger than one buffer
+/// (jumbo frames, hardware GRO aggregates). When the headers of such a
+/// frame fall past its first buffer the parse fails; the head is then
+/// pulled into the first buffer and the parse runs once more. Every parse
+/// failure happens before the first counter, event or record is written,
+/// so the second run starts from nothing.
+#[xdp(frags)]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     // Capture the trusted XDP context pointer by value in the entry frame,
     // where `ctx` is owned (guaranteed `PTR_TO_CTX` with the trusted flag).
@@ -902,7 +910,12 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     // survives every bpf-to-bpf call down to the kfunc site.
     let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
     increment_metric(ctx_raw, METRIC_TOTAL_SEEN);
-    let action = match try_xdp_firewall(&ctx, ctx_raw) {
+    let mut parsed = try_xdp_firewall(&ctx, ctx_raw);
+    if parsed.is_err() && unsafe { pull_past_first_buffer(ctx_raw) } {
+        increment_metric(ctx_raw, METRIC_FRAGS_PULLED);
+        parsed = try_xdp_firewall(&ctx, ctx_raw);
+    }
+    let action = match parsed {
         Ok(action) => action,
         Err(()) => {
             // The packet could not be parsed (truncated/malformed header) or an

@@ -150,6 +150,17 @@ pub const CATALOGUE: &[Capability] = &[
         fallback: "nothing changes: no shipped program rests on it yet",
     },
     Capability {
+        id: "xdp_pull_data",
+        unlocks: "frames larger than one buffer, such as jumbo frames and hardware GRO \
+                  aggregates, parsed by the XDP firewall and load balancer when their headers \
+                  fall past the first buffer",
+        probe: ProbeKind::Loaded,
+        since: KernelVersion::FLOOR,
+        needs_lsm: false,
+        fallback: "the XDP programs load without declaring multi-buffer frames, as they \
+                   loaded before the pull was used",
+    },
+    Capability {
         id: "attribution",
         unlocks: "the workload that opened a socket, named on every flow",
         probe: ProbeKind::AttachStatus,
@@ -337,6 +348,7 @@ mod tests {
         "kprobe_session",
         "copy_from_user_str",
         "tcp_reqsk_assign",
+        "xdp_pull_data",
         "attribution",
         "process_tracing",
         "workload_firewall",

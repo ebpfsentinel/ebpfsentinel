@@ -31,6 +31,7 @@
 //! | `bpf_sock_ops_enable_tx_tstamp` | 6.15   | `int(*)(struct bpf_sock_ops_kern *skops, u64 flags) __ksym;`                                                                                     |
 //! | `bpf_probe_read_user_dynptr`    | 6.16   | `int(*)(struct bpf_dynptr *dptr, u64 off, u64 size, const void *unsafe_ptr__ign) __ksym;`                                                       |
 //! | `bpf_cgroup_read_xattr`         | 6.17   | `int(*)(struct cgroup *cgroup, const char *name__str, struct bpf_dynptr *value_p) __ksym;`                                                       |
+//! | `bpf_xdp_pull_data`             | 6.18   | `int(*)(struct xdp_md *x, u32 len) __ksym;`                                                                                                      |
 //!
 //! Kfuncs annotated with `KF_ACQUIRE | KF_RET_NULL` (notably
 //! `bpf_xdp_get_xfrm_state`) must pair every successful call with a
@@ -354,6 +355,13 @@ unsafe extern "C" {
     /// [`bpf_xdp_get_xfrm_state`].
     pub fn bpf_xdp_xfrm_state_release(x: *mut xfrm_state);
 
+    /// Move the first `len` bytes of a frame larger than one buffer into
+    /// its first buffer. Kernel 6.18. Returns `0` on success, `-EINVAL`
+    /// when the frame holds fewer than `len` bytes, `-ENOMEM` when the
+    /// first buffer has no room for them. Every packet pointer taken
+    /// before the call is invalid after it.
+    pub fn bpf_xdp_pull_data(xdp: *mut core::ffi::c_void, len: u32) -> i32;
+
     // ── Kernel 6.4 dynptr constructors ────────────────────────
 
     /// Initialise a dynptr over a TC skb. `flags` is reserved and
@@ -535,6 +543,12 @@ pub mod host_stubs {
         _skops: *mut core::ffi::c_void,
         _flags: u64,
     ) -> i32 {
+        ENOTSUP_NEG
+    }
+
+    /// Host builds never hold a frame larger than one buffer, so nothing is
+    /// ever pulled.
+    pub unsafe fn bpf_xdp_pull_data(_xdp: *mut core::ffi::c_void, _len: u32) -> i32 {
         ENOTSUP_NEG
     }
 
@@ -1205,6 +1219,29 @@ pub unsafe fn xdp_frame_size(xdp: *mut core::ffi::c_void) -> Option<u32> {
     #[cfg(not(target_arch = "bpf"))]
     let sz = unsafe { host_stubs::bpf_dynptr_size(&raw const inner) };
     Some(sz)
+}
+
+/// Move the first `len` bytes of a frame larger than one buffer into its
+/// first buffer, so `data..data_end` covers them. Returns the kfunc's
+/// answer: `0` once the bytes are there.
+///
+/// The loader rewrites this call to return `-EOPNOTSUPP` on a host whose
+/// verifier refuses the kfunc, so a program calling it still loads there
+/// and simply never pulls.
+///
+/// # Safety
+/// `xdp` must be the trusted `xdp_md*` the current XDP program was
+/// entered with. Every packet pointer taken before the call is invalid
+/// after it and must be taken again from `data`.
+#[inline(always)]
+pub unsafe fn xdp_pull_data(xdp: *mut core::ffi::c_void, len: u32) -> i32 {
+    #[cfg(target_arch = "bpf")]
+    // SAFETY: the caller hands the trusted context of this invocation.
+    let rc = unsafe { bpf_xdp_pull_data(xdp, len) };
+    #[cfg(not(target_arch = "bpf"))]
+    // SAFETY: the host stub reads neither argument.
+    let rc = unsafe { host_stubs::bpf_xdp_pull_data(xdp, len) };
+    rc
 }
 
 // ── Conntrack lookup safe wrappers ──────────────────────────────

@@ -166,9 +166,9 @@ create_test_netns() {
     local xdp_pass_obj="${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}/xdp-pass"
     if [ -f "$xdp_pass_obj" ]; then
         ip netns exec "$EBPF_TEST_NS" \
-            ip link set dev "$EBPF_VETH_NS" xdpdrv obj "$xdp_pass_obj" sec xdp 2>/dev/null \
+            ip link set dev "$EBPF_VETH_NS" xdpdrv obj "$xdp_pass_obj" sec xdp.frags 2>/dev/null \
         || ip netns exec "$EBPF_TEST_NS" \
-            ip link set dev "$EBPF_VETH_NS" xdp obj "$xdp_pass_obj" sec xdp 2>/dev/null \
+            ip link set dev "$EBPF_VETH_NS" xdp obj "$xdp_pass_obj" sec xdp.frags 2>/dev/null \
         || true
     fi
 
