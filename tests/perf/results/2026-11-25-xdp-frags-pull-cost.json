@@ -1,0 +1,355 @@
+{
+  "kernel": "7.0.0-44-generic",
+  "cpus": 4,
+  "nic_driver": "vmxnet3",
+  "seconds": 20,
+  "pairs": 3,
+  "jumbo_mtu": 9000,
+  "testrun_runs": 2000,
+  "baseline": {
+    "dir": "/var/tmp/ebpfsentinel-xdp-baseline",
+    "commit": "b0000137bdb25f89ea3069362c9c253c57ae6c3a"
+  },
+  "status": {
+    "jumbo_baseline": "baseline objects did not attach at 9000 bytes (raw/agent-log-jumbo-baseline-1.txt)",
+    "jumbo": "the driver behind eth1 refuses XDP in the requested mode at a 9000-byte MTU, for both trees (raw/agent-log-jumbo-current-1.txt): the jumbo criteria read null"
+  },
+  "runs": [
+    {
+      "tree": "baseline",
+      "size": "1500",
+      "pair": 1,
+      "window_s": 20.968383704,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 82460,
+      "rx_pps": 78422.59199436099,
+      "fw_runs": 1644395,
+      "fw_ns_per_run": 390.5532320397471,
+      "xdp_pps": 78422.59199436099,
+      "cpu_busy_pct": 3.9974538510502864,
+      "kernel_ns_per_packet": 1477.747134964531,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 5728,
+          "name": "xdp_firewall",
+          "runs": 1644395,
+          "ns": 642223782,
+          "ns_per_run": 390.5532320397471
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "1500",
+      "pair": 1,
+      "window_s": 20.995396326,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 81784,
+      "rx_pps": 77845.11302489808,
+      "fw_runs": 1634389,
+      "fw_ns_per_run": 363.90909569264113,
+      "xdp_pps": 77845.11302489808,
+      "cpu_busy_pct": 2.5676878098385663,
+      "kernel_ns_per_packet": 1003.4330872270922,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 5793,
+          "name": "xdp_firewall",
+          "runs": 1634389,
+          "ns": 594769023,
+          "ns_per_run": 363.90909569264113
+        }
+      ]
+    },
+    {
+      "tree": "baseline",
+      "size": "1500",
+      "pair": 2,
+      "window_s": 21.115504038,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 78237,
+      "rx_pps": 73807.66271055187,
+      "fw_runs": 1558486,
+      "fw_ns_per_run": 389.4364626952055,
+      "xdp_pps": 73807.66271055187,
+      "cpu_busy_pct": 3.765478898155168,
+      "kernel_ns_per_packet": 1366.711025957243,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 5858,
+          "name": "xdp_firewall",
+          "runs": 1558486,
+          "ns": 606931275,
+          "ns_per_run": 389.4364626952055
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "1500",
+      "pair": 2,
+      "window_s": 20.985602676,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 77953,
+      "rx_pps": 74161.74908237837,
+      "fw_runs": 1556329,
+      "fw_ns_per_run": 381.13347242131965,
+      "xdp_pps": 74161.74908237837,
+      "cpu_busy_pct": 2.6349287169042768,
+      "kernel_ns_per_packet": 1073.0378987990327,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 5923,
+          "name": "xdp_firewall",
+          "runs": 1556329,
+          "ns": 593169076,
+          "ns_per_run": 381.13347242131965
+        }
+      ]
+    },
+    {
+      "tree": "baseline",
+      "size": "1500",
+      "pair": 3,
+      "window_s": 20.943558833,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 77305,
+      "rx_pps": 73820.30973474908,
+      "fw_runs": 1546060,
+      "fw_ns_per_run": 413.8516752260585,
+      "xdp_pps": 73820.30973474908,
+      "cpu_busy_pct": 3.720751822017645,
+      "kernel_ns_per_packet": 1429.4399958604452,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 5988,
+          "name": "xdp_firewall",
+          "runs": 1546060,
+          "ns": 639839521,
+          "ns_per_run": 413.8516752260585
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "1500",
+      "pair": 3,
+      "window_s": 21.243048397,
+      "link_mtu": 1500,
+      "xdp_mode": 1,
+      "pktgen_pps": 78933,
+      "rx_pps": 74351.4758561231,
+      "fw_runs": 1579452,
+      "fw_ns_per_run": 387.12323071546336,
+      "xdp_pps": 74351.4758561231,
+      "cpu_busy_pct": 2.627608750314307,
+      "kernel_ns_per_packet": 981.3530262394805,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 6053,
+          "name": "xdp_firewall",
+          "runs": 1579452,
+          "ns": 611442561,
+          "ns_per_run": 387.12323071546336
+        }
+      ]
+    }
+  ],
+  "testrun": {
+    "current": {
+      "single": {
+        "prog": "xdp_firewall",
+        "frame_len": 1514,
+        "linear_len": 0,
+        "runs": 2000,
+        "warmup": 200,
+        "runs_total": 2200,
+        "candidates": [
+          755,
+          6246
+        ],
+        "prog_id": 6246,
+        "pulled_in_prog": 0,
+        "ok": true,
+        "retvals": [
+          2
+        ],
+        "ns": {
+          "median": 122,
+          "p10": 106,
+          "p90": 132,
+          "mean": 124.8035,
+          "min": 100
+        },
+        "frags_pulled": null
+      },
+      "jumbo_whole": {
+        "prog": "xdp_firewall",
+        "frame_len": 9014,
+        "linear_len": 0,
+        "runs": 2000,
+        "warmup": 200,
+        "runs_total": 2200,
+        "candidates": [
+          755,
+          6246
+        ],
+        "prog_id": 6246,
+        "pulled_in_prog": 0,
+        "ok": true,
+        "retvals": [
+          2
+        ],
+        "ns": {
+          "median": 125,
+          "p10": 109,
+          "p90": 134,
+          "mean": 123.3425,
+          "min": 101
+        },
+        "frags_pulled": null
+      },
+      "jumbo_pulled": {
+        "prog": "xdp_firewall",
+        "frame_len": 9014,
+        "linear_len": 34,
+        "runs": 2000,
+        "warmup": 200,
+        "runs_total": 2200,
+        "candidates": [
+          755,
+          6246
+        ],
+        "prog_id": 6246,
+        "pulled_in_prog": 2200,
+        "ok": true,
+        "retvals": [
+          2
+        ],
+        "ns": {
+          "median": 147,
+          "p10": 127,
+          "p90": 158,
+          "mean": 151.9315,
+          "min": 122
+        },
+        "frags_pulled": 0
+      }
+    },
+    "baseline": {
+      "single": {
+        "prog": "xdp_firewall",
+        "frame_len": 1514,
+        "linear_len": 0,
+        "runs": 2000,
+        "warmup": 200,
+        "runs_total": 2200,
+        "candidates": [
+          755,
+          6311
+        ],
+        "prog_id": 6311,
+        "pulled_in_prog": null,
+        "ok": true,
+        "retvals": [
+          2
+        ],
+        "ns": {
+          "median": 114,
+          "p10": 102,
+          "p90": 130,
+          "mean": 120.6725,
+          "min": 96
+        },
+        "frags_pulled": null
+      },
+      "jumbo_whole": {
+        "prog": "xdp_firewall",
+        "frame_len": 9014,
+        "linear_len": 0,
+        "runs": 2000,
+        "warmup": 200,
+        "runs_total": 2200,
+        "candidates": [
+          755,
+          6311
+        ],
+        "prog_id": 6311,
+        "pulled_in_prog": null,
+        "ok": true,
+        "retvals": [
+          2
+        ],
+        "ns": {
+          "median": 115,
+          "p10": 105,
+          "p90": 131,
+          "mean": 124.147,
+          "min": 99
+        },
+        "frags_pulled": null
+      }
+    }
+  },
+  "medians": {
+    "wire": {
+      "1500": {
+        "baseline": {
+          "runs": 3,
+          "xdp_modes": [
+            1
+          ],
+          "fw_ns_per_run": 390.5532320397471,
+          "xdp_pps": 73820.30973474908,
+          "pktgen_pps": 78237,
+          "kernel_ns_per_packet": 1429.4399958604452,
+          "cpu_busy_pct": 3.765478898155168,
+          "frags_pulled": null
+        },
+        "current": {
+          "runs": 3,
+          "xdp_modes": [
+            1
+          ],
+          "fw_ns_per_run": 381.13347242131965,
+          "xdp_pps": 74351.4758561231,
+          "pktgen_pps": 78933,
+          "kernel_ns_per_packet": 1003.4330872270922,
+          "cpu_busy_pct": 2.627608750314307,
+          "frags_pulled": null
+        }
+      },
+      "jumbo": {
+        "baseline": null,
+        "current": null
+      }
+    },
+    "pull_added_ns": 22
+  },
+  "criteria": {
+    "wire_1500_ns": true,
+    "wire_1500_pps": true,
+    "wire_jumbo_ns": null,
+    "wire_jumbo_pps": null,
+    "testrun_1500_ns": true,
+    "pull_fired": true,
+    "pull_ns": true
+  },
+  "thresholds": {
+    "max_ns_ratio": 1.05,
+    "max_ns_abs": 5,
+    "min_pps_ratio": 0.95,
+    "pull_max_ns": 500
+  }
+}

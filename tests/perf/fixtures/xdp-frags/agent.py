@@ -19,7 +19,9 @@
       data_end of the context), which is how a frame whose headers straddle
       the first buffer is built on purpose. Prints one JSON object with the
       median, p10, p90, mean and minimum nanoseconds per run, the verdict,
-      and the errno when the kernel refused the run.
+      the frags_pulled growth read off the tested program's own metrics
+      array (pulled_in_prog, null where it has no such slot), and the errno
+      when the kernel refused the run.
 
       One run per call on purpose: with repeat above one the kernel runs the
       program again on the buffer the previous run left, and a pull that
@@ -116,14 +118,49 @@ def prog_fd(name):
     ids = [p["id"] for p in run_json(["bpftool", "-j", "prog", "show"])
            if p.get("type") == "xdp" and p.get("name") == name]
     if not ids:
-        return None, None
-    prog_id = max(ids)
+        return None, None, ids
+    # The program attached to an interface is the one whose maps the agent
+    # reads; another loaded copy of the same name (a probe, or a program a
+    # stopped agent left pinned) counts into maps nobody publishes.
+    attached = {
+        x.get("id")
+        for dev in run_json(["bpftool", "-j", "net", "show"])
+        for x in dev.get("xdp", [])
+    }
+    chosen = [i for i in ids if i in attached]
+    prog_id = max(chosen or ids)
     attr = ctypes.create_string_buffer(ATTR_SIZE)
     struct.pack_into("<I", attr, 0, prog_id)
     fd, err = bpf(BPF_PROG_GET_FD_BY_ID, attr)
     if fd < 0:
         raise OSError(err, f"BPF_PROG_GET_FD_BY_ID {prog_id}")
-    return prog_id, fd
+    return prog_id, fd, ids
+
+
+# The firewall's metrics array and the slot the pull counts in. The kernel
+# keeps the first 15 bytes of a map name.
+METRICS_MAP = "FIREWALL_METRICS"[:15]
+FRAGS_PULLED_SLOT = 8
+
+
+def pulled_in_prog(prog_id):
+    """frags_pulled summed over CPUs, read from the tested program's own
+    metrics array, or None where it has no such array. Read off the map the
+    program writes, so it does not wait on the agent's poll nor depend on
+    which map the agent publishes."""
+    prog = run_json(["bpftool", "-j", "prog", "show", "id", str(prog_id)])
+    for map_id in prog.get("map_ids", []):
+        m = run_json(["bpftool", "-j", "map", "show", "id", str(map_id)])
+        if m.get("name") != METRICS_MAP:
+            continue
+        if m.get("max_entries", 0) <= FRAGS_PULLED_SLOT:
+            return None
+        key = [str(b) for b in struct.pack("<I", FRAGS_PULLED_SLOT)]
+        got = run_json(["bpftool", "-j", "map", "lookup", "id", str(map_id), "key", *key])
+        return sum(v.get("value", 0) if isinstance(v.get("value"), int)
+                   else int.from_bytes(bytes(int(b, 16) for b in v["value"]), "little")
+                   for v in got.get("values", []))
+    return None
 
 
 def once(fd, data, ctx):
@@ -148,12 +185,14 @@ def testrun(name, frame_len, linear_len, runs, warmup):
         out.update(ok=False, error=f"no bpf syscall number for {platform.machine()}")
         print(json.dumps(out))
         return
-    prog_id, fd = prog_fd(name)
+    prog_id, fd, candidates = prog_fd(name)
+    out["candidates"] = candidates
     if fd is None:
         out.update(ok=False, error=f"no loaded XDP program named {name}")
         print(json.dumps(out))
         return
     out["prog_id"] = prog_id
+    pulled_before = pulled_in_prog(prog_id)
     raw = frame(frame_len)
     data = ctypes.create_string_buffer(raw, len(raw))
     # struct xdp_md: data, data_end, data_meta, ingress_ifindex,
@@ -174,6 +213,9 @@ def testrun(name, frame_len, linear_len, runs, warmup):
         if i >= warmup:
             durations.append(duration)
     os.close(fd)
+    pulled_after = pulled_in_prog(prog_id)
+    out["pulled_in_prog"] = (None if pulled_before is None or pulled_after is None
+                             else pulled_after - pulled_before)
     durations.sort()
     out.update(
         ok=True,

@@ -46,8 +46,18 @@
 #     does; vmxnet3 may). Where the baseline does not attach at 9000, or
 #     attaches in another XDP mode than the current objects, the jumbo wire
 #     criterion has no baseline and reads null: the report says why.
-#   - BPF_PROG_TEST_RUN refuses a frame larger than one buffer to a program
-#     without the declaration, so the baseline is timed on 1500 bytes only.
+#   - BPF_PROG_TEST_RUN splits a frame larger than one page into fragments
+#     whether or not the program declares them, and hands it to the baseline
+#     too: the baseline's jumbo test run is kept in the report as evidence,
+#     and only the 1500-byte one is compared.
+#   - A driver can refuse XDP at a jumbo MTU whatever the program declares:
+#     vmxnet3 has no multi-buffer XDP and answers EOPNOTSUPP to a driver-mode
+#     attach at 9000 bytes, for both trees. Then the jumbo test skips, the
+#     report's status says why and the jumbo criteria read null; the pull is
+#     then measured by the test runs alone. A driver that attaches and runs
+#     the program on none of the frames reads null the same way.
+#   - Every exit from the jumbo test puts both MTUs back to 1500 first: the
+#     test runs that follow start an agent on the same interface.
 #   - The pull's cost is the current program against itself on two layouts
 #     of one frame: that is the honest baseline for the pull, since no
 #     earlier program could read such a frame at all.
@@ -65,8 +75,10 @@
 #   wire_jumbo_pps   as wire_1500_pps at JUMBO_MTU, same condition
 #   testrun_1500_ns  median BPF_PROG_TEST_RUN ns on a 1500-byte frame, current
 #                    at most baseline x XDP_MAX_NS_RATIO + XDP_MAX_NS_ABS
-#   pull_fired       frags_pulled grew by at least the number of runs on the
-#                    PULL_LINEAR-byte first buffer layout
+#   pull_fired       frags_pulled, read off the tested program's own metrics
+#                    array (pulled_in_prog), grew by at least the number of
+#                    runs on the PULL_LINEAR-byte first buffer layout; the
+#                    agent's /metrics reading sits beside it as frags_pulled
 #   pull_ns          median ns of the pulled layout minus the whole layout, at
 #                    most XDP_PULL_MAX_NS
 # The bounds are what a guest on a virtual NIC can hold run to run, not a
@@ -90,7 +102,9 @@ XDP_BENCH_PAIRS="${XDP_BENCH_PAIRS:-3}"
 XDP_TESTRUN_RUNS="${XDP_TESTRUN_RUNS:-2000}"
 XDP_TESTRUN_WARMUP="${XDP_TESTRUN_WARMUP:-200}"
 XDP_BASELINE_DIR="${XDP_BASELINE_DIR:-/var/tmp/ebpfsentinel-xdp-baseline}"
-XDP_METRIC_SETTLE="${XDP_METRIC_SETTLE:-5}"
+# The agent reads its kernel counters every 10 s (KERNEL_METRICS_INTERVAL):
+# a wait shorter than one poll reads /metrics before the runs reach it.
+XDP_METRIC_SETTLE="${XDP_METRIC_SETTLE:-12}"
 JUMBO_MTU="${JUMBO_MTU:-9000}"
 # pktgen's pkt_size counts the Ethernet header: 1514 is a 1500-byte IP packet.
 SMALL_PKT_SIZE="${SMALL_PKT_SIZE:-1514}"
@@ -252,7 +266,10 @@ _start() {
         && wait_for_ebpf_program "xdp-firewall" 30; then
         return 0
     fi
-    _agent_ssh tail -60 "$_REMOTE_LOG_FILE" > "${RESULTS_DIR}/raw/agent-log-$1.txt" 2>/dev/null || true
+    # The reason is a warning written at the attach, which the agent's later
+    # start-up lines and the warden's per-request audit lines push out of any
+    # tail: every warning and error, then the tail.
+    _agent_ssh "grep -v 'warden\] audit' ${_REMOTE_LOG_FILE} | grep -E '\"level\":\"(WARN|ERROR)\"'; grep -v 'warden\] audit' ${_REMOTE_LOG_FILE} | tail -30" > "${RESULTS_DIR}/raw/agent-log-$1.txt" 2>/dev/null || true
     return 1
 }
 
@@ -328,7 +345,7 @@ _testrun() {
     p1="$(_pulled)"
     _report --arg t "$tree" --arg s "$shape" --argjson o "$out" --argjson pulled "$(_delta_or_null "$p0" "$p1")" \
         '.testrun[$t][$s] = ($o + {frags_pulled: $pulled})'
-    echo "testrun ${tree}/${shape}: $(jq -c '{ok, error, retvals, ns, runs_total}' <<< "$out") frags_pulled=$(_delta_or_null "$p0" "$p1")" >&3
+    echo "testrun ${tree}/${shape}: $(jq -c '{ok, error, prog_id, candidates, retvals, ns, runs_total, pulled_in_prog}' <<< "$out") frags_pulled=$(_delta_or_null "$p0" "$p1")" >&3
 }
 
 _bpf_stats() {
@@ -378,10 +395,18 @@ _bpf_stats() {
                     echo "baseline did not attach at ${JUMBO_MTU}: no jumbo baseline" >&3
                     continue
                 fi
+                _set_mtu_both 1500 1500
+                if grep -q 'does not support the requested XDP mode' "${RESULTS_DIR}/raw/agent-log-jumbo-current-${pair}.txt" 2>/dev/null; then
+                    # The driver refuses XDP at this MTU whatever the program
+                    # declares (vmxnet3 has no multi-buffer XDP): no figure.
+                    _report --arg r "the driver behind ${EBPF_AGENT_INTERFACE} refuses XDP in the requested mode at a ${JUMBO_MTU}-byte MTU, for both trees (raw/agent-log-jumbo-current-${pair}.txt): the jumbo criteria read null" \
+                        '.status.jumbo = $r'
+                    env_skip "the driver refuses XDP at a ${JUMBO_MTU}-byte MTU"
+                fi
                 echo "the current objects did not attach at ${JUMBO_MTU} bytes: raw/agent-log-jumbo-current-${pair}.txt" >&2
                 return 1
             fi
-            _wire_run "$tree" jumbo "$JUMBO_PKT_SIZE" "$pair"
+            _wire_run "$tree" jumbo "$JUMBO_PKT_SIZE" "$pair" || { _set_mtu_both 1500 1500; return 1; }
         done
     done
     _use_tree current
@@ -413,8 +438,8 @@ _bpf_stats() {
     _start "testrun-baseline" || { echo "the baseline objects did not attach" >&2; return 1; }
     _bpf_stats 0
     _testrun baseline single 1514 0
-    # Expected refused: a frame past one buffer needs the declaration. Kept
-    # in the report as the evidence.
+    # Kept in the report as evidence: the kernel splits the frame into
+    # fragments for this program too, so it is not compared.
     _testrun baseline jumbo_whole "$JUMBO_PKT_SIZE" 0
     _bpf_stats 1
     _use_tree current
@@ -426,7 +451,8 @@ _bpf_stats() {
 
 @test "report: medians per tree and the criteria" {
     _report --argjson ratio "$XDP_MAX_NS_RATIO" --argjson abs "$XDP_MAX_NS_ABS" \
-        --argjson ppsr "$XDP_MIN_PPS_RATIO" --argjson pullmax "$XDP_PULL_MAX_NS" '
+        --argjson ppsr "$XDP_MIN_PPS_RATIO" --argjson pullmax "$XDP_PULL_MAX_NS" \
+        --argjson mtu "$JUMBO_MTU" '
         def median: map(select(. != null)) | sort
             | if length == 0 then null else .[(length - 1) / 2 | floor] end;
         def le(a; b): if a == null or b == null then null else a <= b end;
@@ -447,6 +473,9 @@ _bpf_stats() {
           def same_mode(s): side("baseline"; s) != null and side("current"; s) != null
             and side("baseline"; s).xdp_modes == side("current"; s).xdp_modes
             and (side("current"; s).xdp_modes | length) == 1;
+          # A driver can take the frames and never run the program on them:
+          # zero packets through xdp_firewall on a side is no figure at all.
+          def ran(s): (side("baseline"; s).xdp_pps // 0) > 0 and (side("current"; s).xdp_pps // 0) > 0;
         .medians = {
             wire: {"1500": {baseline: side("baseline"; "1500"), current: side("current"; "1500")},
                    jumbo: {baseline: side("baseline"; "jumbo"), current: side("current"; "jumbo")}},
@@ -454,19 +483,22 @@ _bpf_stats() {
                             then .testrun.current.jumbo_pulled.ns.median - .testrun.current.jumbo_whole.ns.median
                             else null end)
           }
+        | if same_mode("jumbo") and (ran("jumbo") | not)
+          then .status.jumbo_through_xdp = "the NIC received the \($mtu)-byte MTU frames but xdp_firewall ran on none of them in either tree: the driver does not hand frames of that size to XDP in this mode, so the jumbo criteria read null"
+          else . end
         | .medians.wire as $w
         | .criteria = {
             wire_1500_ns: le($w["1500"].current.fw_ns_per_run; bound($w["1500"].baseline.fw_ns_per_run)),
             wire_1500_pps: ge($w["1500"].current.xdp_pps; ($w["1500"].baseline.xdp_pps // null) | if . == null then null else . * $ppsr end),
-            wire_jumbo_ns: (if same_mode("jumbo")
+            wire_jumbo_ns: (if same_mode("jumbo") and ran("jumbo")
                             then le($w.jumbo.current.fw_ns_per_run; bound($w.jumbo.baseline.fw_ns_per_run))
                             else null end),
-            wire_jumbo_pps: (if same_mode("jumbo")
+            wire_jumbo_pps: (if same_mode("jumbo") and ran("jumbo")
                              then ge($w.jumbo.current.xdp_pps; $w.jumbo.baseline.xdp_pps * $ppsr)
                              else null end),
             testrun_1500_ns: le(.testrun.current.single.ns.median; bound(.testrun.baseline.single.ns.median)),
             pull_fired: (if (.testrun.current.jumbo_pulled.ok // false)
-                         then ge(.testrun.current.jumbo_pulled.frags_pulled; .testrun.current.jumbo_pulled.runs_total)
+                         then ge(.testrun.current.jumbo_pulled.pulled_in_prog; .testrun.current.jumbo_pulled.runs_total)
                          else null end),
             pull_ns: le(.medians.pull_added_ns; $pullmax)
           }

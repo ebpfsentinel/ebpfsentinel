@@ -9,6 +9,80 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-11-25-xdp-frags-pull-cost.json`
+
+`tests/perf/10-xdp-frags-pull-cost.bats` on the two-machine lane, agent VM
+kernel 7.0.0-44-generic, 4 vCPUs, vmxnet3 in driver mode. The baseline is
+the XDP objects built before every program declared multi-buffer frames;
+`wire` holds three interleaved pktgen pairs per tree, `testrun` 2000 timed
+`BPF_PROG_TEST_RUN` calls per frame layout on the attached `xdp_firewall`.
+
+**What to quote.** Declaring multi-buffer frames costs nothing on ordinary
+traffic: at 1500 bytes the firewall runs in 381 ns per packet against 391 for
+the baseline, 74.4 kpps against 73.8, and a 1500-byte test run takes 122 ns
+against 114. The pull itself fires on every frame whose headers fall past the
+first buffer (`pulled_in_prog` 2200 of 2200 runs, read off the program's own
+metrics array) and adds 22 ns at the median: 147 ns for a 9000-byte frame
+with a 34-byte first buffer against 125 ns for the same frame laid out whole.
+
+**What is not measured.** No jumbo frame on the wire: vmxnet3 has no
+multi-buffer XDP and refuses a driver-mode attach at a 9000-byte MTU
+(EOPNOTSUPP) for both trees, so `status.jumbo` says so and the jumbo criteria
+read null. The agent's `/metrics` reading beside each test run
+(`frags_pulled`) is 0 in this file because the suite read it 5 s after the
+runs while the agent polls its kernel counters every 10 s; the suite now waits
+12 s.
+
+## `2026-11-25-xdp-tc-meta-handoff.json`
+
+`tests/perf/13-xdp-tc-meta-handoff.bats` on the two-machine lane, agent VM
+kernel 7.0.0-44-generic, 4 vCPUs, vmxnet3 in driver mode, three runs of 15 s
+per arm and profile. Four arms hand the XDP parse to tc: `A-cb` (what ships:
+the first tc program parses and writes `skb->cb`), `B-dynptr` (XDP writes a
+record in the packet's metadata, tc reads it through
+`bpf_dynptr_from_skb_meta`), `B-dynptr-all` (every tc program reads it) and
+`B-datameta` (tc reads it through `data_meta`). `facts` holds which driver,
+mode and VLAN layout lets the record reach tc, `medians` the cost per wire
+packet, `criteria` the decision.
+
+**What to quote.** `skb->cb` stays. On vmxnet3 in driver mode the driver
+refuses the metadata write on every packet (`xdp_meta_refused` equals
+`xdp_runs`), so no record ever reaches tc and the parse cannot be done once;
+the record does reach tc in generic mode and on veth. Where it reaches, it is
+not cheaper: per wire packet `A-cb` 494 ns at 64-byte UDP against 513 ns for
+`B-dynptr` and 503 ns for `B-datameta`, the XDP side 80 against 93 ns. XDP sees
+an offset before the VLAN tag is stripped and tc after, so a record carries
+offsets tc has to shift.
+
+## `2026-11-25-tcp-tx-timestamp-cost.json`
+
+`tests/perf/12-tcp-tx-timestamp-cost.bats` on the two-machine lane, agent VM
+kernel 7.0.0-44-generic, one iperf3 connection from the agent VM, five rounds
+of 15 s per arm and profile, interleaved. Arms: `none` (no agent), `off` (the
+agent with `tcp_health.send_latency: false`), `on` (timestamps on every
+write). Profiles: `small` (64-byte writes, `TCP_NODELAY`) and `bulk`
+(128 KiB writes).
+
+**What to quote.** The `sock_ops` program costs 380 ns per run and 1.21 runs
+per small write, 461 ns per write against 21.9 us of sender time per write
+(2.1 %); for 128 KiB writes 567 ns per run, 736 ns per write against 239 us
+(0.3 %). The throughput criteria failed and cannot be read on this lane: small
+writes moved between 17 and 315 Mb/s from one round to the next in every arm,
+and `off` missed its bound against `none` in bulk although neither runs the
+program. The per-write cost is the figure; the throughput medians are not.
+
+## `2026-11-25-tamper-guard-verified-insns.json`
+
+`tests/perf/11-tamper-guard-verified-insns.bats` on the agent VM, kernel
+7.0.0-44-generic with `bpf` in the active LSMs, three loads per tree, counted
+by `cargo xtask` (bpftool could not load either object on its own, `status`
+says why). Baseline: commit `8b09989`, the last one before the guard compared
+cgroup file names with `bpf_strcmp`.
+
+**What to quote.** `tamper_guard_file_open` goes from 8909 to 6779 verified
+instructions (2130 fewer); the four other programs of the object are
+unchanged. Identical on all three loads.
+
 ## `2026-11-25-bpf-qdisc-vs-edt-fq.json`
 
 `tests/perf/09-bpf-qdisc-vs-edt-fq.bats` on the two-machine lane of

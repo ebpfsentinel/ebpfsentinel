@@ -500,9 +500,17 @@ stop_ebpf_agent() {
         _reap=$((_reap + 1))
     done
 
-    # Belt-and-suspenders: strip any XDP/TC the dead agent left on the data
-    # interface so the next attach sees a clean hook (covers legacy/pinned
-    # attaches that don't auto-detach on process exit).
+    # A stopped agent leaves its hooks in place on purpose: the links it pins
+    # under /sys/fs/bpf keep enforcing until the next agent adopts them, and
+    # neither `ip link set xdp off` nor removing clsact detaches a pinned BPF
+    # link or a tcx one. `uninstall` is the product's way to take them off;
+    # without it the next suite measures or attaches beside a dead agent's
+    # firewall. Suite 140 asserts the pins survive a stop through its own kill.
+    _agent_ssh_sudo env -u EBPFSENTINEL_WARDEN_SOCK /usr/local/bin/ebpfsentinel-agent uninstall \
+        >/dev/null 2>&1 || true
+
+    # Belt-and-suspenders: strip any legacy XDP/TC attach the dead agent left
+    # on the data interface so the next attach sees a clean hook.
     local _iface="${EBPF_AGENT_INTERFACE:-eth1}"
     _agent_ssh_sudo ip link set dev "$_iface" xdpgeneric off 2>/dev/null || true
     _agent_ssh_sudo ip link set dev "$_iface" xdp off 2>/dev/null || true

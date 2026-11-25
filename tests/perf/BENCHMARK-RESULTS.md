@@ -120,9 +120,11 @@ upper bound that includes any preemption.
 | `cgroup-attribution` (7 hooks) | `cgroup_sock_addr`, `cgroup_sock`, `sock_ops` | 2026-10-19 | 195 ns | 1364 ns per loopback `connect()` | `results/2026-10-19-attribution-overhead.json` |
 | `tracepoint-process` | raw tracepoint | 2026-10-19 | 10713 ns | 21444 ns per `execve()` | `results/2026-10-19-attribution-overhead.json` |
 | `tracepoint-drop-reason` | raw tracepoint | 2026-10-30 | 50-53 ns | same, per dropped packet | `results/2026-10-30-kernel-drops-overhead.json` |
+| `tracepoint-tcp-health` send timestamps | `sock_ops` | 2026-11-25 | 380-567 ns | 461 ns per 64-byte write, 736 ns per 128 KiB write | `results/2026-11-25-tcp-tx-timestamp-cost.json` |
 
 The first two were measured on a 4-vCPU Vagrant guest, kernel
-7.0.0-28-generic, the third on a developer workstation, kernel
+7.0.0-28-generic, the fourth on the same guest shape, kernel 7.0.0-44-generic,
+the third on a developer workstation, kernel
 7.0.0-42-generic, i7-1370P; `results/README.md` has the method and every run.
 
 Not measured yet, and why:

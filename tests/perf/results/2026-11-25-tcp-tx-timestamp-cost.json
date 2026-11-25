@@ -1,0 +1,4154 @@
+{
+  "kernel": "7.0.0-44-generic",
+  "cpus": 4,
+  "seconds": 15,
+  "rounds": 5,
+  "write_len": {
+    "small": 64,
+    "bulk": 131072
+  },
+  "sender_cpu": "3",
+  "capability": {
+    "off": {
+      "id": "tcp_send_timestamps",
+      "unlocks": "the time each write waits to be queued, handed to the driver and acknowledged, timed by the kernel per edge",
+      "active": false,
+      "cause": "not_probed",
+      "reason": "not probed: timing writes is turned off in the configuration",
+      "since": "6.18",
+      "fallback": "round-trip times are still sampled when a connection opens and closes, and no write is timed",
+      "hint": null
+    },
+    "on": {
+      "id": "tcp_send_timestamps",
+      "unlocks": "the time each write waits to be queued, handed to the driver and acknowledged, timed by the kernel per edge",
+      "active": true,
+      "cause": null,
+      "reason": null,
+      "since": "6.18",
+      "fallback": "round-trip times are still sampled when a connection opens and closes, and no write is timed",
+      "hint": null
+    }
+  },
+  "runs": [
+    {
+      "arm": "none",
+      "profile": "small",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007062974,
+      "throughput_bps": 128156807.33415814,
+      "bytes": 240308928,
+      "writes": 3754827,
+      "retransmits": 0,
+      "sender_cpu_pct": 92.49100922710635,
+      "sender_ns_per_write": 3696.624105451463,
+      "sender_ns_per_byte": 57.75975164767911,
+      "host_busy_pct": 26.601330066503326,
+      "host_busy_ns_per_write": 4048.122589935568,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 150474,
+          "ns_per_run": 18809.25
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 92785,
+          "ns_per_run": 15464.166666666666
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 72397,
+          "ns_per_run": 12066.166666666666
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 440419,
+          "ns": 177921186,
+          "ns_per_run": 403.98163112853894
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99699,
+          "ns": 2535753,
+          "ns_per_run": 25.43408660066801
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 14749,
+          "ns_per_run": 139.14150943396226
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 40099,
+          "ns_per_run": 6683.166666666667
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 822,
+          "ns": 56930,
+          "ns_per_run": 69.25790754257908
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 270864,
+          "ns": 199628976,
+          "ns_per_run": 737.0081516923622
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 270864,
+          "ns": 31886880,
+          "ns_per_run": 117.72284245968457
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 3,
+          "ns": 5310,
+          "ns_per_run": 1770
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 440418,
+          "ns": 83289382,
+          "ns_per_run": 189.11439132823818
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 24082,
+          "ns_per_run": 12041
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 18098,
+          "ns_per_run": 1809.8
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "bulk",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.009375489,
+      "throughput_bps": 3295841316.616919,
+      "bytes": 6180962304,
+      "writes": 47157,
+      "retransmits": 172,
+      "sender_cpu_pct": 63.68628066507824,
+      "sender_ns_per_write": 202704.01000911847,
+      "sender_ns_per_byte": 1.5465088654260137,
+      "host_busy_pct": 26.72226250906454,
+      "host_busy_ns_per_write": 312572.8947982272,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 80554,
+          "ns_per_run": 16110.8
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 135757,
+          "ns_per_run": 22626.166666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 76949,
+          "ns_per_run": 12824.833333333334
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 105658,
+          "ns": 82178284,
+          "ns_per_run": 777.7762592515475
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100605,
+          "ns": 3745636,
+          "ns_per_run": 37.2311117737687
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 15451,
+          "ns_per_run": 145.76415094339623
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9094,
+          "ns_per_run": 1515.6666666666667
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1456,
+          "ns": 174402,
+          "ns_per_run": 119.7815934065934
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 80908,
+          "ns": 77880043,
+          "ns_per_run": 962.5753077569585
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 80908,
+          "ns": 13281361,
+          "ns_per_run": 164.15386611954318
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 15826,
+          "ns_per_run": 1055.0666666666666
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 105655,
+          "ns": 28112542,
+          "ns_per_run": 266.0786711466566
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 5172,
+          "ns_per_run": 2586
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 6698,
+          "ns_per_run": 669.8
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "small",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.009492617,
+      "throughput_bps": 25469927.7521575,
+      "bytes": 47759744,
+      "writes": 746246,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.94849514772243,
+      "sender_ns_per_write": 20102.97140621189,
+      "sender_ns_per_byte": 314.1089282220608,
+      "host_busy_pct": 29.46919936090893,
+      "host_busy_ns_per_write": 22244.675348343575,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 104724,
+          "ns_per_run": 17454
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 164572,
+          "ns_per_run": 27428.666666666668
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 115574,
+          "ns_per_run": 23114.8
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 362081,
+          "ns": 213781305,
+          "ns_per_run": 590.4239797172456
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 25058,
+          "ns_per_run": 2505.8
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99794,
+          "ns": 4033865,
+          "ns_per_run": 40.421919153456116
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 22104,
+          "ns_per_run": 208.52830188679246
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 241,
+          "ns": 46556,
+          "ns_per_run": 193.17842323651453
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 53462,
+          "ns_per_run": 8910.333333333334
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 188821,
+          "ns": 196072959,
+          "ns_per_run": 1038.406527875607
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 188821,
+          "ns": 41893231,
+          "ns_per_run": 221.8674352958622
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 15077,
+          "ns_per_run": 7538.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 17091,
+          "ns_per_run": 1709.1
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 362079,
+          "ns": 100995316,
+          "ns_per_run": 278.9317137972652
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 77713,
+          "ns_per_run": 5180.866666666667
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "bulk",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.01094416,
+      "throughput_bps": 2617392502.034567,
+      "bytes": 4908253184,
+      "writes": 37447,
+      "retransmits": 59,
+      "sender_cpu_pct": 67.4125817279704,
+      "sender_ns_per_write": 270228.9903062996,
+      "sender_ns_per_byte": 2.0616835808280913,
+      "host_busy_pct": 25.510720918453487,
+      "host_busy_ns_per_write": 403503.6184474057,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 102260,
+          "ns_per_run": 20452
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 153625,
+          "ns_per_run": 25604.166666666668
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 117339,
+          "ns_per_run": 23467.8
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 84360,
+          "ns": 62373741,
+          "ns_per_run": 739.3757823613087
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 11,
+          "ns": 49407,
+          "ns_per_run": 4491.545454545455
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 19406,
+          "ns_per_run": 1940.6
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100822,
+          "ns": 4391947,
+          "ns_per_run": 43.561395330384244
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 18717,
+          "ns_per_run": 176.5754716981132
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1476,
+          "ns": 123376,
+          "ns_per_run": 83.58807588075881
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9026,
+          "ns_per_run": 1504.3333333333333
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 55658,
+          "ns": 67663905,
+          "ns_per_run": 1215.708523482698
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 55658,
+          "ns": 14872670,
+          "ns_per_run": 267.2153149592152
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 7096,
+          "ns_per_run": 3548
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 11103,
+          "ns_per_run": 1110.3
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 84358,
+          "ns": 28552998,
+          "ns_per_run": 338.4740984850281
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3483,
+          "ns_per_run": 1741.5
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "small",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.011607643,
+      "throughput_bps": 19524839.899611827,
+      "bytes": 36612416,
+      "writes": 572069,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.94063498585939,
+      "sender_ns_per_write": 26225.32596592369,
+      "sender_ns_per_byte": 409.77071821755766,
+      "host_busy_pct": 29.95617879053462,
+      "host_busy_ns_per_write": 29874.018693549206,
+      "sock_ops_runs": 762457,
+      "sock_ops_ns_per_run": 431.5012164620431,
+      "sock_ops_runs_per_write": 1.3328060076669073,
+      "sock_ops_ns_per_write": 575.1074136161897,
+      "send_latency_timed": 190360,
+      "programs": [
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 96471,
+          "ns_per_run": 16078.5
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 169211,
+          "ns_per_run": 28201.833333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 78198,
+          "ns_per_run": 15639.6
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 316909,
+          "ns": 217655632,
+          "ns_per_run": 686.8079858886936
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 21722,
+          "ns_per_run": 2172.2
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 762457,
+          "ns": 329001123,
+          "ns_per_run": 431.5012164620431
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 22875,
+          "ns_per_run": 215.80188679245282
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99677,
+          "ns": 4971329,
+          "ns_per_run": 49.874384261163556
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 233,
+          "ns": 45061,
+          "ns_per_run": 193.39484978540773
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 73591,
+          "ns_per_run": 12265.166666666666
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 197218,
+          "ns": 215225830,
+          "ns_per_run": 1091.3092618320843
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 197218,
+          "ns": 38455515,
+          "ns_per_run": 194.98988429048057
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 13845,
+          "ns_per_run": 6922.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 762457,
+          "ns": 113839703,
+          "ns_per_run": 149.30639104893785
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 4428,
+          "ns_per_run": 2214
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 316907,
+          "ns": 86309776,
+          "ns_per_run": 272.35048768250624
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "bulk",
+      "round": 1,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.00868515,
+      "throughput_bps": 3257799952.913535,
+      "bytes": 6109265920,
+      "writes": 46610,
+      "retransmits": 0,
+      "sender_cpu_pct": 70.13148649467139,
+      "sender_ns_per_write": 225827.37607809482,
+      "sender_ns_per_byte": 1.7229261480567537,
+      "host_busy_pct": 24.483576024381986,
+      "host_busy_ns_per_write": 310233.8553958378,
+      "sock_ops_runs": 61914,
+      "sock_ops_ns_per_run": 567.2673224149627,
+      "sock_ops_runs_per_write": 1.328341557605664,
+      "sock_ops_ns_per_write": 753.5247586354859,
+      "send_latency_timed": 15276,
+      "programs": [
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 100419,
+          "ns_per_run": 20083.8
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 138095,
+          "ns_per_run": 23015.833333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 102634,
+          "ns_per_run": 17105.666666666668
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 109337,
+          "ns": 59614139,
+          "ns_per_run": 545.2329860888811
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 18136,
+          "ns_per_run": 1813.6
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 61914,
+          "ns": 35121789,
+          "ns_per_run": 567.2673224149627
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 16749,
+          "ns_per_run": 158.00943396226415
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100302,
+          "ns": 3140112,
+          "ns_per_run": 31.30657414607884
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1483,
+          "ns": 107253,
+          "ns_per_run": 72.3216453135536
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9355,
+          "ns_per_run": 1559.1666666666667
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 88647,
+          "ns": 79610473,
+          "ns_per_run": 898.0616715737701
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 88647,
+          "ns": 16663558,
+          "ns_per_run": 187.97655871039066
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 4420,
+          "ns_per_run": 2210
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 61914,
+          "ns": 10418867,
+          "ns_per_run": 168.27966211196176
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3837,
+          "ns_per_run": 1918.5
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 109335,
+          "ns": 30258536,
+          "ns_per_run": 276.75068367860246
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "small",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.009342211,
+      "throughput_bps": 17009787.046476137,
+      "bytes": 31894720,
+      "writes": 498355,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.93126140469741,
+      "sender_ns_per_write": 30097.06935818844,
+      "sender_ns_per_byte": 470.2667087216944,
+      "host_busy_pct": 28.912245578912245,
+      "host_busy_ns_per_write": 34774.40780166748,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 4,
+          "ns": 73177,
+          "ns_per_run": 18294.25
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 21,
+          "ns": 83441,
+          "ns_per_run": 3973.3809523809523
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 54795,
+          "ns_per_run": 10959
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 416207,
+          "ns": 199021905,
+          "ns_per_run": 478.1801002866362
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100127,
+          "ns": 3296753,
+          "ns_per_run": 32.925714342784666
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 71,
+          "ns": 10395,
+          "ns_per_run": 146.40845070422534
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 4848,
+          "ns": 866372,
+          "ns_per_run": 178.70709570957095
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 4,
+          "ns": 3318971,
+          "ns_per_run": 829742.75
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 249629,
+          "ns": 199480573,
+          "ns_per_run": 799.1081685220868
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 249629,
+          "ns": 51090523,
+          "ns_per_run": 204.66581607104945
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 20250,
+          "ns_per_run": 2025
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 8199,
+          "ns": 1482162,
+          "ns_per_run": 180.77350896450787
+        },
+        {
+          "name": "attribution_post_bind6",
+          "type": "cgroup_sock",
+          "runs": 4095,
+          "ns": 3236100,
+          "ns_per_run": 790.2564102564103
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 13336,
+          "ns_per_run": 6668
+        },
+        {
+          "name": "attribution_post_bind4",
+          "type": "cgroup_sock",
+          "runs": 4092,
+          "ns": 3745509,
+          "ns_per_run": 915.3247800586511
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 429528,
+          "ns": 123376109,
+          "ns_per_run": 287.23647585256373
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "bulk",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007600988,
+      "throughput_bps": 3706645212.54859,
+      "bytes": 6950223872,
+      "writes": 53026,
+      "retransmits": 2,
+      "sender_cpu_pct": 71.51859919238413,
+      "sender_ns_per_write": 202414.40046392335,
+      "sender_ns_per_byte": 1.5442993199457042,
+      "host_busy_pct": 27.032409922143763,
+      "host_busy_ns_per_write": 281559.98943914304,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 92645,
+          "ns_per_run": 15440.833333333334
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 7,
+          "ns": 67489,
+          "ns_per_run": 9641.285714285714
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 7,
+          "ns": 70589,
+          "ns_per_run": 10084.142857142857
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 127859,
+          "ns": 80955860,
+          "ns_per_run": 633.1651272104427
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99480,
+          "ns": 2872131,
+          "ns_per_run": 28.871441495778047
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 14144,
+          "ns_per_run": 133.43396226415095
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 245,
+          "ns": 62364,
+          "ns_per_run": 254.5469387755102
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 47559,
+          "ns_per_run": 7926.5
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 119024,
+          "ns": 89124873,
+          "ns_per_run": 748.7974946229332
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 119024,
+          "ns": 15324153,
+          "ns_per_run": 128.74842888829144
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 7374,
+          "ns_per_run": 737.4
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 7538,
+          "ns_per_run": 502.53333333333336
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 5192,
+          "ns_per_run": 2596
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 127857,
+          "ns": 31896898,
+          "ns_per_run": 249.47322399242904
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "small",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007082243,
+      "throughput_bps": 208951206.70626137,
+      "bytes": 391800960,
+      "writes": 6121890,
+      "retransmits": 0,
+      "sender_cpu_pct": 85.02582176459923,
+      "sender_ns_per_write": 2084.3064805150043,
+      "sender_ns_per_byte": 32.56728875804694,
+      "host_busy_pct": 24.488725747246985,
+      "host_busy_ns_per_write": 2288.508940866301,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 100437,
+          "ns_per_run": 16739.5
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 68860,
+          "ns_per_run": 11476.666666666666
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 53096,
+          "ns_per_run": 10619.2
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 395746,
+          "ns": 145093958,
+          "ns_per_run": 366.6340481015601
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 3441,
+          "ns_per_run": 3441
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 14,
+          "ns": 24557,
+          "ns_per_run": 1754.0714285714287
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99509,
+          "ns": 2555866,
+          "ns_per_run": 25.684772231657437
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 13360,
+          "ns_per_run": 126.0377358490566
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 38005,
+          "ns_per_run": 6334.166666666667
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 808,
+          "ns": 55154,
+          "ns_per_run": 68.25990099009901
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 234041,
+          "ns": 161476951,
+          "ns_per_run": 689.9515512239309
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 234041,
+          "ns": 30239177,
+          "ns_per_run": 129.20461372152744
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 395742,
+          "ns": 71707835,
+          "ns_per_run": 181.19844494645503
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 16,
+          "ns": 9005,
+          "ns_per_run": 562.8125
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 11,
+          "ns": 20889,
+          "ns_per_run": 1899
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 7263,
+          "ns_per_run": 3631.5
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "bulk",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.013606221,
+      "throughput_bps": 3440140397.4030848,
+      "bytes": 6450970624,
+      "writes": 49217,
+      "retransmits": 89,
+      "sender_cpu_pct": 70.08187669983515,
+      "sender_ns_per_write": 213784.2005811,
+      "sender_ns_per_byte": 1.6310440107810975,
+      "host_busy_pct": 28.504923903312445,
+      "host_busy_ns_per_write": 323465.4692484304,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 187564,
+          "ns_per_run": 31260.666666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 114211,
+          "ns_per_run": 22842.2
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 73170,
+          "ns_per_run": 14634
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 109822,
+          "ns": 81200644,
+          "ns_per_run": 739.3841306841981
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 19,
+          "ns": 52687,
+          "ns_per_run": 2773
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 21358,
+          "ns_per_run": 2135.8
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100239,
+          "ns": 3602785,
+          "ns_per_run": 35.94194874250541
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 32737,
+          "ns_per_run": 308.83962264150944
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 11357,
+          "ns_per_run": 1892.8333333333333
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1481,
+          "ns": 111405,
+          "ns_per_run": 75.22282241728561
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 86764,
+          "ns": 81954204,
+          "ns_per_run": 944.5646120510811
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 86764,
+          "ns": 15131549,
+          "ns_per_run": 174.3989327370799
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 109819,
+          "ns": 25965340,
+          "ns_per_run": 236.43759276627907
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 2285,
+          "ns_per_run": 1142.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 15208,
+          "ns_per_run": 1520.8
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 13555,
+          "ns_per_run": 6777.5
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "small",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.008227214,
+      "throughput_bps": 23403888.755008433,
+      "bytes": 43885056,
+      "writes": 685704,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.95308430569713,
+      "sender_ns_per_write": 21877.057739199423,
+      "sender_ns_per_byte": 341.829027174991,
+      "host_busy_pct": 29.694400282635577,
+      "host_busy_ns_per_write": 24514.9510575992,
+      "sock_ops_runs": 865156,
+      "sock_ops_ns_per_run": 469.88701344035064,
+      "sock_ops_runs_per_write": 1.261704758904717,
+      "sock_ops_ns_per_write": 592.8586810052151,
+      "send_latency_timed": 179424,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 117409,
+          "ns_per_run": 23481.8
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 162022,
+          "ns_per_run": 27003.666666666668
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 140929,
+          "ns_per_run": 23488.166666666668
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 312376,
+          "ns": 240582258,
+          "ns_per_run": 770.1688285911849
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 865156,
+          "ns": 406525569,
+          "ns_per_run": 469.88701344035064
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 17994,
+          "ns_per_run": 1799.4
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 24218,
+          "ns_per_run": 228.47169811320754
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99602,
+          "ns": 5280386,
+          "ns_per_run": 53.014859139374714
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 228,
+          "ns": 38686,
+          "ns_per_run": 169.67543859649123
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 44294,
+          "ns_per_run": 7382.333333333333
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 180305,
+          "ns": 194033348,
+          "ns_per_run": 1076.139585702005
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 180305,
+          "ns": 38267218,
+          "ns_per_run": 212.23603338787055
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 865156,
+          "ns": 153721725,
+          "ns_per_run": 177.68093268728416
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 13946,
+          "ns_per_run": 6973
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 312374,
+          "ns": 89290939,
+          "ns_per_run": 285.84625801123013
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3336,
+          "ns_per_run": 1668
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "bulk",
+      "round": 2,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.016051572,
+      "throughput_bps": 2562481233.4543524,
+      "bytes": 4806279168,
+      "writes": 36669,
+      "retransmits": 119,
+      "sender_cpu_pct": 58.1817327818112,
+      "sender_ns_per_write": 238255.7200905397,
+      "sender_ns_per_byte": 1.8177468878977943,
+      "host_busy_pct": 26.631521541537904,
+      "host_busy_ns_per_write": 399520.03054351086,
+      "sock_ops_runs": 39766,
+      "sock_ops_ns_per_run": 481.6808077251924,
+      "sock_ops_runs_per_write": 1.0844582617469798,
+      "sock_ops_ns_per_write": 522.3627314625433,
+      "send_latency_timed": 3069,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 95223,
+          "ns_per_run": 19044.6
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 124620,
+          "ns_per_run": 24924
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 144208,
+          "ns_per_run": 24034.666666666668
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 79306,
+          "ns": 76972546,
+          "ns_per_run": 970.5765768037727
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 39766,
+          "ns": 19154519,
+          "ns_per_run": 481.6808077251924
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 27,
+          "ns": 42353,
+          "ns_per_run": 1568.6296296296296
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 3321,
+          "ns_per_run": 3321
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 17877,
+          "ns_per_run": 2234.625
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 18452,
+          "ns_per_run": 174.0754716981132
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100295,
+          "ns": 4078465,
+          "ns_per_run": 40.66468916695747
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1485,
+          "ns": 94970,
+          "ns_per_run": 63.95286195286195
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9900,
+          "ns_per_run": 1650
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 67027,
+          "ns": 80223790,
+          "ns_per_run": 1196.8876721321258
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 67027,
+          "ns": 15621902,
+          "ns_per_run": 233.06879317290048
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 39766,
+          "ns": 10056953,
+          "ns_per_run": 252.90330935975456
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 6864,
+          "ns_per_run": 3432
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 79303,
+          "ns": 26872491,
+          "ns_per_run": 338.8584416730767
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 2836,
+          "ns_per_run": 1418
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "small",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007836061,
+      "throughput_bps": 133118899.60544966,
+      "bytes": 249612480,
+      "writes": 3900195,
+      "retransmits": 0,
+      "sender_cpu_pct": 84.79619544932608,
+      "sender_ns_per_write": 3262.93275054196,
+      "sender_ns_per_byte": 50.98332422721813,
+      "host_busy_pct": 24.890753364796364,
+      "host_busy_ns_per_write": 3651.0994963072358,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 122639,
+          "ns_per_run": 20439.833333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 81805,
+          "ns_per_run": 16361
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 76276,
+          "ns_per_run": 12712.666666666666
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 220564,
+          "ns": 160667306,
+          "ns_per_run": 728.4384849748826
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 29865,
+          "ns_per_run": 281.74528301886795
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99468,
+          "ns": 4079410,
+          "ns_per_run": 41.01228535810512
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 45924,
+          "ns_per_run": 7654
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 790,
+          "ns": 77873,
+          "ns_per_run": 98.573417721519
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 138220,
+          "ns": 159297881,
+          "ns_per_run": 1152.4951598900304
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 138220,
+          "ns": 31965133,
+          "ns_per_run": 231.26271885400087
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 8350,
+          "ns_per_run": 556.6666666666666
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 14505,
+          "ns_per_run": 1450.5
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 220562,
+          "ns": 67339209,
+          "ns_per_run": 305.3073920258249
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 10205,
+          "ns_per_run": 5102.5
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "bulk",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.010065846,
+      "throughput_bps": 2331352051.3947086,
+      "bytes": 4371644416,
+      "writes": 33353,
+      "retransmits": 0,
+      "sender_cpu_pct": 66.11932353810941,
+      "sender_ns_per_write": 297561.05897520465,
+      "sender_ns_per_byte": 2.270210716058385,
+      "host_busy_pct": 27.543290043290042,
+      "host_busy_ns_per_write": 457829.88037058135,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 152528,
+          "ns_per_run": 25421.333333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 7,
+          "ns": 142413,
+          "ns_per_run": 20344.714285714286
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 133897,
+          "ns_per_run": 26779.4
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 76049,
+          "ns": 82694590,
+          "ns_per_run": 1087.3856329471787
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 20428,
+          "ns_per_run": 192.71698113207546
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100169,
+          "ns": 4497333,
+          "ns_per_run": 44.89745330391638
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 11721,
+          "ns_per_run": 1953.5
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1442,
+          "ns": 138368,
+          "ns_per_run": 95.95561719833564
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 67310,
+          "ns": 83489132,
+          "ns_per_run": 1240.3674342593968
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 67310,
+          "ns": 16220938,
+          "ns_per_run": 240.98853067894814
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3015,
+          "ns_per_run": 1507.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 10819,
+          "ns_per_run": 1081.9
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 76047,
+          "ns": 27919049,
+          "ns_per_run": 367.1288676739385
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 8017,
+          "ns_per_run": 4008.5
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "small",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.008681086,
+      "throughput_bps": 23306063.781180877,
+      "bytes": 43702080,
+      "writes": 682845,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.66567957762254,
+      "sender_ns_per_write": 21906.14854029831,
+      "sender_ns_per_byte": 342.2835709421611,
+      "host_busy_pct": 26.36849132176235,
+      "host_busy_ns_per_write": 23138.486772254317,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 117012,
+          "ns_per_run": 23402.4
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 173754,
+          "ns_per_run": 28959
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 155559,
+          "ns_per_run": 25926.5
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 448322,
+          "ns": 197210917,
+          "ns_per_run": 439.88677111540363
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 21865,
+          "ns_per_run": 2186.5
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99485,
+          "ns": 3147273,
+          "ns_per_run": 31.635653616123033
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 21499,
+          "ns_per_run": 202.82075471698113
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 58075,
+          "ns_per_run": 9679.166666666666
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 794,
+          "ns": 94205,
+          "ns_per_run": 118.64609571788414
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 265977,
+          "ns": 205945960,
+          "ns_per_run": 774.2998830725965
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 265977,
+          "ns": 48079516,
+          "ns_per_run": 180.7656902664516
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 4224,
+          "ns_per_run": 2112
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 14372,
+          "ns_per_run": 1437.2
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 448320,
+          "ns": 116379304,
+          "ns_per_run": 259.5898108493933
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 6116,
+          "ns_per_run": 3058
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "bulk",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.013272349,
+      "throughput_bps": 2949397137.228929,
+      "bytes": 5530845184,
+      "writes": 42197,
+      "retransmits": 69,
+      "sender_cpu_pct": 58.4013184879312,
+      "sender_ns_per_write": 207786.07483944355,
+      "sender_ns_per_byte": 1.5852819430499538,
+      "host_busy_pct": 27.059465357337697,
+      "host_busy_ns_per_write": 352631.70367561677,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 97536,
+          "ns_per_run": 19507.2
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 131665,
+          "ns_per_run": 21944.166666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 91408,
+          "ns_per_run": 18281.6
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 89145,
+          "ns": 80238535,
+          "ns_per_run": 900.0901340512648
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 3134,
+          "ns_per_run": 3134
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 21,
+          "ns": 29344,
+          "ns_per_run": 1397.3333333333333
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 18652,
+          "ns_per_run": 2331.5
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100207,
+          "ns": 3740090,
+          "ns_per_run": 37.32364006506531
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 20782,
+          "ns_per_run": 196.0566037735849
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 8568,
+          "ns_per_run": 1428
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1493,
+          "ns": 361810,
+          "ns_per_run": 242.337575351641
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 76286,
+          "ns": 86427876,
+          "ns_per_run": 1132.945442151902
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 76286,
+          "ns": 15335612,
+          "ns_per_run": 201.0278688094801
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 95611,
+          "ns_per_run": 6374.066666666667
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 7458,
+          "ns_per_run": 745.8
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 89142,
+          "ns": 25809301,
+          "ns_per_run": 289.5301990083238
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 6623,
+          "ns_per_run": 3311.5
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "small",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.010183198,
+      "throughput_bps": 19919712.083978664,
+      "bytes": 37351360,
+      "writes": 583615,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.91217830038373,
+      "sender_ns_per_write": 25696.736718555898,
+      "sender_ns_per_byte": 401.5115112274359,
+      "host_busy_pct": 29.97715691442629,
+      "host_busy_ns_per_write": 29231.599599050744,
+      "sock_ops_runs": 708786,
+      "sock_ops_ns_per_run": 379.96635232637215,
+      "sock_ops_runs_per_write": 1.2144752962141137,
+      "sock_ops_ns_per_write": 461.4597482929671,
+      "send_latency_timed": 125143,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 346202,
+          "ns_per_run": 43275.25
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 9,
+          "ns": 251428,
+          "ns_per_run": 27936.444444444445
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 281936,
+          "ns_per_run": 28193.6
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 286090,
+          "ns": 227755286,
+          "ns_per_run": 796.0966339263869
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 708786,
+          "ns": 269314831,
+          "ns_per_run": 379.96635232637215
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 21099,
+          "ns_per_run": 2109.9
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99604,
+          "ns": 6118212,
+          "ns_per_run": 61.42536444319505
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 22397,
+          "ns_per_run": 211.29245283018867
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 8,
+          "ns": 90461,
+          "ns_per_run": 11307.625
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 353,
+          "ns": 164429,
+          "ns_per_run": 465.8045325779037
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 187042,
+          "ns": 204872551,
+          "ns_per_run": 1095.3291292864703
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 187042,
+          "ns": 42166487,
+          "ns_per_run": 225.43860202521358
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 708786,
+          "ns": 112864712,
+          "ns_per_run": 159.23665535154475
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 14438,
+          "ns_per_run": 7219
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 54771,
+          "ns_per_run": 3651.4
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 286088,
+          "ns": 96752821,
+          "ns_per_run": 338.1925176868656
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "bulk",
+      "round": 3,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.027657646,
+      "throughput_bps": 2547283534.8032155,
+      "bytes": 4781506560,
+      "writes": 36480,
+      "retransmits": 4,
+      "sender_cpu_pct": 65.41943017058802,
+      "sender_ns_per_write": 269490.350877193,
+      "sender_ns_per_byte": 2.0560482092070997,
+      "host_busy_pct": 28.032200357781754,
+      "host_busy_ns_per_write": 429550.43859649124,
+      "sock_ops_runs": 44943,
+      "sock_ops_ns_per_run": 597.5503415437332,
+      "sock_ops_runs_per_write": 1.2319901315789474,
+      "sock_ops_ns_per_write": 736.1761239035088,
+      "send_latency_timed": 8436,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 155008,
+          "ns_per_run": 25834.666666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 115776,
+          "ns_per_run": 23155.2
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 143781,
+          "ns_per_run": 28756.2
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 82173,
+          "ns": 81775252,
+          "ns_per_run": 995.1596266413542
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 44943,
+          "ns": 26855705,
+          "ns_per_run": 597.5503415437332
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 7866,
+          "ns_per_run": 7866
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 4134,
+          "ns_per_run": 4134
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 23437,
+          "ns_per_run": 2929.625
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100283,
+          "ns": 4633087,
+          "ns_per_run": 46.2001236500703
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 20919,
+          "ns_per_run": 197.3490566037736
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 10232,
+          "ns_per_run": 1705.3333333333333
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1509,
+          "ns": 144293,
+          "ns_per_run": 95.62160371106692
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 75749,
+          "ns": 86417166,
+          "ns_per_run": 1140.8357338050666
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 75749,
+          "ns": 15185281,
+          "ns_per_run": 200.46840222313165
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 44943,
+          "ns": 10236796,
+          "ns_per_run": 227.77286785483835
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 6218,
+          "ns_per_run": 3109
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 14390,
+          "ns_per_run": 959.3333333333334
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 82172,
+          "ns": 28260746,
+          "ns_per_run": 343.92184685781046
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "small",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007692606,
+      "throughput_bps": 17208429.69814189,
+      "bytes": 32268288,
+      "writes": 504192,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.59778889676973,
+      "sender_ns_per_write": 29646.107038588474,
+      "sender_ns_per_byte": 463.2204224779449,
+      "host_busy_pct": 26.589884827240862,
+      "host_busy_ns_per_write": 31595.10662604722,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 140473,
+          "ns_per_run": 23412.166666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 123250,
+          "ns_per_run": 20541.666666666668
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 95951,
+          "ns_per_run": 19190.2
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 357350,
+          "ns": 195757428,
+          "ns_per_run": 547.8030726178816
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99471,
+          "ns": 3930607,
+          "ns_per_run": 39.51510490494717
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 25083,
+          "ns_per_run": 236.6320754716981
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 50271,
+          "ns_per_run": 8378.5
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 786,
+          "ns": 82095,
+          "ns_per_run": 104.44656488549619
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 207016,
+          "ns": 199483080,
+          "ns_per_run": 963.6118947327743
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 207016,
+          "ns": 46013829,
+          "ns_per_run": 222.27184855276886
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 9817,
+          "ns_per_run": 4908.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 14062,
+          "ns_per_run": 1406.2
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 9070,
+          "ns_per_run": 604.6666666666666
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 357348,
+          "ns": 129228650,
+          "ns_per_run": 361.63249829298053
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "bulk",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.030226268,
+      "throughput_bps": 2224975997.852115,
+      "bytes": 4174643200,
+      "writes": 31850,
+      "retransmits": 0,
+      "sender_cpu_pct": 61.954163789438965,
+      "sender_ns_per_write": 292365.80847723706,
+      "sender_ns_per_byte": 2.2305741003207173,
+      "host_busy_pct": 27.434593023255815,
+      "host_busy_ns_per_write": 474097.3312401884,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 167158,
+          "ns_per_run": 27859.666666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 168510,
+          "ns_per_run": 21063.75
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 150996,
+          "ns_per_run": 18874.5
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 69832,
+          "ns": 81026720,
+          "ns_per_run": 1160.3093137816475
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100160,
+          "ns": 4238572,
+          "ns_per_run": 42.31801118210863
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 49269,
+          "ns_per_run": 464.8018867924528
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 11261,
+          "ns_per_run": 1876.8333333333333
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1460,
+          "ns": 532868,
+          "ns_per_run": 364.9780821917808
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 59801,
+          "ns": 84541033,
+          "ns_per_run": 1413.7060082607313
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 59801,
+          "ns": 15085669,
+          "ns_per_run": 252.2644939047842
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 8087,
+          "ns_per_run": 4043.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 9089,
+          "ns_per_run": 908.9
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 4631,
+          "ns_per_run": 2315.5
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 69829,
+          "ns": 27963839,
+          "ns_per_run": 400.4616849732919
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "small",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007076682,
+      "throughput_bps": 153186240.04426438,
+      "bytes": 287239040,
+      "writes": 4488110,
+      "retransmits": 0,
+      "sender_cpu_pct": 83.96259488773897,
+      "sender_ns_per_write": 2807.49157195345,
+      "sender_ns_per_byte": 43.86705581177266,
+      "host_busy_pct": 24.877793296089386,
+      "host_busy_ns_per_write": 3175.055869842762,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 120989,
+          "ns_per_run": 20164.833333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 69414,
+          "ns_per_run": 13882.8
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 94638,
+          "ns_per_run": 15773
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 210567,
+          "ns": 149106205,
+          "ns_per_run": 708.117630017999
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 3459,
+          "ns_per_run": 3459
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 14,
+          "ns": 34711,
+          "ns_per_run": 2479.3571428571427
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 17429,
+          "ns_per_run": 164.4245283018868
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99497,
+          "ns": 5105632,
+          "ns_per_run": 51.31443159090224
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 233,
+          "ns": 33939,
+          "ns_per_run": 145.6609442060086
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 52441,
+          "ns_per_run": 8740.166666666666
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 120000,
+          "ns": 142005894,
+          "ns_per_run": 1183.38245
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 120000,
+          "ns": 39051846,
+          "ns_per_run": 325.43205
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 11952,
+          "ns_per_run": 5976
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 210562,
+          "ns": 71000698,
+          "ns_per_run": 337.19616075075277
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 11,
+          "ns": 30836,
+          "ns_per_run": 2803.2727272727275
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 3,
+          "ns": 5520,
+          "ns_per_run": 1840
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "bulk",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.010796631,
+      "throughput_bps": 1821486006.918024,
+      "bytes": 3415998464,
+      "writes": 26062,
+      "retransmits": 239,
+      "sender_cpu_pct": 44.46881244273651,
+      "sender_ns_per_write": 256124.74100222546,
+      "sender_ns_per_byte": 1.9540766983202016,
+      "host_busy_pct": 24.08582089552239,
+      "host_busy_ns_per_write": 495357.2250786586,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 159433,
+          "ns_per_run": 26572.166666666668
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 121876,
+          "ns_per_run": 20312.666666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 102016,
+          "ns_per_run": 20403.2
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 55831,
+          "ns": 86862156,
+          "ns_per_run": 1555.8051261843777
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 70,
+          "ns": 214073,
+          "ns_per_run": 3058.1857142857143
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 17558,
+          "ns_per_run": 1755.8
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 18585,
+          "ns_per_run": 175.33018867924528
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100234,
+          "ns": 5126928,
+          "ns_per_run": 51.14958995949478
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1494,
+          "ns": 157471,
+          "ns_per_run": 105.40227576974564
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9209,
+          "ns_per_run": 1534.8333333333333
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 43833,
+          "ns": 82916836,
+          "ns_per_run": 1891.653229302124
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 43833,
+          "ns": 16335948,
+          "ns_per_run": 372.68605844911366
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 5118,
+          "ns_per_run": 2559
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 55829,
+          "ns": 28406340,
+          "ns_per_run": 508.8097583693063
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 7161,
+          "ns_per_run": 716.1
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 13640,
+          "ns_per_run": 909.3333333333334
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "small",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.009095952,
+      "throughput_bps": 111561960.01532893,
+      "bytes": 209202368,
+      "writes": 3268787,
+      "retransmits": 1,
+      "sender_cpu_pct": 91.63722481344558,
+      "sender_ns_per_write": 4207.652257549972,
+      "sender_ns_per_byte": 65.74456652421831,
+      "host_busy_pct": 24.865681665547346,
+      "host_busy_ns_per_write": 4530.732654039557,
+      "sock_ops_runs": 3396334,
+      "sock_ops_ns_per_run": 180.216994853863,
+      "sock_ops_runs_per_write": 1.0390196730469132,
+      "sock_ops_ns_per_write": 187.249003070558,
+      "send_latency_timed": 127519,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 98880,
+          "ns_per_run": 19776
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 145285,
+          "ns_per_run": 24214.166666666668
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 175104,
+          "ns_per_run": 29184
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 234363,
+          "ns": 140734840,
+          "ns_per_run": 600.4993962357539
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 3073,
+          "ns_per_run": 3073
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 16399,
+          "ns_per_run": 2049.875
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 3396334,
+          "ns": 612077107,
+          "ns_per_run": 180.216994853863
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 6659,
+          "ns_per_run": 6659
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 20362,
+          "ns_per_run": 192.0943396226415
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99605,
+          "ns": 3963026,
+          "ns_per_run": 39.78742031022539
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 47082,
+          "ns_per_run": 7847
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 246,
+          "ns": 59008,
+          "ns_per_run": 239.869918699187
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 141204,
+          "ns": 160930962,
+          "ns_per_run": 1139.7054049460355
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 141204,
+          "ns": 33990411,
+          "ns_per_run": 240.71847114812613
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 3396334,
+          "ns": 261906443,
+          "ns_per_run": 77.11445429100907
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 12253,
+          "ns_per_run": 816.8666666666667
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 13738,
+          "ns_per_run": 6869
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 234362,
+          "ns": 70348708,
+          "ns_per_run": 300.17113695906335
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "bulk",
+      "round": 4,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.009575124,
+      "throughput_bps": 2901892488.759067,
+      "bytes": 5441323008,
+      "writes": 41514,
+      "retransmits": 412,
+      "sender_cpu_pct": 65.99030231150466,
+      "sender_ns_per_write": 238590.93317916847,
+      "sender_ns_per_byte": 1.820304360802982,
+      "host_busy_pct": 26.962828649138714,
+      "host_busy_ns_per_write": 358192.4170159464,
+      "sock_ops_runs": 49511,
+      "sock_ops_ns_per_run": 464.8636060673386,
+      "sock_ops_runs_per_write": 1.1926338102808691,
+      "sock_ops_ns_per_write": 554.412053764995,
+      "send_latency_timed": 7969,
+      "programs": [
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 79972,
+          "ns_per_run": 15994.4
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 107649,
+          "ns_per_run": 21529.8
+        },
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 114413,
+          "ns_per_run": 19068.833333333332
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 99545,
+          "ns": 79606551,
+          "ns_per_run": 799.7041639459541
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 30545,
+          "ns_per_run": 3054.5
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 49511,
+          "ns": 23015862,
+          "ns_per_run": 464.8636060673386
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 32,
+          "ns": 45095,
+          "ns_per_run": 1409.21875
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 65405,
+          "ns_per_run": 617.0283018867924
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100297,
+          "ns": 3556264,
+          "ns_per_run": 35.45733172477741
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 9544,
+          "ns_per_run": 1590.6666666666667
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1516,
+          "ns": 108545,
+          "ns_per_run": 71.59960422163589
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 81940,
+          "ns": 86538201,
+          "ns_per_run": 1056.1166829387357
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 81940,
+          "ns": 15669755,
+          "ns_per_run": 191.23450085428362
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 49511,
+          "ns": 8028610,
+          "ns_per_run": 162.15810627941266
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 14104,
+          "ns_per_run": 940.2666666666667
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 8453,
+          "ns_per_run": 4226.5
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 99543,
+          "ns": 27043524,
+          "ns_per_run": 271.67680298966275
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "small",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.017365498,
+      "throughput_bps": 18577166.93475115,
+      "bytes": 34835648,
+      "writes": 544307,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.8851163474559,
+      "sender_ns_per_write": 27558.18499486503,
+      "sender_ns_per_byte": 430.5966405447661,
+      "host_busy_pct": 27.43820975283901,
+      "host_busy_ns_per_write": 30185.171236085516,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 145882,
+          "ns_per_run": 24313.666666666668
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 24,
+          "ns": 135556,
+          "ns_per_run": 5648.166666666667
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 62472,
+          "ns_per_run": 10412
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 446113,
+          "ns": 219512686,
+          "ns_per_run": 492.05624135588965
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 70,
+          "ns": 11394,
+          "ns_per_run": 162.77142857142857
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100128,
+          "ns": 3123403,
+          "ns_per_run": 31.19410155001598
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 4,
+          "ns": 4392258,
+          "ns_per_run": 1098064.5
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 4951,
+          "ns": 825618,
+          "ns_per_run": 166.75782670167644
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 261301,
+          "ns": 217076898,
+          "ns_per_run": 830.7541800452352
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 261301,
+          "ns": 48357601,
+          "ns_per_run": 185.06473760146343
+        },
+        {
+          "name": "attribution_post_bind6",
+          "type": "cgroup_sock",
+          "runs": 4095,
+          "ns": 2639229,
+          "ns_per_run": 644.5003663003663
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 446111,
+          "ns": 112901371,
+          "ns_per_run": 253.07910138956447
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 11690,
+          "ns_per_run": 5845
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 8212,
+          "ns": 1068175,
+          "ns_per_run": 130.0748904042864
+        },
+        {
+          "name": "attribution_post_bind4",
+          "type": "cgroup_sock",
+          "runs": 4092,
+          "ns": 2378650,
+          "ns_per_run": 581.2927663734115
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 28062,
+          "ns_per_run": 2806.2
+        }
+      ]
+    },
+    {
+      "arm": "none",
+      "profile": "bulk",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.027626308,
+      "throughput_bps": 2862362813.3095613,
+      "bytes": 5370806272,
+      "writes": 40976,
+      "retransmits": 6,
+      "sender_cpu_pct": 64.79823094094469,
+      "sender_ns_per_write": 237642.4248340492,
+      "sender_ns_per_byte": 1.813067816421884,
+      "host_busy_pct": 24.515141204491325,
+      "host_busy_ns_per_write": 351669.26981647796,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 198711,
+          "ns_per_run": 33118.5
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 146401,
+          "ns_per_run": 29280.2
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 2282243,
+          "ns_per_run": 228224.3
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 91831,
+          "ns": 60916306,
+          "ns_per_run": 663.3523102220383
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 35077,
+          "ns_per_run": 330.91509433962267
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100172,
+          "ns": 3400630,
+          "ns_per_run": 33.947909595495744
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 92509,
+          "ns_per_run": 15418.166666666666
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1457,
+          "ns": 189868,
+          "ns_per_run": 130.3143445435827
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 69003,
+          "ns": 77609327,
+          "ns_per_run": 1124.7239540309843
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 69003,
+          "ns": 14834060,
+          "ns_per_run": 214.9770299842036
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 91829,
+          "ns": 29397028,
+          "ns_per_run": 320.12793344150543
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 11615,
+          "ns_per_run": 5807.5
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 5098,
+          "ns_per_run": 2549
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 15857,
+          "ns_per_run": 1585.7
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "small",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.007321603,
+      "throughput_bps": 23066999.53536152,
+      "bytes": 43253248,
+      "writes": 675832,
+      "retransmits": 0,
+      "sender_cpu_pct": 99.95390514588148,
+      "sender_ns_per_write": 22195.462777731744,
+      "sender_ns_per_byte": 346.8041059020585,
+      "host_busy_pct": 29.50790548942974,
+      "host_busy_ns_per_write": 24577.113838942223,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 161198,
+          "ns_per_run": 26866.333333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 100210,
+          "ns_per_run": 20042
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 117242,
+          "ns_per_run": 19540.333333333332
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 304429,
+          "ns": 199638577,
+          "ns_per_run": 655.7804184226864
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 42885,
+          "ns_per_run": 4288.5
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 23611,
+          "ns_per_run": 222.74528301886792
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99494,
+          "ns": 4495576,
+          "ns_per_run": 45.18439302872535
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 788,
+          "ns": 130128,
+          "ns_per_run": 165.13705583756345
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 43678,
+          "ns_per_run": 7279.666666666667
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 166698,
+          "ns": 196896493,
+          "ns_per_run": 1181.1569005027054
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 166698,
+          "ns": 40756971,
+          "ns_per_run": 244.4958607781737
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 8528,
+          "ns_per_run": 4264
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 304427,
+          "ns": 94955953,
+          "ns_per_run": 311.91698830918415
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3659,
+          "ns_per_run": 1829.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 9761,
+          "ns_per_run": 976.1
+        }
+      ]
+    },
+    {
+      "arm": "off",
+      "profile": "bulk",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.018217553,
+      "throughput_bps": 2372273046.5044227,
+      "bytes": 4448583680,
+      "writes": 33940,
+      "retransmits": 0,
+      "sender_cpu_pct": 68.33382165881586,
+      "sender_ns_per_write": 302372.48081909254,
+      "sender_ns_per_byte": 2.30691895156168,
+      "host_busy_pct": 27.364803761982277,
+      "host_busy_ns_per_write": 445786.6823806718,
+      "sock_ops_runs": 0,
+      "sock_ops_ns_per_run": null,
+      "sock_ops_runs_per_write": 0,
+      "sock_ops_ns_per_write": 0,
+      "send_latency_timed": null,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 188634,
+          "ns_per_run": 31439
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 194671,
+          "ns_per_run": 24333.875
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 176230,
+          "ns_per_run": 35246
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 80779,
+          "ns": 75670564,
+          "ns_per_run": 936.7603461295633
+        },
+        {
+          "name": "tcp_health_receive_reset",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 5081,
+          "ns_per_run": 5081
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 8,
+          "ns": 24458,
+          "ns_per_run": 3057.25
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 65927,
+          "ns_per_run": 621.9528301886793
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100213,
+          "ns": 4445513,
+          "ns_per_run": 44.36064183289593
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1479,
+          "ns": 137806,
+          "ns_per_run": 93.17511832319134
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 13342,
+          "ns_per_run": 2223.6666666666665
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 72317,
+          "ns": 82828467,
+          "ns_per_run": 1145.3526418407844
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 72317,
+          "ns": 14579348,
+          "ns_per_run": 201.60332978414482
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 7993,
+          "ns_per_run": 3996.5
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 80772,
+          "ns": 28761906,
+          "ns_per_run": 356.08757985440496
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 4052,
+          "ns_per_run": 2026
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 10,
+          "ns": 9400,
+          "ns_per_run": 940
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "small",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.008998039,
+      "throughput_bps": 315385532.538742,
+      "bytes": 591384064,
+      "writes": 9240376,
+      "retransmits": 1,
+      "sender_cpu_pct": 83.4692426999257,
+      "sender_ns_per_write": 1355.7778384775684,
+      "sender_ns_per_byte": 21.184028726212006,
+      "host_busy_pct": 23.59761295822677,
+      "host_busy_ns_per_write": 1497.7745494339192,
+      "sock_ops_runs": 9240981,
+      "sock_ops_ns_per_run": 117.11028948117088,
+      "sock_ops_runs_per_write": 1.0000654735261856,
+      "sock_ops_ns_per_write": 117.11795710477583,
+      "send_latency_timed": 577,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 198930,
+          "ns_per_run": 33155
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 186011,
+          "ns_per_run": 31001.833333333332
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 92879,
+          "ns_per_run": 18575.8
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 73896,
+          "ns": 79272645,
+          "ns_per_run": 1072.7596216303996
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 16613,
+          "ns_per_run": 1661.3
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 1,
+          "ns": 8588,
+          "ns_per_run": 8588
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 9240981,
+          "ns": 1082213960,
+          "ns_per_run": 117.11028948117088
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 24109,
+          "ns_per_run": 227.4433962264151
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 99596,
+          "ns": 4233174,
+          "ns_per_run": 42.50345395397405
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 49036,
+          "ns_per_run": 8172.666666666667
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 234,
+          "ns": 53898,
+          "ns_per_run": 230.33333333333334
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 71091,
+          "ns": 90347460,
+          "ns_per_run": 1270.870574334304
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 71091,
+          "ns": 16850841,
+          "ns_per_run": 237.0319871713719
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 4299,
+          "ns_per_run": 2149.5
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 9240981,
+          "ns": 479136654,
+          "ns_per_run": 51.84911147420387
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 73894,
+          "ns": 29691418,
+          "ns_per_run": 401.8109454082875
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 2,
+          "ns": 3455,
+          "ns_per_run": 1727.5
+        }
+      ]
+    },
+    {
+      "arm": "on",
+      "profile": "bulk",
+      "round": 5,
+      "error": null,
+      "exit": 0,
+      "window_s": 15.010345178,
+      "throughput_bps": 2823847857.60371,
+      "bytes": 5295308800,
+      "writes": 40400,
+      "retransmits": 34,
+      "sender_cpu_pct": 71.49353243873817,
+      "sender_ns_per_write": 265629.3564108911,
+      "sender_ns_per_byte": 2.0265911591407098,
+      "host_busy_pct": 27.89407765253176,
+      "host_busy_ns_per_write": 385891.0891089109,
+      "sock_ops_runs": 53722,
+      "sock_ops_ns_per_run": 606.3637988161274,
+      "sock_ops_runs_per_write": 1.3297524752475247,
+      "sock_ops_ns_per_write": 806.3137623762376,
+      "send_latency_timed": 13294,
+      "programs": [
+        {
+          "name": "process_exec",
+          "type": "raw_tracepoint",
+          "runs": 6,
+          "ns": 100577,
+          "ns_per_run": 16762.833333333332
+        },
+        {
+          "name": "process_fork",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 104525,
+          "ns_per_run": 20905
+        },
+        {
+          "name": "process_exit",
+          "type": "raw_tracepoint",
+          "runs": 5,
+          "ns": 70264,
+          "ns_per_run": 14052.8
+        },
+        {
+          "name": "drop_reason_kfree_skb",
+          "type": "raw_tracepoint",
+          "runs": 94571,
+          "ns": 80630596,
+          "ns_per_run": 852.5932474014232
+        },
+        {
+          "name": "tcp_health_set_state",
+          "type": "raw_tracepoint",
+          "runs": 10,
+          "ns": 15265,
+          "ns_per_run": 1526.5
+        },
+        {
+          "name": "tcp_health_retransmit",
+          "type": "raw_tracepoint",
+          "runs": 11,
+          "ns": 18598,
+          "ns_per_run": 1690.7272727272727
+        },
+        {
+          "name": "tcp_health_send_timestamps",
+          "type": "sock_ops",
+          "runs": 53722,
+          "ns": 32575076,
+          "ns_per_run": 606.3637988161274
+        },
+        {
+          "name": "bpf_guard_map",
+          "type": "lsm",
+          "runs": 106,
+          "ns": 19325,
+          "ns_per_run": 182.31132075471697
+        },
+        {
+          "name": "bpf_guard_cmd4",
+          "type": "lsm",
+          "runs": 100283,
+          "ns": 4358502,
+          "ns_per_run": 43.46202247639181
+        },
+        {
+          "name": "exec_digest_exec",
+          "type": "lsm",
+          "runs": 6,
+          "ns": 25472,
+          "ns_per_run": 4245.333333333333
+        },
+        {
+          "name": "exec_digest_file_open",
+          "type": "lsm",
+          "runs": 1515,
+          "ns": 114857,
+          "ns_per_run": 75.81320132013201
+        },
+        {
+          "name": "xdp_firewall",
+          "type": "xdp",
+          "runs": 79390,
+          "ns": 80779780,
+          "ns_per_run": 1017.505731200403
+        },
+        {
+          "name": "tc_dns",
+          "type": "sched_cls",
+          "runs": 79390,
+          "ns": 15858427,
+          "ns_per_run": 199.7534576143091
+        },
+        {
+          "name": "attribution_connect4",
+          "type": "cgroup_sock_addr",
+          "runs": 2,
+          "ns": 3672,
+          "ns_per_run": 1836
+        },
+        {
+          "name": "attribution_sockops",
+          "type": "sock_ops",
+          "runs": 53722,
+          "ns": 11385716,
+          "ns_per_run": 211.93767916309892
+        },
+        {
+          "name": "attribution_udp_egress",
+          "type": "cgroup_skb",
+          "runs": 94569,
+          "ns": 33701030,
+          "ns_per_run": 356.3644534678383
+        },
+        {
+          "name": "attribution_sock_release",
+          "type": "cgroup_sock",
+          "runs": 15,
+          "ns": 9003,
+          "ns_per_run": 600.2
+        }
+      ]
+    }
+  ],
+  "medians": {
+    "small": {
+      "none": {
+        "runs": 5,
+        "throughput_bps": 18577166.93475115,
+        "writes": 544307,
+        "retransmits": 0,
+        "sender_cpu_pct": 99.59778889676973,
+        "sender_ns_per_write": 27558.18499486503,
+        "sender_ns_per_byte": 430.5966405447661,
+        "host_busy_ns_per_write": 30185.171236085516,
+        "sock_ops_ns_per_run": null,
+        "sock_ops_runs_per_write": 0,
+        "sock_ops_ns_per_write": 0
+      },
+      "off": {
+        "runs": 5,
+        "throughput_bps": 25469927.7521575,
+        "writes": 746246,
+        "retransmits": 0,
+        "sender_cpu_pct": 99.66567957762254,
+        "sender_ns_per_write": 20102.97140621189,
+        "sender_ns_per_byte": 314.1089282220608,
+        "host_busy_ns_per_write": 22244.675348343575,
+        "sock_ops_ns_per_run": null,
+        "sock_ops_runs_per_write": 0,
+        "sock_ops_ns_per_write": 0
+      },
+      "on": {
+        "runs": 5,
+        "throughput_bps": 23403888.755008433,
+        "writes": 685704,
+        "retransmits": 0,
+        "sender_cpu_pct": 99.91217830038373,
+        "sender_ns_per_write": 21877.057739199423,
+        "sender_ns_per_byte": 341.829027174991,
+        "host_busy_ns_per_write": 24514.9510575992,
+        "sock_ops_ns_per_run": 379.96635232637215,
+        "sock_ops_runs_per_write": 1.2144752962141137,
+        "sock_ops_ns_per_write": 461.4597482929671
+      }
+    },
+    "bulk": {
+      "none": {
+        "runs": 5,
+        "throughput_bps": 2862362813.3095613,
+        "writes": 40976,
+        "retransmits": 2,
+        "sender_cpu_pct": 64.79823094094469,
+        "sender_ns_per_write": 237642.4248340492,
+        "sender_ns_per_byte": 1.813067816421884,
+        "host_busy_ns_per_write": 351669.26981647796,
+        "sock_ops_ns_per_run": null,
+        "sock_ops_runs_per_write": 0,
+        "sock_ops_ns_per_write": 0
+      },
+      "off": {
+        "runs": 5,
+        "throughput_bps": 2617392502.034567,
+        "writes": 37447,
+        "retransmits": 69,
+        "sender_cpu_pct": 67.4125817279704,
+        "sender_ns_per_write": 256124.74100222546,
+        "sender_ns_per_byte": 1.9540766983202016,
+        "host_busy_ns_per_write": 403503.6184474057,
+        "sock_ops_ns_per_run": null,
+        "sock_ops_runs_per_write": 0,
+        "sock_ops_ns_per_write": 0
+      },
+      "on": {
+        "runs": 5,
+        "throughput_bps": 2823847857.60371,
+        "writes": 40400,
+        "retransmits": 34,
+        "sender_cpu_pct": 65.99030231150466,
+        "sender_ns_per_write": 238590.93317916847,
+        "sender_ns_per_byte": 1.820304360802982,
+        "host_busy_ns_per_write": 385891.0891089109,
+        "sock_ops_ns_per_run": 567.2673224149627,
+        "sock_ops_runs_per_write": 1.2319901315789474,
+        "sock_ops_ns_per_write": 736.1761239035088
+      }
+    }
+  },
+  "criteria": {
+    "small_tput_on_off": false,
+    "small_cpu_on_off": true,
+    "bulk_tput_on_off": true,
+    "bulk_cpu_on_off": true,
+    "small_tput_off_none": true,
+    "small_cpu_off_none": true,
+    "bulk_tput_off_none": false,
+    "bulk_cpu_off_none": false,
+    "on_timed": true,
+    "off_untimed": true
+  },
+  "thresholds": {
+    "small_min_tput_ratio": 0.95,
+    "small_max_cpu_ratio": 1.10,
+    "bulk_min_tput_ratio": 0.98,
+    "bulk_max_cpu_ratio": 1.05
+  }
+}

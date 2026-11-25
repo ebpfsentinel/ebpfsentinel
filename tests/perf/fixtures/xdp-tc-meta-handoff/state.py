@@ -108,7 +108,13 @@ def attached(dev):
     xdp, tcx = None, []
     for block in bpftool("net", "show", "dev", dev) or []:
         for entry in block.get("xdp", []):
-            xdp = {"name": entry.get("name", ""), "mode": entry.get("mode", "")}
+            # `net show` names the XDP program by id only; tcx entries carry
+            # the name. Without it the caller cannot tell its own program from
+            # someone else's and never detaches it.
+            name = entry.get("name", "")
+            if not name and "id" in entry:
+                name = (bpftool("prog", "show", "id", str(entry["id"])) or {}).get("name", "")
+            xdp = {"name": name, "mode": entry.get("mode", "")}
         for entry in block.get("tc", []):
             kind = entry.get("kind", "")
             if kind.startswith("tcx") and "ingress" in kind:

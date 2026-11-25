@@ -1,0 +1,116 @@
+{
+  "kernel": "7.0.0-44-generic",
+  "active_lsms": "lockdown,capability,landlock,yama,apparmor,bpf,ima,evm",
+  "loads": 3,
+  "trees": {
+    "current": {
+      "dir": "/usr/local/lib/ebpfsentinel",
+      "sha256": "4d09497df430d50dc20ec959d48e4de33a54d75ee2660dc62fa2caf9dff77713"
+    },
+    "baseline": {
+      "dir": "/var/tmp/ebpfsentinel-tamper-guard-baseline",
+      "commit": "8b0998901e434c1eeefc1ca02d9d3edea1538517",
+      "sha256": "956640c6daded42f196c00539e6f4840787cfe1bd41e2bd514f9eb161d8729c2"
+    }
+  },
+  "counts": {
+    "xtask": {
+      "baseline": [
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 8909
+        },
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 8909
+        },
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 8909
+        }
+      ],
+      "current": [
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 6779
+        },
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 6779
+        },
+        {
+          "tamper_guard_task_kill": 12293,
+          "tamper_guard_ptrace": 12251,
+          "tamper_guard_unlink": 12675,
+          "tamper_guard_rename": 20983,
+          "tamper_guard_file_open": 6779
+        }
+      ]
+    }
+  },
+  "status": {
+    "bpftool_baseline": "bpftool could not load the baseline object (raw/bpftool-baseline-1.txt)",
+    "bpftool_current": "bpftool could not load the current object (raw/bpftool-current-1.txt)"
+  },
+  "loader": "xtask",
+  "programs": [
+    {
+      "program": "tamper_guard_task_kill",
+      "baseline": 12293,
+      "current": 12293,
+      "delta": 0
+    },
+    {
+      "program": "tamper_guard_ptrace",
+      "baseline": 12251,
+      "current": 12251,
+      "delta": 0
+    },
+    {
+      "program": "tamper_guard_unlink",
+      "baseline": 12675,
+      "current": 12675,
+      "delta": 0
+    },
+    {
+      "program": "tamper_guard_rename",
+      "baseline": 20983,
+      "current": 20983,
+      "delta": 0
+    },
+    {
+      "program": "tamper_guard_file_open",
+      "baseline": 8909,
+      "current": 6779,
+      "delta": -2130
+    }
+  ],
+  "total": {
+    "baseline": 67111,
+    "current": 64981,
+    "delta": -2130
+  },
+  "criteria": {
+    "stable": true,
+    "present": true,
+    "not_worse": true
+  },
+  "threshold": {
+    "max_growth_insns": 0
+  }
+}
