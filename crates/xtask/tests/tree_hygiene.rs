@@ -509,6 +509,19 @@ fn floor_claim_below(line: &str, floor: (u32, u32)) -> Option<String> {
     None
 }
 
+/// The release a shell test of `uname -r` refuses below, where it is below
+/// `floor`: `"$major" -eq 6 ] && [ "$minor" -lt 12`, the shape every script
+/// that checks the kernel before starting the agent writes. The message such
+/// a test prints is caught by [`floor_claim_below`]; the number it compares
+/// is not, and is what the script acts on.
+fn shell_floor_below(line: &str, floor: (u32, u32)) -> Option<String> {
+    let after_major = line.split_once(&format!("-eq {} ]", floor.0))?.1;
+    let (_, rest) = after_major.split_once("-lt ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let minor: u32 = digits.parse().ok()?;
+    (minor < floor.1).then(|| format!("{}.{minor}", floor.0))
+}
+
 #[test]
 fn no_tracked_file_states_a_floor_below_the_one_the_agent_computes() {
     let root = workspace_root();
@@ -525,7 +538,9 @@ fn no_tracked_file_states_a_floor_below_the_one_the_agent_computes() {
             continue;
         };
         for (number, line) in text.lines().enumerate() {
-            if let Some(release) = floor_claim_below(line, floor) {
+            if let Some(release) =
+                floor_claim_below(line, floor).or_else(|| shell_floor_below(line, floor))
+            {
                 offences.push(format!("{rel}:{}: {release}: {}", number + 1, line.trim()));
             }
         }
@@ -573,4 +588,36 @@ fn a_floor_claim_is_told_from_a_fact_about_a_release() {
     assert_eq!(floor_claim_below("UEK 8 is 6.12", floor), None);
     assert_eq!(floor_claim_below("version 0.16.12+", floor), None);
     assert_eq!(floor_claim_below("Ubuntu 22.04+", floor), None);
+}
+
+#[test]
+fn a_shell_test_of_the_running_kernel_is_held_to_the_floor() {
+    let floor = (6, 18);
+    assert_eq!(
+        shell_floor_below(
+            r#"if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 12 ]; }; then"#,
+            floor
+        )
+        .as_deref(),
+        Some("6.12")
+    );
+    assert_eq!(
+        shell_floor_below(
+            r#"if [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -lt 9 ]]; then"#,
+            floor
+        )
+        .as_deref(),
+        Some("6.9")
+    );
+    assert_eq!(
+        shell_floor_below(
+            r#"if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then"#,
+            floor
+        ),
+        None
+    );
+    assert_eq!(
+        shell_floor_below(r#"while [ "$attempt" -lt 10 ]; do"#, floor),
+        None
+    );
 }

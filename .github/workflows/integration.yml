@@ -354,7 +354,7 @@ jobs:
       - name: Kernel at the agent's floor
         run: |
           read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
-          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 12 ]; }; then
+          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
             echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
             exit 1
           fi

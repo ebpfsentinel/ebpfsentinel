@@ -231,7 +231,7 @@ preflight() {
     local kernel_major kernel_minor
     kernel_major="$(uname -r | cut -d. -f1)"
     kernel_minor="$(uname -r | cut -d. -f2)"
-    if [ "$kernel_major" -lt 6 ] || { [ "$kernel_major" -eq 6 ] && [ "$kernel_minor" -lt 12 ]; }; then
+    if [ "$kernel_major" -lt 6 ] || { [ "$kernel_major" -eq 6 ] && [ "$kernel_minor" -lt 18 ]; }; then
         echo "ERROR: Kernel $(uname -r) < 6.18 (eBPF features required)" >&2
         exit 1
     fi

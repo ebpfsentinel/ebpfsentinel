@@ -78,7 +78,7 @@ impl Host {
     fn new() -> Self {
         let (tx, alerts) = mpsc::channel(64);
         let sources: HostSourcesReader = Arc::new(|| {
-            HostSources::new(Some((6, 12)))
+            HostSources::new(Some((6, 18)))
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });
