@@ -162,7 +162,11 @@ agent VM needs `python3` and `bpftool`. The jumbo test sets both VMs' `eth1` to
 `JUMBO_MTU` with the agent stopped, skips with the reason when the path between
 the VMs refuses such frames, and puts the MTUs back in teardown. A baseline
 that does not attach at the jumbo MTU is recorded as such and leaves the jumbo
-criteria without a baseline, which the report says.
+criteria without a baseline, which the report says. On vmxnet3, which has no
+multi-buffer XDP, both trees attach in generic (SKB) mode at 9000 bytes, the
+agent's fallback when the driver refuses native and auto attach; the rows'
+`xdp_mode` says so, and the jumbo criteria then compare generic against
+generic, where the frame reaches XDP linear and the pull does not run.
 
 ### Verifier instruction count of the tamper guard (perf/11)
 

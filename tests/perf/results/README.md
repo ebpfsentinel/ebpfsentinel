@@ -12,26 +12,32 @@ asserts are what the lane can hold, not what the product promises.
 ## `2026-11-25-xdp-frags-pull-cost.json`
 
 `tests/perf/10-xdp-frags-pull-cost.bats` on the two-machine lane, agent VM
-kernel 7.0.0-44-generic, 4 vCPUs, vmxnet3 in driver mode. The baseline is
-the XDP objects built before every program declared multi-buffer frames;
-`wire` holds three interleaved pktgen pairs per tree, `testrun` 2000 timed
-`BPF_PROG_TEST_RUN` calls per frame layout on the attached `xdp_firewall`.
+kernel 7.0.0-44-generic, 4 vCPUs, vmxnet3: driver mode at 1500 bytes, generic
+(SKB) mode at a 9000-byte MTU, where the driver refuses native and auto
+attach (EOPNOTSUPP) and the agent falls back to generic for both trees. The
+baseline is the XDP objects built before every program declared multi-buffer
+frames; `wire` holds three interleaved pktgen pairs per tree and MTU,
+`testrun` 2000 timed `BPF_PROG_TEST_RUN` calls per frame layout on the
+attached `xdp_firewall`.
 
-**What to quote.** Declaring multi-buffer frames costs nothing on ordinary
-traffic: at 1500 bytes the firewall runs in 381 ns per packet against 391 for
-the baseline, 74.4 kpps against 73.8, and a 1500-byte test run takes 122 ns
-against 114. The pull itself fires on every frame whose headers fall past the
-first buffer (`pulled_in_prog` 2200 of 2200 runs, read off the program's own
-metrics array) and adds 22 ns at the median: 147 ns for a 9000-byte frame
-with a 34-byte first buffer against 125 ns for the same frame laid out whole.
+**What to quote.** The pull fires on every frame whose headers fall past the
+first buffer (`pulled_in_prog` 2200 of 2200 runs, and the agent's own
+`frags_pulled` reads 2200 too) and adds 21 ns at the median: 145 ns for a
+9000-byte frame with a 34-byte first buffer against 124 ns for the same frame
+laid out whole, which the baseline runs in 127 ns. A 1500-byte test run takes
+111 ns against 110. On the wire at 1500 bytes the firewall runs in 359 ns per
+packet against 344, 71.8 kpps against 72.5, inside the bounds.
 
-**What is not measured.** No jumbo frame on the wire: vmxnet3 has no
-multi-buffer XDP and refuses a driver-mode attach at a 9000-byte MTU
-(EOPNOTSUPP) for both trees, so `status.jumbo` says so and the jumbo criteria
-read null. The agent's `/metrics` reading beside each test run
-(`frags_pulled`) is 0 in this file because the suite read it 5 s after the
-runs while the agent polls its kernel counters every 10 s; the suite now waits
-12 s.
+**What failed.** `wire_jumbo_ns`: in generic mode at 9000 bytes the current
+objects median 342 ns per packet against 320 for the baseline, 1.8 ns over
+the bound (baseline x 1.05 + 5 = 340.6); the rate holds (62.9 kpps against
+64.2, inside 0.95). Generic mode hands XDP a linear skb, so the pull never
+runs on the wire (`frags_pulled` null) and the same frame through test run
+shows no gap (124 against 127 ns); the baseline's three pairs spread from 309
+to 340 ns, wider than the gap. Left as measured, not loosened: a rerun on
+the same lane says whether it holds. The previous run of the same day,
+before the generic fallback, had no jumbo figure at all, and at 1500 bytes
+read 381 ns against 391, the other way round.
 
 ## `2026-11-25-xdp-tc-meta-handoff.json`
 

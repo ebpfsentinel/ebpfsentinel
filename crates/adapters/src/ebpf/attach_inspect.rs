@@ -334,8 +334,8 @@ pub fn diagnose_xdp(
             format!("interface {interface} disappeared before the program could attach.")
         }
         (libc::EOPNOTSUPP, _) => format!(
-            "the driver behind {interface} does not support the requested XDP mode. A generic \
-             (SKB) attach usually works where a native one does not."
+            "the driver behind {interface} does not support XDP in the mode requested, nor in \
+             auto or generic (SKB) mode, which the agent tried after it."
         ),
         _ => {
             let e = io::Error::from_raw_os_error(errno);
@@ -1073,9 +1073,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_mode_suggests_the_mode_that_works() {
+    fn an_unsupported_mode_says_generic_was_tried_too() {
         let msg = diagnose_xdp(libc::EOPNOTSUPP, "eth0", 99999, None).reason;
-        assert!(msg.contains("generic"), "{msg}");
+        assert!(msg.contains("generic (SKB) mode"), "{msg}");
     }
 
     #[test]

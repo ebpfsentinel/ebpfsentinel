@@ -50,12 +50,15 @@
 #     whether or not the program declares them, and hands it to the baseline
 #     too: the baseline's jumbo test run is kept in the report as evidence,
 #     and only the 1500-byte one is compared.
-#   - A driver can refuse XDP at a jumbo MTU whatever the program declares:
-#     vmxnet3 has no multi-buffer XDP and answers EOPNOTSUPP to a driver-mode
-#     attach at 9000 bytes, for both trees. Then the jumbo test skips, the
-#     report's status says why and the jumbo criteria read null; the pull is
-#     then measured by the test runs alone. A driver that attaches and runs
-#     the program on none of the frames reads null the same way.
+#   - A driver can refuse native XDP at a jumbo MTU whatever the program
+#     declares: vmxnet3 has no multi-buffer XDP and answers EOPNOTSUPP to a
+#     native or auto attach at 9000 bytes. The agent then attaches in generic
+#     mode, for both trees alike, so on vmxnet3 the jumbo wire figures compare
+#     the two trees in generic mode (each row's xdp_mode says which). Where
+#     generic is refused too, the jumbo test skips, the report's status says
+#     why and the jumbo criteria read null; the pull is then measured by the
+#     test runs alone. A driver that attaches and runs the program on none of
+#     the frames reads null the same way.
 #   - Every exit from the jumbo test puts both MTUs back to 1500 first: the
 #     test runs that follow start an agent on the same interface.
 #   - The pull's cost is the current program against itself on two layouts
@@ -396,10 +399,10 @@ _bpf_stats() {
                     continue
                 fi
                 _set_mtu_both 1500 1500
-                if grep -q 'does not support the requested XDP mode' "${RESULTS_DIR}/raw/agent-log-jumbo-current-${pair}.txt" 2>/dev/null; then
-                    # The driver refuses XDP at this MTU whatever the program
-                    # declares (vmxnet3 has no multi-buffer XDP): no figure.
-                    _report --arg r "the driver behind ${EBPF_AGENT_INTERFACE} refuses XDP in the requested mode at a ${JUMBO_MTU}-byte MTU, for both trees (raw/agent-log-jumbo-current-${pair}.txt): the jumbo criteria read null" \
+                if grep -q 'does not support XDP in the mode requested' "${RESULTS_DIR}/raw/agent-log-jumbo-current-${pair}.txt" 2>/dev/null; then
+                    # The driver refuses XDP at this MTU in every mode the
+                    # agent tries, generic included: no figure.
+                    _report --arg r "the driver behind ${EBPF_AGENT_INTERFACE} refuses XDP in every mode at a ${JUMBO_MTU}-byte MTU (raw/agent-log-jumbo-current-${pair}.txt): the jumbo criteria read null" \
                         '.status.jumbo = $r'
                     env_skip "the driver refuses XDP at a ${JUMBO_MTU}-byte MTU"
                 fi

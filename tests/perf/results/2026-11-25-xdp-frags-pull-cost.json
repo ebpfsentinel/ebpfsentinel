@@ -10,33 +10,30 @@
     "dir": "/var/tmp/ebpfsentinel-xdp-baseline",
     "commit": "b0000137bdb25f89ea3069362c9c253c57ae6c3a"
   },
-  "status": {
-    "jumbo_baseline": "baseline objects did not attach at 9000 bytes (raw/agent-log-jumbo-baseline-1.txt)",
-    "jumbo": "the driver behind eth1 refuses XDP in the requested mode at a 9000-byte MTU, for both trees (raw/agent-log-jumbo-current-1.txt): the jumbo criteria read null"
-  },
+  "status": {},
   "runs": [
     {
       "tree": "baseline",
       "size": "1500",
       "pair": 1,
-      "window_s": 20.968383704,
+      "window_s": 21.16646798,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 82460,
-      "rx_pps": 78422.59199436099,
-      "fw_runs": 1644395,
-      "fw_ns_per_run": 390.5532320397471,
-      "xdp_pps": 78422.59199436099,
-      "cpu_busy_pct": 3.9974538510502864,
-      "kernel_ns_per_packet": 1477.747134964531,
+      "pktgen_pps": 78520,
+      "rx_pps": 74231.98813730471,
+      "fw_runs": 1571229,
+      "fw_ns_per_run": 343.7832187415074,
+      "xdp_pps": 74231.98813730471,
+      "cpu_busy_pct": 3.8044156168142695,
+      "kernel_ns_per_packet": 1470.1867137126414,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 5728,
+          "id": 404,
           "name": "xdp_firewall",
-          "runs": 1644395,
-          "ns": 642223782,
-          "ns_per_run": 390.5532320397471
+          "runs": 1571229,
+          "ns": 540162163,
+          "ns_per_run": 343.7832187415074
         }
       ]
     },
@@ -44,24 +41,24 @@
       "tree": "current",
       "size": "1500",
       "pair": 1,
-      "window_s": 20.995396326,
+      "window_s": 21.005078405,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 81784,
-      "rx_pps": 77845.11302489808,
-      "fw_runs": 1634389,
-      "fw_ns_per_run": 363.90909569264113,
-      "xdp_pps": 77845.11302489808,
-      "cpu_busy_pct": 2.5676878098385663,
-      "kernel_ns_per_packet": 1003.4330872270922,
+      "pktgen_pps": 78013,
+      "rx_pps": 73988.44079677694,
+      "fw_runs": 1554133,
+      "fw_ns_per_run": 343.9007427292259,
+      "xdp_pps": 73988.44079677694,
+      "cpu_busy_pct": 2.945619335347432,
+      "kernel_ns_per_packet": 1261.1533247154523,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 5793,
+          "id": 469,
           "name": "xdp_firewall",
-          "runs": 1634389,
-          "ns": 594769023,
-          "ns_per_run": 363.90909569264113
+          "runs": 1554133,
+          "ns": 534467493,
+          "ns_per_run": 343.9007427292259
         }
       ]
     },
@@ -69,24 +66,24 @@
       "tree": "baseline",
       "size": "1500",
       "pair": 2,
-      "window_s": 21.115504038,
+      "window_s": 20.940516376,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 78237,
-      "rx_pps": 73807.66271055187,
-      "fw_runs": 1558486,
-      "fw_ns_per_run": 389.4364626952055,
-      "xdp_pps": 73807.66271055187,
-      "cpu_busy_pct": 3.765478898155168,
-      "kernel_ns_per_packet": 1366.711025957243,
+      "pktgen_pps": 75983,
+      "rx_pps": 72500.26564483416,
+      "fw_runs": 1518193,
+      "fw_ns_per_run": 356.32838051552073,
+      "xdp_pps": 72500.26564483416,
+      "cpu_busy_pct": 3.361664340986934,
+      "kernel_ns_per_packet": 1337.1159002840877,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 5858,
+          "id": 534,
           "name": "xdp_firewall",
-          "runs": 1558486,
-          "ns": 606931275,
-          "ns_per_run": 389.4364626952055
+          "runs": 1518193,
+          "ns": 540975253,
+          "ns_per_run": 356.32838051552073
         }
       ]
     },
@@ -94,24 +91,24 @@
       "tree": "current",
       "size": "1500",
       "pair": 2,
-      "window_s": 20.985602676,
+      "window_s": 20.979084913,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 77953,
-      "rx_pps": 74161.74908237837,
-      "fw_runs": 1556329,
-      "fw_ns_per_run": 381.13347242131965,
-      "xdp_pps": 74161.74908237837,
-      "cpu_busy_pct": 2.6349287169042768,
-      "kernel_ns_per_packet": 1073.0378987990327,
+      "pktgen_pps": 75231,
+      "rx_pps": 71573.80821074519,
+      "fw_runs": 1501553,
+      "fw_ns_per_run": 358.81284643299307,
+      "xdp_pps": 71573.80821074519,
+      "cpu_busy_pct": 2.425088877602844,
+      "kernel_ns_per_packet": 1032.2645953889073,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 5923,
+          "id": 599,
           "name": "xdp_firewall",
-          "runs": 1556329,
-          "ns": 593169076,
-          "ns_per_run": 381.13347242131965
+          "runs": 1501553,
+          "ns": 538776506,
+          "ns_per_run": 358.81284643299307
         }
       ]
     },
@@ -119,24 +116,24 @@
       "tree": "baseline",
       "size": "1500",
       "pair": 3,
-      "window_s": 20.943558833,
+      "window_s": 21.128655278,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 77305,
-      "rx_pps": 73820.30973474908,
-      "fw_runs": 1546060,
-      "fw_ns_per_run": 413.8516752260585,
-      "xdp_pps": 73820.30973474908,
-      "cpu_busy_pct": 3.720751822017645,
-      "kernel_ns_per_packet": 1429.4399958604452,
+      "pktgen_pps": 75256,
+      "rx_pps": 71053.03107307386,
+      "fw_runs": 1501255,
+      "fw_ns_per_run": 343.0367685702962,
+      "xdp_pps": 71053.03107307386,
+      "cpu_busy_pct": 3.3576458752515093,
+      "kernel_ns_per_packet": 1272.268868380122,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 5988,
+          "id": 664,
           "name": "xdp_firewall",
-          "runs": 1546060,
-          "ns": 639839521,
-          "ns_per_run": 413.8516752260585
+          "runs": 1501255,
+          "ns": 514985664,
+          "ns_per_run": 343.0367685702962
         }
       ]
     },
@@ -144,24 +141,174 @@
       "tree": "current",
       "size": "1500",
       "pair": 3,
-      "window_s": 21.243048397,
+      "window_s": 21.066286836,
       "link_mtu": 1500,
       "xdp_mode": 1,
-      "pktgen_pps": 78933,
-      "rx_pps": 74351.4758561231,
-      "fw_runs": 1579452,
-      "fw_ns_per_run": 387.12323071546336,
-      "xdp_pps": 74351.4758561231,
-      "cpu_busy_pct": 2.627608750314307,
-      "kernel_ns_per_packet": 981.3530262394805,
+      "pktgen_pps": 75769,
+      "rx_pps": 71809.80738451007,
+      "fw_runs": 1512766,
+      "fw_ns_per_run": 359.2001783487995,
+      "xdp_pps": 71809.80738451007,
+      "cpu_busy_pct": 2.655089971058261,
+      "kernel_ns_per_packet": 1176.6525688705326,
       "frags_pulled": null,
       "programs": [
         {
-          "id": 6053,
+          "id": 729,
           "name": "xdp_firewall",
-          "runs": 1579452,
-          "ns": 611442561,
-          "ns_per_run": 387.12323071546336
+          "runs": 1512766,
+          "ns": 543385817,
+          "ns_per_run": 359.2001783487995
+        }
+      ]
+    },
+    {
+      "tree": "baseline",
+      "size": "jumbo",
+      "pair": 1,
+      "window_s": 20.939438905,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 67418,
+      "rx_pps": 64157.64080857066,
+      "fw_runs": 1343425,
+      "fw_ns_per_run": 309.24987922660364,
+      "xdp_pps": 64157.64080857066,
+      "cpu_busy_pct": 3.6394469084268195,
+      "kernel_ns_per_packet": 1592.943409568826,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 794,
+          "name": "xdp_firewall",
+          "runs": 1343425,
+          "ns": 415454019,
+          "ns_per_run": 309.24987922660364
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "jumbo",
+      "pair": 1,
+      "window_s": 20.968351547,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 66607,
+      "rx_pps": 63294.96131468116,
+      "fw_runs": 1327191,
+      "fw_ns_per_run": 340.2426719289085,
+      "xdp_pps": 63294.96131468116,
+      "cpu_busy_pct": 2.7212647401840093,
+      "kernel_ns_per_packet": 1288.435500240734,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 859,
+          "name": "xdp_firewall",
+          "runs": 1327191,
+          "ns": 451567012,
+          "ns_per_run": 340.2426719289085
+        }
+      ]
+    },
+    {
+      "tree": "baseline",
+      "size": "jumbo",
+      "pair": 2,
+      "window_s": 20.96742414,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 67375,
+      "rx_pps": 64163.961725438734,
+      "fw_runs": 1345353,
+      "fw_ns_per_run": 319.5872243195652,
+      "xdp_pps": 64163.961725438734,
+      "cpu_busy_pct": 3.9220779220779223,
+      "kernel_ns_per_packet": 1754.1864477204124,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 924,
+          "name": "xdp_firewall",
+          "runs": 1345353,
+          "ns": 429957631,
+          "ns_per_run": 319.5872243195652
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "jumbo",
+      "pair": 2,
+      "window_s": 21.251075226,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 64726,
+      "rx_pps": 60924.21142135766,
+      "fw_runs": 1294705,
+      "fw_ns_per_run": 342.35733854430157,
+      "xdp_pps": 60924.21142135766,
+      "cpu_busy_pct": 3.0979092299847015,
+      "kernel_ns_per_packet": 1459.7919989495676,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 989,
+          "name": "xdp_firewall",
+          "runs": 1294705,
+          "ns": 443251758,
+          "ns_per_run": 342.35733854430157
+        }
+      ]
+    },
+    {
+      "tree": "baseline",
+      "size": "jumbo",
+      "pair": 3,
+      "window_s": 20.925424235,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 66222,
+      "rx_pps": 63288.227045113475,
+      "fw_runs": 1324333,
+      "fw_ns_per_run": 339.5171018165371,
+      "xdp_pps": 63288.227045113475,
+      "cpu_busy_pct": 4.166666666666667,
+      "kernel_ns_per_packet": 1955.7014738740181,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 1054,
+          "name": "xdp_firewall",
+          "runs": 1324333,
+          "ns": 449633702,
+          "ns_per_run": 339.5171018165371
+        }
+      ]
+    },
+    {
+      "tree": "current",
+      "size": "jumbo",
+      "pair": 3,
+      "window_s": 21.048146324,
+      "link_mtu": 9000,
+      "xdp_mode": 2,
+      "pktgen_pps": 66501,
+      "rx_pps": 62895.0872738146,
+      "fw_runs": 1323825,
+      "fw_ns_per_run": 351.0246799992446,
+      "xdp_pps": 62895.0872738146,
+      "cpu_busy_pct": 2.999485066941298,
+      "kernel_ns_per_packet": 1465.4504938341547,
+      "frags_pulled": null,
+      "programs": [
+        {
+          "id": 1119,
+          "name": "xdp_firewall",
+          "runs": 1323825,
+          "ns": 464695247,
+          "ns_per_run": 351.0246799992446
         }
       ]
     }
@@ -176,21 +323,20 @@
         "warmup": 200,
         "runs_total": 2200,
         "candidates": [
-          755,
-          6246
+          1184
         ],
-        "prog_id": 6246,
+        "prog_id": 1184,
         "pulled_in_prog": 0,
         "ok": true,
         "retvals": [
           2
         ],
         "ns": {
-          "median": 122,
-          "p10": 106,
-          "p90": 132,
-          "mean": 124.8035,
-          "min": 100
+          "median": 111,
+          "p10": 100,
+          "p90": 133,
+          "mean": 122.4275,
+          "min": 93
         },
         "frags_pulled": null
       },
@@ -202,23 +348,22 @@
         "warmup": 200,
         "runs_total": 2200,
         "candidates": [
-          755,
-          6246
+          1184
         ],
-        "prog_id": 6246,
+        "prog_id": 1184,
         "pulled_in_prog": 0,
         "ok": true,
         "retvals": [
           2
         ],
         "ns": {
-          "median": 125,
-          "p10": 109,
-          "p90": 134,
-          "mean": 123.3425,
-          "min": 101
+          "median": 124,
+          "p10": 112,
+          "p90": 138,
+          "mean": 127.702,
+          "min": 106
         },
-        "frags_pulled": null
+        "frags_pulled": 0
       },
       "jumbo_pulled": {
         "prog": "xdp_firewall",
@@ -228,23 +373,22 @@
         "warmup": 200,
         "runs_total": 2200,
         "candidates": [
-          755,
-          6246
+          1184
         ],
-        "prog_id": 6246,
+        "prog_id": 1184,
         "pulled_in_prog": 2200,
         "ok": true,
         "retvals": [
           2
         ],
         "ns": {
-          "median": 147,
-          "p10": 127,
-          "p90": 158,
-          "mean": 151.9315,
-          "min": 122
+          "median": 145,
+          "p10": 124,
+          "p90": 166,
+          "mean": 145.934,
+          "min": 115
         },
-        "frags_pulled": 0
+        "frags_pulled": 2200
       }
     },
     "baseline": {
@@ -256,21 +400,20 @@
         "warmup": 200,
         "runs_total": 2200,
         "candidates": [
-          755,
-          6311
+          1249
         ],
-        "prog_id": 6311,
+        "prog_id": 1249,
         "pulled_in_prog": null,
         "ok": true,
         "retvals": [
           2
         ],
         "ns": {
-          "median": 114,
-          "p10": 102,
+          "median": 110,
+          "p10": 100,
           "p90": 130,
-          "mean": 120.6725,
-          "min": 96
+          "mean": 114.7935,
+          "min": 91
         },
         "frags_pulled": null
       },
@@ -282,21 +425,20 @@
         "warmup": 200,
         "runs_total": 2200,
         "candidates": [
-          755,
-          6311
+          1249
         ],
-        "prog_id": 6311,
+        "prog_id": 1249,
         "pulled_in_prog": null,
         "ok": true,
         "retvals": [
           2
         ],
         "ns": {
-          "median": 115,
-          "p10": 105,
-          "p90": 131,
-          "mean": 124.147,
-          "min": 99
+          "median": 127,
+          "p10": 111,
+          "p90": 133,
+          "mean": 132.8555,
+          "min": 106
         },
         "frags_pulled": null
       }
@@ -310,11 +452,11 @@
           "xdp_modes": [
             1
           ],
-          "fw_ns_per_run": 390.5532320397471,
-          "xdp_pps": 73820.30973474908,
-          "pktgen_pps": 78237,
-          "kernel_ns_per_packet": 1429.4399958604452,
-          "cpu_busy_pct": 3.765478898155168,
+          "fw_ns_per_run": 343.7832187415074,
+          "xdp_pps": 72500.26564483416,
+          "pktgen_pps": 75983,
+          "kernel_ns_per_packet": 1337.1159002840877,
+          "cpu_busy_pct": 3.361664340986934,
           "frags_pulled": null
         },
         "current": {
@@ -322,26 +464,48 @@
           "xdp_modes": [
             1
           ],
-          "fw_ns_per_run": 381.13347242131965,
-          "xdp_pps": 74351.4758561231,
-          "pktgen_pps": 78933,
-          "kernel_ns_per_packet": 1003.4330872270922,
-          "cpu_busy_pct": 2.627608750314307,
+          "fw_ns_per_run": 358.81284643299307,
+          "xdp_pps": 71809.80738451007,
+          "pktgen_pps": 75769,
+          "kernel_ns_per_packet": 1176.6525688705326,
+          "cpu_busy_pct": 2.655089971058261,
           "frags_pulled": null
         }
       },
       "jumbo": {
-        "baseline": null,
-        "current": null
+        "baseline": {
+          "runs": 3,
+          "xdp_modes": [
+            2
+          ],
+          "fw_ns_per_run": 319.5872243195652,
+          "xdp_pps": 64157.64080857066,
+          "pktgen_pps": 67375,
+          "kernel_ns_per_packet": 1754.1864477204124,
+          "cpu_busy_pct": 3.9220779220779223,
+          "frags_pulled": null
+        },
+        "current": {
+          "runs": 3,
+          "xdp_modes": [
+            2
+          ],
+          "fw_ns_per_run": 342.35733854430157,
+          "xdp_pps": 62895.0872738146,
+          "pktgen_pps": 66501,
+          "kernel_ns_per_packet": 1459.7919989495676,
+          "cpu_busy_pct": 2.999485066941298,
+          "frags_pulled": null
+        }
       }
     },
-    "pull_added_ns": 22
+    "pull_added_ns": 21
   },
   "criteria": {
     "wire_1500_ns": true,
     "wire_1500_pps": true,
-    "wire_jumbo_ns": null,
-    "wire_jumbo_pps": null,
+    "wire_jumbo_ns": false,
+    "wire_jumbo_pps": true,
     "testrun_1500_ns": true,
     "pull_fired": true,
     "pull_ns": true

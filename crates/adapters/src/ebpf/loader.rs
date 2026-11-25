@@ -239,9 +239,12 @@ impl EbpfLoader {
 
     /// Attach a named XDP program to the given network interface.
     ///
-    /// Attempts the requested `flags` mode first. If attachment fails and the
-    /// mode is not already auto, falls back to [`XDP_MODE_AUTO`] (kernel picks
-    /// best available) and logs a warning.
+    /// Attempts the requested `flags` mode first, then [`XDP_MODE_AUTO`]
+    /// (the kernel picks native where the driver offers it), then
+    /// [`XDP_MODE_SKB`] when the driver answered `EOPNOTSUPP`: a driver without
+    /// multi-buffer XDP refuses a frags program at a jumbo MTU in every native
+    /// mode, auto included, and generic mode still runs it on the same packets.
+    /// Each step down is logged as a warning.
     ///
     /// Attaching is idempotent: when the interface already carries this exact
     /// program the call succeeds without creating a second link. A failure is
@@ -285,69 +288,54 @@ impl EbpfLoader {
                 return Ok(());
             }
 
-            let mode_label = xdp_flags_label(flags);
-            match attach_xdp_ebusy_retry(program_name, raw, interface, flags) {
-                Ok(link) => {
-                    self.links.push(AttachedLink::new(
-                        program_name,
-                        interface,
-                        LinkHook::Xdp,
-                        link,
-                    ));
-                    attach_inspect::clear_block(program_name, interface);
-                    info!(
-                        program_name,
-                        interface,
-                        mode = mode_label,
-                        "XDP kfunc program attached"
-                    );
-                    return Ok(());
-                }
-                Err(e) if flags != XDP_MODE_AUTO => {
+            let requested = xdp_flags_label(flags);
+            let mut last_err = None;
+            for step in xdp_attach_ladder(flags) {
+                if let Some(e) = &last_err {
+                    if step == XDP_MODE_SKB && errno_of(e) != libc::EOPNOTSUPP {
+                        // Generic mode answers a driver that cannot host the
+                        // program; a busy hook or a refused permission is not
+                        // that, and attaching generic would only hide it.
+                        break;
+                    }
                     warn!(
                         program_name,
                         interface,
-                        requested_mode = mode_label,
+                        requested_mode = requested,
+                        next_mode = xdp_flags_label(step),
                         error = %e,
-                        "XDP kfunc attach failed with requested mode, falling back to auto"
+                        "XDP attach refused, trying the next mode"
                     );
-                    match attach_xdp_ebusy_retry(program_name, raw, interface, XDP_MODE_AUTO) {
-                        Ok(link) => {
-                            self.links.push(AttachedLink::new(
-                                program_name,
-                                interface,
-                                LinkHook::Xdp,
-                                link,
-                            ));
-                            attach_inspect::clear_block(program_name, interface);
-                            info!(
-                                program_name,
-                                interface,
-                                mode = xdp_flags_label(XDP_MODE_AUTO),
-                                "XDP kfunc program attached (fallback from {mode_label})"
-                            );
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            return Err(record_xdp_block(
-                                program_name,
-                                interface,
-                                ifindex,
-                                own_prog_id,
-                                &e,
-                            ));
-                        }
+                }
+                match attach_xdp_ebusy_retry(program_name, raw, interface, step) {
+                    Ok(link) => {
+                        self.links.push(AttachedLink::new(
+                            program_name,
+                            interface,
+                            LinkHook::Xdp,
+                            link,
+                        ));
+                        attach_inspect::clear_block(program_name, interface);
+                        info!(
+                            program_name,
+                            interface,
+                            requested_mode = requested,
+                            mode = xdp_flags_label(step),
+                            "XDP kfunc program attached"
+                        );
+                        return Ok(());
                     }
+                    Err(e) => last_err = Some(e),
                 }
-                Err(e) => {
-                    return Err(record_xdp_block(
-                        program_name,
-                        interface,
-                        ifindex,
-                        own_prog_id,
-                        &e,
-                    ));
-                }
+            }
+            if let Some(e) = last_err {
+                return Err(record_xdp_block(
+                    program_name,
+                    interface,
+                    ifindex,
+                    own_prog_id,
+                    &e,
+                ));
             }
         }
 
@@ -870,6 +858,18 @@ fn check_tcx_order(
     Err(anyhow::anyhow!("{reason}"))
 }
 
+/// The attach modes tried in order for a requested mode: the request, auto
+/// when the request was narrower, generic last unless already tried.
+fn xdp_attach_ladder(requested: u32) -> Vec<u32> {
+    let mut ladder = vec![requested];
+    for next in [XDP_MODE_AUTO, XDP_MODE_SKB] {
+        if !ladder.contains(&next) {
+            ladder.push(next);
+        }
+    }
+    ladder
+}
+
 /// Human-readable label for XDP attachment flags.
 fn xdp_flags_label(flags: u32) -> &'static str {
     match flags {
@@ -888,5 +888,42 @@ pub fn xdp_mode_to_flags(mode: infrastructure::config::XdpMode) -> u32 {
         XdpMode::Native => XDP_MODE_DRV,
         XdpMode::Generic => XDP_MODE_SKB,
         XdpMode::Offloaded => XDP_MODE_HW,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_steps_down_to_auto_then_generic() {
+        assert_eq!(
+            xdp_attach_ladder(XDP_MODE_DRV),
+            vec![XDP_MODE_DRV, XDP_MODE_AUTO, XDP_MODE_SKB]
+        );
+    }
+
+    #[test]
+    fn auto_steps_down_to_generic() {
+        assert_eq!(
+            xdp_attach_ladder(XDP_MODE_AUTO),
+            vec![XDP_MODE_AUTO, XDP_MODE_SKB]
+        );
+    }
+
+    #[test]
+    fn generic_still_tries_auto_once() {
+        assert_eq!(
+            xdp_attach_ladder(XDP_MODE_SKB),
+            vec![XDP_MODE_SKB, XDP_MODE_AUTO]
+        );
+    }
+
+    #[test]
+    fn offloaded_keeps_every_fallback() {
+        assert_eq!(
+            xdp_attach_ladder(XDP_MODE_HW),
+            vec![XDP_MODE_HW, XDP_MODE_AUTO, XDP_MODE_SKB]
+        );
     }
 }
