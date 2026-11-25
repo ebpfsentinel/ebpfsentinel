@@ -72,6 +72,8 @@ installed_files_are_in_place() {
     [ -f "/usr/lib/ebpfsentinel/${obj}" ] || { echo "  missing /usr/lib/ebpfsentinel/${obj}" >&2; missing=1; }
   done </pkgs/ebpf-objects
   check "every eBPF object is under /usr/lib/ebpfsentinel" [ "${missing}" = 0 ]
+  check "the loader signing certificate is where the warden reads it" \
+    [ "$(mode_of /usr/share/ebpfsentinel/loader-signing.der)" = 644 ]
   check "the configuration is mode 0640" [ "$(mode_of /etc/ebpfsentinel/config.yaml)" = 640 ]
   check "the three host profiles are shipped" [ "$(find /usr/share/ebpfsentinel/profiles -name '*.yaml' | wc -l)" -ge 3 ]
   check "the tmpfiles drop-in is installed" [ -f /usr/lib/tmpfiles.d/ebpfsentinel.conf ]

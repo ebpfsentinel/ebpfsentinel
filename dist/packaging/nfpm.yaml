@@ -60,6 +60,14 @@ contents:
     file_info:
       mode: 0644
 
+  # The certificate the programs' loaders are signed against, where the
+  # warden looks for it when nothing is at /usr/local/share: it puts it in the
+  # kernel keyring the agent's signed loads are checked against.
+  - src: ${STAGE}/ebpf/loader-signing.der
+    dst: /usr/share/ebpfsentinel/loader-signing.der
+    file_info:
+      mode: 0644
+
   # A configuration file in both formats: dpkg prompts rather than overwrites,
   # rpm writes the new one beside it as .rpmnew. An upgrade never takes an
   # operator's rules away.

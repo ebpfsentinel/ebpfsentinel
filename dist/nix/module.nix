@@ -184,6 +184,10 @@ in
       unitConfig.RefuseManualStop = true;
       restartIfChanged = false;
 
+      # The guard on program loads is in the store beside the agent's
+      # objects, not at the path the images use.
+      environment.EBPFSENTINEL_LOAD_GUARD_OBJECT = "${cfg.package}/lib/ebpfsentinel/lsm-bpf-load-guard";
+
       startLimitBurst = 5;
       startLimitIntervalSec = 300;
 

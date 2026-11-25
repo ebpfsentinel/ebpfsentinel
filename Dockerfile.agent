@@ -116,6 +116,12 @@ COPY --from=agent-builder /build/ebpfsentinel-agent /usr/local/bin/ebpfsentinel-
 # Copy pre-built eBPF programs (built by CI or `cargo xtask ebpf-build`)
 COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 
+# The certificate the eBPF loaders are signed for (`cargo xtask ebpf-build`
+# writes it beside the objects). The warden image adds it to the kernel keyring
+# it hands this agent; the copy here, at the same path, is what a reader checks
+# against the digest the release's measurements record.
+COPY ebpf-out/loader-signing.der /usr/local/share/ebpfsentinel/loader-signing.der
+
 # Config dir (0755, traversable) + file (0640, the agent rejects a world-readable
 # config - it may hold secrets). Staged in the builder and copied as a tree:
 # `COPY --chmod` on a single file also re-modes the auto-created parent dir, which

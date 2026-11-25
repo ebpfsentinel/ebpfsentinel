@@ -190,7 +190,7 @@ What scoping cannot remove is a suite written for more than one lane whose indiv
 
 _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render` after adding/removing a feature._
 
-#### eBPF programs (30)
+#### eBPF programs (31)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
@@ -199,6 +199,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-connect-redirect` | ebpfsentinel-enterprise/27 | none | 6.18 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. The listener and the selection are the enterprise TLS interception's, so the suite lives in that repository: ebpfsentinel-enterprise/tests/integration/suites/27-enterprise-tls-redirect.bats asserts a process in the selected cgroup is answered by the agent's listener while one outside it reaches the server |
 | `cgroup-workload-firewall` | 67, 70, 92, 98 | 2vm | 6.18 | datapath | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-bpf-guard` | 88 | none | 6.18 | datapath | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets |
+| `lsm-bpf-load-guard` | 157, 158 | none | 6.18 | datapath | Loaded by the warden, as root and without a token, before it hands the token over: every load made through a BPF token passes only signed against the warden's keyring. 157 has an unsigned token load refused with a permission error and a signed one loaded where the BPF LSM is active and the kernel verifies signatures, the posture reading enforced while it holds, and with the warden given no guard object the same signed loads passing and the posture saying verified but not enforced, naming the missing condition. 158 reads the guard attached and the posture enforced on a kernel booted with lockdown=confidentiality, where the agent's own programs that read kernel memory are refused |
 | `lsm-exec-digest` | 154 | none | 6.18 | datapath | The executable's SHA-256 taken from IMA's hash at bprm_committed_creds and kept against device and inode, dropped at file_open for writing and at path_truncate: 154 reads the process table's digest against sha256sum, a second exec answered from the entry and an append dropping it. Needs the BPF LSM and IMA active at boot; the suite skips where either is not |
 | `lsm-exec-network` | 91 | none | 6.18 | datapath | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-tamper-guard` | ebpfsentinel-enterprise/62 | none | 6.18 | manual | Refuses the signals, ptrace and writes that would end or alter a protected agent. Armed only by the enterprise tamper protection, so the suite lives there: ebpfsentinel-enterprise/tests/integration/suites/62-enterprise-signed-stop.bats asserts a kill is refused while armed and a signed stop ends the agent. Needs the BPF LSM active at boot (lsm=bpf) |
@@ -302,7 +303,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `hidden` | 79 | none | 6.18 | datapath | Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit |
 | `hostrule` | 78, 135 | none | 6.18 | datapath | Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule |
 | `identity` | 107 | 2vm | 6.18 | nightly | This node's addresses as names another node can read, and the peer's names on a flow. 107 opens a TCP connection and sends UDP datagrams from a named program on the agent's machine to the attacker VM, reads both back off /api/v1/conntrack/connections with that program's pid and executable while the far end records the agent's address, and asserts no flow carries a peer, since no list of remote identities was handed to this agent. The two-end reading, a peer named from the list another agent publishes, needs the routes that publish and take that list, which are the enterprise agent's, so it is asserted beside them |
-| `ids` | 12, 25, 38, 39, 55, 59, 66, 130 | 2vm | 6.18 | datapath | Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert) |
+| `ids` | 12, 25, 38, 39, 55, 59, 66, 130, 155 | 2vm | 6.18 | datapath | Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert); imported Suricata dataset, datarep and iprep keywords raise their rules on matching DNS names and addresses, and an iprep naming an undeclared category is refused at import, in 155 |
 | `inventory` | 80 | none | 6.18 | datapath | The host's dpkg database agrees with dpkg-query, a chroot's Alpine database is read under kind other, and a link climbing out of a root finds nothing. rpm's sqlite reader and every parser are unit-tested against databases taken from real images |
 | `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.18 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
 | `l2` | 37, 44, 62 | 2vm | 6.18 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62 |
@@ -327,12 +328,13 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `workload` | 67, 70, 92, 95, 149 | none | 6.18 | datapath | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use, 149 the label a cgroup directory carries |
 | `zone` | 31 | 2vm | 6.18 | datapath | Zone-based policy |
 
-#### Capabilities above the floor (20)
+#### Capabilities above the floor (21)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
 | `attribution` | 70 | none | 6.18 | datapath | The workload named on a flow |
 | `bpf_lsm` | 83, 86 | none | 6.18 | datapath | A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86 |
+| `bpf_prog_signing` | 86, 156, 157, 158 | none | 6.18 | datapath | 86 reads bpf_prog_signing on the kernel-features route and the signing block of the crypto posture; 156 loads every program through a loader signed at build, against the keyring the warden made, reads the serial and certificate digest on the posture, and sees a loader signed by a key the keyring does not hold refused and the program loaded unsigned, with the warden's guard kept off so the posture says verified but not enforced. 157 attaches the guard and reads enforced, an unsigned token load refused and a signed one loaded. Both skip where the kernel does not verify signatures, 157's guarded half also where the BPF LSM is not active. 158 holds the same enforced posture under lockdown=confidentiality, beside the list of programs the kernel loads and refuses there (lockdown-programs.toml), and skips off the lockdown lane |
 | `cgroup_labels` | 149 | none | 6.18 | datapath | A cgroup carrying the label a rule names refused, another label and none let through; the route and the start-up log name the path reading the label; where the kernel reads it, a label set on the client's own cgroup refuses its next connect, skipped where the agent reads it |
 | `copy_from_user_str` | 86, 151 | none | 6.18 | datapath | 86 reads the report; 151 shows a process with the arguments it was started with although it rewrote them at once, which only the copy made at exec can see, and the /proc fallback without the BPF LSM |
 | `dlp_whole_record` | 150 | none | 6.18 | datapath | A secret 12,000 bytes into one SSL_write raises an alert where the probes read the whole record; skipped where the kernel leaves them on the bounded copy, which the route and the start-up log both name |
@@ -359,7 +361,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 105, 130, 141, 30 |
 | `/api/v1/agent/stop` | _MISSING_ |
-| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 150, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
+| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 150, 155, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | 25 |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -379,7 +381,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/conntrack/events` | 18 |
 | `/api/v1/conntrack/flush` | 18, 62 |
 | `/api/v1/conntrack/status` | 16, 18, 21, 65 |
-| `/api/v1/crypto/posture` | 58 |
+| `/api/v1/crypto/posture` | 58, 86 |
 | `/api/v1/ddos/attacks` | 15, 22 |
 | `/api/v1/ddos/attacks/history` | 15, 22 |
 | `/api/v1/ddos/policies` | 15, 22, 30 |
@@ -403,7 +405,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/hidden-processes` | 79 |
 | `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 62, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
-| `/api/v1/ebpf/status` | 06, 16, 62, 68 |
+| `/api/v1/ebpf/status` | 06, 158, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 27, 60 |
 | `/api/v1/exposure/listeners` | 90 |
 | `/api/v1/fingerprints/summary` | 41 |
@@ -425,7 +427,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
 | `/api/v1/ids/rules` | 102, 12, 16, 55, 59 |
 | `/api/v1/ids/status` | 12, 16, 33 |
-| `/api/v1/ids/suricata/report` | 102 |
+| `/api/v1/ids/suricata/report` | 102, 155 |
 | `/api/v1/ips/blacklist` | 04, 13, 38, 39, 55, 59 |
 | `/api/v1/ips/blacklist/{ip}` | 55 |
 | `/api/v1/ips/domain-blocks` | 13, 16 |

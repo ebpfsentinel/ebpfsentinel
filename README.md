@@ -22,7 +22,7 @@
 </p>
 
 eBPFsentinel is a network and host security agent for Linux, written in Rust. It
-loads 30 eBPF programs at XDP, TC, cgroup, LSM, tracepoint and uprobe hooks and
+loads 31 eBPF programs at XDP, TC, cgroup, LSM, tracepoint and uprobe hooks and
 takes its verdicts there: an unwanted packet is dropped in the network driver
 before the kernel has allocated anything for it, a TLS payload is read in the
 application's own library without a proxy or a key, and a process is named,
@@ -123,7 +123,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel (30 eBPF programs)"]
+    subgraph kernel["Linux Kernel (31 eBPF programs)"]
         direction TB
         subgraph xdp["XDP - first hook on the receive path"]
             fw["xdp-firewall\n(stateful L3/L4)"]

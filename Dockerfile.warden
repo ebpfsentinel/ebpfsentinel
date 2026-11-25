@@ -5,8 +5,11 @@
 # This is the privileged half of the split deployment: a small sidecar that holds
 # the extended capabilities (CAP_SYS_ADMIN / CAP_NET_ADMIN / CAP_NET_RAW) and
 # serves kernel operations to a fully rootless agent over an AF_UNIX socket. It
-# loads no eBPF and holds no maps - the agent loads its own programs against the
-# bpffs the warden delegates. It answers only the narrow, typed, peer-authenticated
+# holds no maps and loads one eBPF program of its own, the guard on program loads
+# (lsm-bpf-load-guard), which refuses a load through the agent's BPF token not
+# signed against the warden's keyring, where the kernel verifies signatures and
+# bpf is in lsm= at boot. The agent loads its own programs against the bpffs the
+# warden delegates. It answers only the narrow, typed, peer-authenticated
 # `warden-proto` RPC: bpffs delegation (+ module-BTF/pcap fd hand-off), conntrack
 # read/teardown, route programming, gratuitous ARP, and on-demand pcap sockets.
 #
@@ -71,6 +74,19 @@ LABEL org.opencontainers.image.title="eBPFsentinel-warden" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=warden-builder /build/warden /usr/local/bin/warden
+
+# The certificate the agent's eBPF loaders are signed for, written by
+# `cargo xtask ebpf-build` beside the objects. At start the warden adds it to a
+# kernel keyring of its own and hands the agent that keyring's serial, so the
+# kernel verifies every signed program the agent loads against this build's
+# key. The build context needs `ebpf-out/`, as for the agent image.
+COPY ebpf-out/loader-signing.der /usr/local/share/ebpfsentinel/loader-signing.der
+
+# The guard on program loads, built by `cargo xtask ebpf-build` beside the
+# agent's objects and loaded by the warden itself, as root and without a token,
+# held to the keyring above. Where the kernel does not verify signatures or bpf
+# is not in lsm= at boot, the warden leaves it out and says why.
+COPY ebpf-out/lsm-bpf-load-guard /usr/local/lib/ebpfsentinel/lsm-bpf-load-guard
 
 # The warden serves on a socket under this directory, shared with the agent
 # container via a volume. The agent connects with EBPFSENTINEL_WARDEN_SOCK.

@@ -222,7 +222,7 @@ spec:
             - "--config"
             - "/etc/ebpfsentinel/config.yaml"
             - "warden-policy"
-            - "--output"
+            - "--output-file"
             - "/run/ebpfsentinel-policy/warden-policy.json"
           securityContext:
             runAsUser: 65534
@@ -301,6 +301,12 @@ spec:
               # namespaced subtree, so without the node's every cgroup hook
               # would cover the warden alone and no workload on the node.
               mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: securityfs
+              # The warden attaches its guard on program loads only where the
+              # BPF LSM is active, and reads that here; the pod's own /sys
+              # does not carry securityfs.
+              mountPath: /sys/kernel/security
               readOnly: true
             - name: node-bpf
               # The node's bpffs, where the warden pins the agent's XDP, TC

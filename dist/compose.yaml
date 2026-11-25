@@ -86,6 +86,9 @@ services:
       - warden-policy:/run/ebpfsentinel-policy:ro
       - /proc:/host/proc:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # securityfs, read-only: the warden attaches its guard on program loads
+      # only where the BPF LSM is active, and reads that here.
+      - /sys/kernel/security:/sys/kernel/security:ro
       # The host bpffs, where the warden pins the agent's XDP, TC and cgroup
       # links: they keep enforcing after `docker stop`, `docker rm` or a crash,
       # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the

@@ -231,6 +231,9 @@ suite_profiles:
   "153": datapath
   "154": datapath
   "155": datapath
+  "156": datapath
+  "157": datapath
+  "158": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -444,6 +447,14 @@ coverage:
     kernel_min: "6.18"
     profile: datapath
     notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets"
+
+  - kind: ebpf_program
+    feature: lsm-bpf-load-guard
+    suites: ["157", "158"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "Loaded by the warden, as root and without a token, before it hands the token over: every load made through a BPF token passes only signed against the warden's keyring. 157 has an unsigned token load refused with a permission error and a signed one loaded where the BPF LSM is active and the kernel verifies signatures, the posture reading enforced while it holds, and with the warden given no guard object the same signed loads passing and the posture saying verified but not enforced, naming the missing condition. 158 reads the guard attached and the posture enforced on a kernel booted with lockdown=confidentiality, where the agent's own programs that read kernel memory are refused"
 
   - kind: ebpf_program
     feature: lsm-write-refusal
@@ -1279,6 +1290,14 @@ coverage:
     kernel_min: "6.18"
     profile: datapath
     notes: "A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86"
+
+  - kind: capability
+    feature: bpf_prog_signing
+    suites: ["86", "156", "157", "158"]
+    topology: none
+    kernel_min: "6.18"
+    profile: datapath
+    notes: "86 reads bpf_prog_signing on the kernel-features route and the signing block of the crypto posture; 156 loads every program through a loader signed at build, against the keyring the warden made, reads the serial and certificate digest on the posture, and sees a loader signed by a key the keyring does not hold refused and the program loaded unsigned, with the warden's guard kept off so the posture says verified but not enforced. 157 attaches the guard and reads enforced, an unsigned token load refused and a signed one loaded. Both skip where the kernel does not verify signatures, 157's guarded half also where the BPF LSM is not active. 158 holds the same enforced posture under lockdown=confidentiality, beside the list of programs the kernel loads and refuses there (lockdown-programs.toml), and skips off the lockdown lane"
 
   - kind: capability
     feature: tamper_protection

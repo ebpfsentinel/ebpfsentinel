@@ -70,6 +70,11 @@ mkdir -p "${INSTALL_LIB}"
 if [[ -d "${SCRIPT_DIR}/ebpf" ]]; then
   cp -a "${SCRIPT_DIR}/ebpf/"* "${INSTALL_LIB}/"
 fi
+# The certificate the programs' loaders are signed against, where the warden
+# reads it at start to make the keyring the kernel checks signed loads against.
+if [[ -f "${SCRIPT_DIR}/ebpf/loader-signing.der" ]]; then
+  install -Dm644 "${SCRIPT_DIR}/ebpf/loader-signing.der" "${INSTALL_SHARE}/loader-signing.der"
+fi
 
 # ── The agent's own user ─────────────────────────────────────────
 #

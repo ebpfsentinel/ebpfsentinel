@@ -106,6 +106,9 @@ gap = "the crypto call counter's fallback reads the image's own libraries in a c
 [compose."/usr/lib/ebpfsentinel"]
 reason = "the packages' program directory; the image carries its objects under /usr/local/lib/ebpfsentinel"
 
+[compose."/usr/lib/ebpfsentinel/lsm-bpf-load-guard"]
+reason = "where the packages put the warden's guard on program loads; the warden image carries it under /usr/local/lib/ebpfsentinel"
+
 [compose."/usr/lib/systemd/system"]
 reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
 
@@ -118,8 +121,17 @@ gap = "the crypto call counter's fallback reads the image's own libraries in a c
 [compose."/usr/local/lib/ebpfsentinel"]
 reason = "inside the image: Dockerfile.agent copies the eBPF objects there"
 
+[compose."/usr/local/lib/ebpfsentinel/lsm-bpf-load-guard"]
+reason = "inside the image: Dockerfile.warden copies the guard on program loads there"
+
 [compose."/usr/local/lib/systemd/system"]
 reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/usr/local/share/ebpfsentinel/loader-signing.der"]
+reason = "inside the image: Dockerfile.agent and Dockerfile.warden copy the certificate the eBPF loaders are signed for there"
+
+[compose."/usr/share/ebpfsentinel/loader-signing.der"]
+reason = "the packages' copy of the loader signing certificate; the images carry it under /usr/local/share/ebpfsentinel"
 
 [compose."/var/cache"]
 reason = "a system root a file-integrity canary is refused under: compared, never opened"
@@ -241,6 +253,9 @@ gap = "the crypto call counter's fallback reads the image's own libraries in a c
 [chart."/usr/lib/ebpfsentinel"]
 reason = "the packages' program directory; the image carries its objects under /usr/local/lib/ebpfsentinel"
 
+[chart."/usr/lib/ebpfsentinel/lsm-bpf-load-guard"]
+reason = "where the packages put the warden's guard on program loads; the warden image carries it under /usr/local/lib/ebpfsentinel"
+
 [chart."/usr/lib/systemd/system"]
 reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
 
@@ -253,8 +268,17 @@ gap = "the crypto call counter's fallback reads the image's own libraries in a c
 [chart."/usr/local/lib/ebpfsentinel"]
 reason = "inside the image: Dockerfile.agent copies the eBPF objects there"
 
+[chart."/usr/local/lib/ebpfsentinel/lsm-bpf-load-guard"]
+reason = "inside the image: Dockerfile.warden copies the guard on program loads there"
+
 [chart."/usr/local/lib/systemd/system"]
 reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/usr/local/share/ebpfsentinel/loader-signing.der"]
+reason = "inside the image: Dockerfile.agent and Dockerfile.warden copy the certificate the eBPF loaders are signed for there"
+
+[chart."/usr/share/ebpfsentinel/loader-signing.der"]
+reason = "the packages' copy of the loader signing certificate; the images carry it under /usr/local/share/ebpfsentinel"
 
 [chart."/var/cache"]
 reason = "a system root a file-integrity canary is refused under: compared, never opened"

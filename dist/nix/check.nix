@@ -139,6 +139,10 @@ let
     "the agent loads its objects from the store" =
       agent.environment.EBPF_PROGRAM_DIR == "${package}/lib/ebpfsentinel";
 
+    "the warden loads its guard on program loads from the store" =
+      warden.environment.EBPFSENTINEL_LOAD_GUARD_OBJECT
+      == "${package}/lib/ebpfsentinel/lsm-bpf-load-guard";
+
     "both units start at boot and the agent after the warden" =
       lib.elem "multi-user.target" agent.wantedBy
       && lib.elem "multi-user.target" warden.wantedBy
