@@ -106,8 +106,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Both images: the agent copies the objects, and both copy the
+      # certificate the loaders are signed for (the committed test key here).
       - uses: actions/download-artifact@v8
-        if: matrix.component == 'agent'
         with:
           name: ebpf-programs
           path: ebpf-out/

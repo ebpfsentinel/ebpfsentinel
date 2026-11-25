@@ -36,6 +36,12 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "lsm-write-refusal",
 ];
 
+/// Objects the warden loads itself, as root and without a token, and never the
+/// agent. They are built beside the agent's, but no loader is generated or
+/// signed for them and the token load checks do not load them: the guard on
+/// program loads refuses every unsigned token load, its own included.
+pub(crate) const WARDEN_PROGRAMS: &[&str] = &["lsm-bpf-load-guard"];
+
 // Kernel kfuncs called by the eBPF programs. These resolve to undefined
 // `extern "C"` symbols in the object; bpf-linker would otherwise internalize
 // them (`declare internal fastcc`), which strips every argument off the call
@@ -200,7 +206,7 @@ pub fn build_all() -> Result<()> {
     println!("eBPF toolchain: {toolchain}");
     ensure_rust_src(toolchain)?;
 
-    for program in EBPF_PROGRAMS {
+    for program in EBPF_PROGRAMS.iter().chain(WARDEN_PROGRAMS) {
         let program_dir = ebpf_base.join(program);
         println!("Building eBPF program: {program}");
 
@@ -235,7 +241,12 @@ pub fn build_all() -> Result<()> {
     }
 
     println!("All eBPF programs built successfully");
-    Ok(())
+    crate::sign_ebpf::sign_dir(&output_dir, EBPF_PROGRAMS)
+}
+
+/// Where `ebpf-build` leaves the objects, the default of `ebpf-sign`.
+pub(crate) fn output_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/bpfel-unknown-none/release")
 }
 
 #[cfg(test)]

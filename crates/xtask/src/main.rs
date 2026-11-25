@@ -2,6 +2,7 @@ mod build_ebpf;
 mod cli_parity;
 mod ebpf_cost;
 mod ebpf_load;
+mod sign_ebpf;
 
 use std::path::PathBuf;
 
@@ -19,8 +20,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build all eBPF kernel programs
+    /// Build all eBPF kernel programs, then sign their loaders
     EbpfBuild,
+    /// Sign the loaders of already built eBPF objects.
+    ///
+    /// Writes `<object>.loaders` and `loader-signing.der` beside them. The
+    /// key comes from `EBPFSENTINEL_LOADER_SIGNING_KEY` and
+    /// `EBPFSENTINEL_LOADER_SIGNING_CERT`, else the committed test key, which
+    /// `EBPFSENTINEL_RELEASE_BUILD` refuses.
+    EbpfSign {
+        /// Directory holding the objects. Defaults to the build output.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Measure each eBPF program's own cost with `BPF_PROG_TEST_RUN`.
     ///
     /// Needs root and the built objects. Reports a program at a time, with
@@ -87,6 +99,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::EbpfBuild => build_ebpf::build_all(),
+        Commands::EbpfSign { dir } => {
+            let dir = dir.unwrap_or_else(build_ebpf::output_dir);
+            sign_ebpf::sign_dir(&dir, build_ebpf::EBPF_PROGRAMS)
+        }
         Commands::EbpfCost => ebpf_cost::run(),
         Commands::EbpfLoad { dir, dev_bound } => ebpf_load::run(dir, dev_bound),
         Commands::Codegen => {

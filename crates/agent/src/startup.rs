@@ -6627,7 +6627,18 @@ pub fn try_load_cgroup_workload_firewall(
     // The labelled builds read two kernel struct fields whose offsets only
     // the running kernel's BTF gives. Without them the sentinels stay, the
     // verifier refuses those builds, and the plain ones attach instead.
-    let offsets = label_offsets();
+    // A program loaded signed runs the instructions signed at build, so the
+    // offsets cannot be written in: the plain builds attach and the agent
+    // reads the labels, rather than the whole object going unsigned.
+    let offsets = if adapters::ebpf::signed_loader::would_load_signed(&program_bytes) {
+        Err(
+            "the programs load signed, and a signed program carries the instructions of the \
+             build, which cannot hold the offsets of the running kernel"
+                .to_string(),
+        )
+    } else {
+        label_offsets()
+    };
     let program_bytes = match &offsets {
         Ok(pairs) => adapters::ebpf::kfunc_loader::patch_field_offsets(&program_bytes, pairs)?,
         Err(_) => program_bytes,
@@ -9108,10 +9119,11 @@ pub(crate) fn wire_kernel_conntrack(ct_svc: &mut ConnTrackAppService, config: &A
 /// The token fd is registered process-wide before anything loads, so every
 /// map, BTF and program syscall (aya and the kfunc loader alike) carries it;
 /// the returned handle owns that fd and must outlive every loaded program. The
-/// file kfuncs and the kfunc features are probed after the registration,
-/// because the agent's own objects load through the token and the probe must
-/// be asked the same way. The module BTF fds a privileged setup component
-/// passed in are registered last, since a token cannot open them itself.
+/// file kfuncs, the kfunc features and program signing are probed after the
+/// registration, because the agent's own objects load through the token and
+/// the probe must be asked the same way. The module BTF fds a privileged setup
+/// component passed in are registered last, since a token cannot open them
+/// itself.
 ///
 /// `None` means no token: the caller decides whether that is API-only mode or
 /// a refusal to start.
@@ -9119,7 +9131,68 @@ pub fn establish_bpf_token(
     config: &AgentConfig,
     warden: bool,
 ) -> Option<adapters::ebpf::BpfLoadingHandle> {
-    establish_bpf_token_at(&config.agent.bpf_token.bpffs_path, warden)
+    let handle = establish_bpf_token_at(&config.agent.bpf_token.bpffs_path, warden);
+    if handle.is_some() {
+        install_signed_loaders(Path::new(&resolve_ebpf_program_dir(config)));
+    }
+    handle
+}
+
+/// Turn signed loads on where the kernel verifies program signatures and the
+/// warden handed over its keyring, from the bundles beside the objects, and
+/// say which way it went. Called once the signing probe has answered.
+pub fn install_signed_loaders(program_dir: &Path) {
+    use adapters::ebpf::signed_loader::{self, Install};
+    let verifies = adapters::ebpf::prog_signing_probe::cached()
+        .is_some_and(adapters::ebpf::prog_signing_probe::ProgSigningStatus::verifies);
+    match signed_loader::install(program_dir, signed_loader::keyring_from_env(), verifies) {
+        Install::KernelDoesNotVerify => {}
+        Install::NoKeyring => info!(
+            "the kernel verifies program signatures, but no loader keyring was handed over: \
+             programs load unsigned"
+        ),
+        Install::Active {
+            keyring,
+            bundles,
+            unreadable,
+        } => {
+            info!(
+                keyring,
+                bundles,
+                dir = %program_dir.display(),
+                "programs load through loaders signed at build"
+            );
+            if bundles == 0 {
+                warn!(
+                    dir = %program_dir.display(),
+                    "no signed loader bundle beside the objects: every program loads unsigned, \
+                     and is refused where the warden's guard on program loads is attached"
+                );
+            }
+            for why in unreadable {
+                warn!(reason = %why, "loader bundle unreadable, its object loads unsigned");
+            }
+        }
+    }
+    log_load_guard(&ebpfsentinel_warden::load_guard::report_from_env());
+}
+
+/// Say whether the warden's guard on program loads holds this agent's loads
+/// to its keyring, and why not where it does not.
+fn log_load_guard(report: &domain::prog_signing::LoadGuardReport) {
+    use domain::prog_signing::LoadGuardReport;
+    match report {
+        LoadGuardReport::Attached => info!(
+            "the warden's guard on program loads is attached: a load through the BPF token \
+             passes only signed against the warden's keyring"
+        ),
+        LoadGuardReport::Absent(reason) => info!(
+            reason = %reason,
+            "no guard on program loads: the kernel checks a signature a load names, and \
+             nothing refuses a load that names none"
+        ),
+        LoadGuardReport::NotReported => {}
+    }
 }
 
 /// [`establish_bpf_token`] against a bpffs named directly, for a process that
@@ -9154,6 +9227,13 @@ pub fn establish_bpf_token_at(
     }
     adapters::ebpf::file_kfunc_probe::init_cached();
     adapters::ebpf::kfunc_feature_probe::init_cached();
+    let signing = adapters::ebpf::prog_signing_probe::init_cached();
+    if !signing.verifies() {
+        info!(
+            reason = signing.reason.as_deref().unwrap_or(""),
+            "the kernel does not check BPF program signatures here"
+        );
+    }
     let pull = adapters::ebpf::xdp_pull_probe::init_cached();
     if !pull.usable() {
         info!(
@@ -10026,13 +10106,19 @@ mod tests {
             .iter()
             .map(|(n, _, _)| *n)
             .collect();
+        // Not the agent's to load: the warden loads its guard on program
+        // loads itself, as root and without a token, before the agent starts.
+        let not_the_agents = [ebpf_common::load_guard::LOAD_GUARD_OBJECT];
         let mut missing = Vec::new();
         for entry in std::fs::read_dir(programs).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             let reads_kernel = ["lsm-", "tracepoint-", "uprobe-"]
                 .iter()
                 .any(|prefix| name.starts_with(prefix));
-            if reads_kernel && !listed.contains(&name.as_str()) {
+            if reads_kernel
+                && !listed.contains(&name.as_str())
+                && !not_the_agents.contains(&name.as_str())
+            {
                 missing.push(name);
             }
         }

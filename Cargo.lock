@@ -987,6 +987,7 @@ dependencies = [
 name = "ebpfsentinel-warden"
 version = "0.0.0-dev"
 dependencies = [
+ "ebpf-common",
  "ebpfsentinel-domain",
  "ebpfsentinel-warden-client",
  "ebpfsentinel-warden-proto",
@@ -4894,6 +4895,7 @@ dependencies = [
  "k8s-openapi",
  "libc",
  "serde_json",
+ "sha2",
  "utoipa",
 ]
 

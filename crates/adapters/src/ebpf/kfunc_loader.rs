@@ -56,6 +56,8 @@ use object::{Object as _, ObjectSection, ObjectSymbol, RelocationTarget};
 
 use super::kfunc::{KfuncError, KfuncResolver, KfuncTarget};
 
+pub mod signed;
+
 /// `bpf(2)` commands. Numbers from `enum bpf_cmd`.
 const BPF_PROG_LOAD: u32 = 5;
 const BPF_BTF_LOAD: u32 = 18;
@@ -299,6 +301,13 @@ pub enum KfuncLoaderError {
 
     #[error("refused at start-up: {0}")]
     RefusedAtStartup(String),
+
+    #[error(
+        "BPF_PROG_LOAD `{name}` refused by the warden's guard on program loads: the program \
+         has no loader signed at build for this object, and through the token only a load \
+         signed against the warden's keyring passes"
+    )]
+    RefusedByLoadGuard { name: String },
 
     #[error(
         "the object holds programs that read the kernel, which the agent loads only at \
@@ -715,6 +724,9 @@ fn program_meta(
 /// resolves `bpf_xdp_metadata_rx_*` against the device's `xdp_metadata_ops`.
 /// When `None`, those metadata kfunc calls are neutralized to `r0 = -EOPNOTSUPP`
 /// so the object loads on any NIC and the program's wrapper falls back.
+// One pass per program: relocate, try the signed loader, fall back to the raw
+// load. Splitting it would hand a dozen borrowed locals between functions.
+#[allow(clippy::too_many_lines)]
 pub fn load_kfunc_programs<S: BuildHasher>(
     elf: &[u8],
     resolver: &KfuncResolver,
@@ -740,6 +752,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     let fd_array = build_fd_array(resolver, &targets)?;
 
     let program_meta = program_meta(elf, &obj, resolver)?;
+    let signed = signed::for_object(elf, hosted);
 
     let mut loaded = LoadedPrograms::default();
     for ProgramMeta {
@@ -804,8 +817,27 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             dev_bound_ifindex: prog_ifindex,
             attach_btf_id,
         };
-        let (first, degraded) = load_degrading(&request, &neutral, &optional_calls, || {
-            rewritten(&optional_calls)
+        let signed_attempt = signed.as_ref().and_then(|signed| {
+            signed.load(&signed::Request {
+                name: &name,
+                prog_btf_fd: request.prog_btf_fd,
+                prog_ifindex,
+                prog_flags: request.prog_flags
+                    | if prog_ifindex.is_some() {
+                        BPF_F_XDP_DEV_BOUND_ONLY
+                    } else {
+                        0
+                    },
+                neutral: &neutral,
+                optional_calls: &optional_calls,
+                mode_neutralizes: &|k: &str| mode.neutralizes(k),
+            })
+        });
+        let (first, degraded) = signed_attempt.unwrap_or_else(|| {
+            let (result, degraded) = load_degrading(&request, &neutral, &optional_calls, || {
+                rewritten(&optional_calls)
+            });
+            (signed::unsigned_outcome(signed.as_ref(), result), degraded)
         });
         let fd = match first {
             Ok(fd) => fd,
@@ -839,6 +871,9 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     // own references during BPF_PROG_LOAD, so dropping them now is safe.
     drop(fd_array);
     drop(prog_btf_fd);
+    if let Some(signed) = signed {
+        signed.commit();
+    }
     Ok(loaded)
 }
 
@@ -1607,6 +1642,88 @@ pub(crate) fn load_raw_program(
     let mut log = vec![0u8; 64 << 10];
     issue_prog_load(&mut attr, 1, &mut log)
         .map_err(|(errno, raw)| (errno, raw.chars().filter(|&c| c != '\0').collect()))
+}
+
+/// `BPF_PROG_TYPE_SCHED_CLS`, for the probes that build their own programs.
+pub(crate) const PROBE_PROG_TYPE_SCHED_CLS: u32 = BPF_PROG_TYPE_SCHED_CLS;
+
+/// The `BPF_PROG_LOAD` member of `union bpf_attr` carrying the three fields a
+/// kernel that verifies program signatures reads after `fd_array_cnt`:
+/// `signature`, `signature_size` and `keyring_id`.
+#[repr(C)]
+#[derive(Default)]
+struct SignedProgLoadAttr {
+    load: ProgLoadAttr,
+    signature: u64,
+    signature_size: u32,
+    keyring_id: i32,
+}
+
+// The layout the kernel reads: the three fields at the offsets the uapi gives
+// them, and nothing past `keyring_id`.
+const _: () = {
+    assert!(std::mem::size_of::<ProgLoadAttr>() == 152);
+    assert!(std::mem::offset_of!(SignedProgLoadAttr, signature) == 152);
+    assert!(std::mem::offset_of!(SignedProgLoadAttr, signature_size) == 160);
+    assert!(std::mem::offset_of!(SignedProgLoadAttr, keyring_id) == 164);
+    assert!(std::mem::size_of::<SignedProgLoadAttr>() == 168);
+};
+
+/// Load a probe program with a signature and a keyring named in its attr,
+/// and close whatever the kernel returns.
+///
+/// A kernel without the signature fields refuses the non-zero tail before it
+/// reads anything else, so the errno alone answers whether the fields exist.
+/// The load goes through the process-wide token when one is set, like every
+/// other. Returns the errno on refusal; no verifier log is asked for, since
+/// the question is answered before the verifier runs.
+pub(crate) fn load_signed_probe(
+    probe: &ProbeProgram,
+    signature: &[u8],
+    keyring_id: i32,
+) -> Result<(), i32> {
+    let license = b"GPL\0";
+    let mut attr = SignedProgLoadAttr {
+        load: ProgLoadAttr {
+            prog_type: probe.prog_type,
+            insn_cnt: u32::try_from(probe.insns.len()).unwrap_or(u32::MAX),
+            insns: probe.insns.as_ptr() as u64,
+            license: license.as_ptr() as u64,
+            prog_flags: probe.prog_flags,
+            expected_attach_type: probe.expected_attach_type,
+            attach_btf_id: probe.attach_btf_id,
+            ..Default::default()
+        },
+        signature: signature.as_ptr() as u64,
+        signature_size: u32::try_from(signature.len()).unwrap_or(u32::MAX),
+        keyring_id,
+    };
+    let name = b"sign_probe";
+    attr.load.prog_name[..name.len()].copy_from_slice(name);
+    if let Some(token) = global_token_fd() {
+        attr.load.prog_flags |= super::bpf_token::BPF_F_TOKEN_FD;
+        attr.load.prog_token_fd = token;
+    }
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed,
+    // laid out as the kernel's `BPF_PROG_LOAD` member up to `keyring_id` (held
+    // by the assertions above); the instructions, the licence and the
+    // signature it points at all outlive the call.
+    let rc = unsafe {
+        bpf(
+            BPF_PROG_LOAD,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<SignedProgLoadAttr>(),
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    // SAFETY: rc >= 0 is a valid fd owned by this process; wrapping it closes
+    // it when dropped at the end of this statement.
+    drop(unsafe { OwnedFd::from_raw_fd(raw) });
+    Ok(())
 }
 
 /// SAFETY wrapper: invoke `bpf(cmd, attr, size)`.

@@ -60,6 +60,7 @@ pub mod pidns;
 pub mod preload;
 pub mod process_attach;
 pub mod process_event_reader;
+pub mod prog_signing_probe;
 pub mod prog_test_run;
 pub mod program_name;
 pub mod qos_cgroup_shaping;
@@ -132,6 +133,7 @@ pub use kernel_probe::{
     upgrade_hint as kernel_upgrade_hint,
 };
 pub use kfunc::set_module_btf_fd;
+pub use kfunc_loader::signed as signed_loader;
 pub use l7_denied_flows::L7DeniedFlowsMap;
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
