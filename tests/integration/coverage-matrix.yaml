@@ -247,6 +247,10 @@ suite_profiles:
   "perf/07": nightly
   "perf/08": nightly
   "perf/09": nightly
+  "perf/10": nightly
+  "perf/11": nightly
+  "perf/12": nightly
+  "perf/13": nightly
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 # Datapath suites the nightly lane runs a second time on the agent VM. Each

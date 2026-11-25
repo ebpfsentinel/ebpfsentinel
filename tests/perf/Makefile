@@ -48,6 +48,22 @@ kill-latency: ## Mass encryption verdict to run stopped (perf/08)
 bpf-qdisc: ## BPF qdisc against tc-qos departure times served by fq (perf/09, 2VM lane)
 	$(BATS) --timing $(PERF_DIR)/09-bpf-qdisc-vs-edt-fq.bats
 
+.PHONY: xdp-frags
+xdp-frags: ## Cost of declaring multi-buffer frames and of the head pull in xdp_firewall (perf/10, 2VM lane)
+	$(BATS) --timing $(PERF_DIR)/10-xdp-frags-pull-cost.bats
+
+.PHONY: tamper-guard-insns
+tamper-guard-insns: ## Verifier instruction count of lsm-tamper-guard against its baseline (perf/11, local lane)
+	sudo $(BATS) --timing $(PERF_DIR)/11-tamper-guard-verified-insns.bats
+
+.PHONY: tx-timestamps
+tx-timestamps: ## Per-write cost of the TCP transmit timestamps on a sender (perf/12, 2VM lane)
+	$(BATS) --timing $(PERF_DIR)/12-tcp-tx-timestamp-cost.bats
+
+.PHONY: meta-handoff
+meta-handoff: ## XDP parse handed to tc through the packet metadata against skb->cb (perf/13, 2VM lane)
+	$(BATS) --timing $(PERF_DIR)/13-xdp-tc-meta-handoff.bats
+
 .PHONY: suite
 suite: ## Run a single suite: make suite SUITE=02-ebpf-feature-overhead
 	sudo $(BATS) --timing $(PERF_DIR)/$(SUITE).bats
