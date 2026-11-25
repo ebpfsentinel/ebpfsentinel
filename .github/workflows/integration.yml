@@ -9,6 +9,13 @@ name: Integration Tests
 #             scripts/provision-datapath-host.sh (the list the agent VM is
 #             provisioned from) and run with strict skips, so a tool or a
 #             kernel the lane lacks fails the suite instead of excusing it.
+#
+# The hosted runner's own kernel is below the agent's floor, so every pr and
+# datapath job runs its suites in a KVM guest booting the newest mainline
+# build of the floor release in tests/integration/kernels.toml, through
+# tests/integration/scripts/run-in-floor-vm.sh (virtme-ng, the host's root
+# filesystem shared read-only underneath, the workspace written through). The
+# guest checks its kernel against the floor before any suite starts.
 #   nightly   suites that need a second or third machine, a cluster or the
 #             container runtimes VM, on the [self-hosted, linux, vagrant]
 #             runner, each through the runner of the lane its `lanes` field
@@ -186,16 +193,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The agent refuses to start below its kernel floor, so a runner image
-      # under it would fail every suite one by one; this says why once.
-      - name: Kernel at the agent's floor
-        run: |
-          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
-          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
-            echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
-            exit 1
-          fi
-
       - name: Record start time
         id: start
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
@@ -230,21 +227,32 @@ jobs:
       - name: Generate JWT keys and tokens
         run: bash tests/integration/scripts/generate-jwt-keys.sh
 
+      # The runner image boots a kernel below the agent's floor, and the agent
+      # refuses to start there. The suites run in a guest booting the floor
+      # release instead, which checks its own kernel against the floor first.
+      - uses: ./.github/actions/floor-vm
+
       - name: Run profile=pr suites
+        env:
+          PR_SUITES: ${{ needs.plan.outputs.pr_suites }}
         run: |
           set -euo pipefail
-          ids="${{ needs.plan.outputs.pr_suites }}"
-          failed=0
-          for id in $ids; do
-            bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
-            # Suite 09 builds and runs the agent image; the Docker job below
-            # owns it.
-            [ "$id" = "09" ] && continue
-            echo "::group::Suite $id"
-            EBPFSENTINEL_STRICT_SKIPS=1 bats --timing "$bats_path" || failed=1
-            echo "::endgroup::"
-          done
-          exit "$failed"
+          # The guest starts as root; the suites keep running as the runner
+          # user, as this lane always has.
+          bash "$FLOOR_VM" run --as "$(id -un)" --env PR_SUITES -- bash -c '
+            set -uo pipefail
+            failed=0
+            for id in $PR_SUITES; do
+              bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
+              # Suite 09 builds and runs the agent image; the Docker job below
+              # owns it.
+              [ "$id" = "09" ] && continue
+              echo "::group::Suite $id"
+              EBPFSENTINEL_STRICT_SKIPS=1 bats --timing "$bats_path" || failed=1
+              echo "::endgroup::"
+            done
+            exit "$failed"
+          '
 
       - name: PR budget guard
         if: always()
@@ -268,16 +276,6 @@ jobs:
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     steps:
       - uses: actions/checkout@v7
-
-      # The agent refuses to start below its kernel floor, so a runner image
-      # under it would fail every suite one by one; this says why once.
-      - name: Kernel at the agent's floor
-        run: |
-          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
-          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
-            echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
-            exit 1
-          fi
 
       - name: Download agent binary
         uses: actions/download-artifact@v8
@@ -328,6 +326,17 @@ jobs:
       - name: Build Docker image
         run: docker build -f Dockerfile.agent -t ebpfsentinel:integration-test .
 
+      # The container shares the kernel it runs on, so the image is built here
+      # and run in the floor guest: the guest's own dockerd loads it from the
+      # exchange directory before the suite starts.
+      - uses: ./.github/actions/floor-vm
+
+      - name: Hand the image to the floor guest
+        run: |
+          set -euo pipefail
+          mkdir -p "$FLOOR_VM_OUT"
+          docker save -o "$FLOOR_VM_OUT/images.tar" ebpfsentinel:integration-test
+
       # The local lane of this suite drives traffic from a network namespace
       # it creates, which takes root. Strict skips turn a masking skip into a
       # failure; the agent's health is an environment skip elsewhere, but this
@@ -338,10 +347,9 @@ jobs:
           EBPFSENTINEL_STRICT_SKIPS: "1"
         run: |
           set -euo pipefail
-          tap="$(mktemp)"
+          tap="$RUNNER_TEMP/suite-09.tap"
           rc=0
-          # sudo-rs ignores -E, so what the suite reads is passed by name.
-          sudo env EBPFSENTINEL_STRICT_SKIPS="$EBPFSENTINEL_STRICT_SKIPS" \
+          bash "$FLOOR_VM" run --docker -- \
             bats --timing --formatter tap tests/integration/suites/09-docker.bats \
             | tee "$tap" || rc=$?
           if grep -E '# skip (Docker agent not healthy|Docker daemon not running|Docker not installed|no eBPF objects available|ebpfsentinel:integration-test image not built)' "$tap"; then
@@ -368,16 +376,6 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
-
-      # The agent refuses to start below its kernel floor, so a runner image
-      # under it would fail every suite one by one; this says why once.
-      - name: Kernel at the agent's floor
-        run: |
-          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
-          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
-            echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
-            exit 1
-          fi
 
       - name: Download agent binary
         uses: actions/download-artifact@v8
@@ -419,39 +417,48 @@ jobs:
       - name: Generate JWT keys and tokens
         run: bash tests/integration/scripts/generate-jwt-keys.sh
 
+      # The runner image boots a kernel below the agent's floor. The suites
+      # run as root in a guest booting the floor release, on the host's root
+      # filesystem, so what the steps above installed is what they find there.
+      - uses: ./.github/actions/floor-vm
+
       - name: Run profile=datapath suites
         run: |
           set -uo pipefail
           ids="$(tests/integration/scripts/list-suites-by-profile.sh --list datapath ${{ matrix.shard }}/8)"
           mkdir -p "$RUNNER_TEMP/datapath-logs"
-          failed=""
-          for id in $ids; do
-            bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
-            echo "::group::Suite $id"
-            # What this lane provisions (scripts/provision-datapath-host.sh),
-            # the agent build it downloads and the root it runs bats as; a
-            # test skipping for one of these fails here. The BPF LSM is
-            # not claimed: a hosted runner cannot set the boot line, and the
-            # suites relying on it run again nightly on the agent VM.
-            # sudo-rs ignores -E, so what the suite reads is passed by name.
-            if ! sudo env EBPFSENTINEL_STRICT_SKIPS=1 EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns agent-build root" \
-                 bats --timing "$bats_path" \
-                 2>&1 | tee "$RUNNER_TEMP/datapath-logs/suite-${id}.log"; then
-              failed="$failed $id"
-            fi
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then
-            echo "::error::datapath suites failed:$failed"
-            exit 1
-          fi
+          # What this lane provisions (scripts/provision-datapath-host.sh),
+          # the agent build it downloads and the root it runs bats as; a
+          # test skipping for one of these fails here. The BPF LSM is
+          # not claimed: the guest is booted without it, and the suites
+          # relying on it run again nightly on the agent VM. The guest's
+          # dockerd serves the suites that start containers, and the agent's
+          # own logs, written under /tmp in the guest, are copied out.
+          bash "$FLOOR_VM" run --docker --iperf3-server \
+            --env SUITE_IDS="$ids" \
+            --env EBPFSENTINEL_STRICT_SKIPS=1 \
+            --env EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns agent-build root" \
+            --collect /tmp/ebpfsentinel-artifacts \
+            -- bash -c '
+              set -uo pipefail
+              failed=""
+              for id in $SUITE_IDS; do
+                bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
+                echo "::group::Suite $id"
+                if ! bats --timing "$bats_path" 2>&1 | tee "$RUNNER_TEMP/datapath-logs/suite-${id}.log"; then
+                  failed="$failed $id"
+                fi
+                echo "::endgroup::"
+              done
+              if [ -n "$failed" ]; then
+                echo "::error::datapath suites failed:$failed"
+                exit 1
+              fi
+            '
 
       # The agent's own log is where a failure says why; the suites archive
-      # it per suite under /tmp/ebpfsentinel-artifacts, written as root.
-      - name: Make the agent logs readable
-        if: always()
-        run: sudo chmod -R a+rX /tmp/ebpfsentinel-artifacts 2>/dev/null || true
-
+      # it per suite under /tmp/ebpfsentinel-artifacts in the guest, and the
+      # run above copies that directory out under the exchange directory.
       - name: Upload suite logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -459,7 +466,7 @@ jobs:
           name: datapath-logs-shard-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/datapath-logs
-            /tmp/ebpfsentinel-artifacts
+            ${{ runner.temp }}/floor-vm/collected/tmp/ebpfsentinel-artifacts
           if-no-files-found: warn
           retention-days: 14
 

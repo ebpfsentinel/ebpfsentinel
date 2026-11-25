@@ -148,7 +148,7 @@ Require **root** and **kernel >= 6.18** (or 2-VM mode). Measure agent overhead u
 **Profiles** (consumed by `.github/workflows/integration.yml`):
 
 - `pr` - runs on every pull request + push to `main` (≤30 s/suite p95, ≤15 min total budget). The userspace REST/gRPC suites, no root.
-- `datapath` - runs on every pull request + push to `main`, as root on hosted runners, sharded eight ways. Every single-host suite that loads the programs into a kernel.
+- `datapath` - runs on every pull request + push to `main`, as root on hosted runners inside a guest booting the floor kernel, sharded eight ways. Every single-host suite that loads the programs into a kernel.
 - `nightly` - runs on the 02:00 UTC cron schedule on the self-hosted Vagrant runner. Suites needing a second or third machine, a cluster or the container runtimes VM, plus the soak job.
 - `manual` - pinned to no job; a suite there is reached by hand only, and the audit names it.
 
@@ -177,7 +177,14 @@ What scoping cannot remove is a suite written for more than one lane whose indiv
 
 **Every lane runs with `EBPFSENTINEL_STRICT_SKIPS=1`**, and the runner scripts default to it too (`EBPFSENTINEL_STRICT_SKIPS=0` downgrades a degraded dev box). A missing tool (`require_tool`), a kernel under the floor (`require_kernel`) or a prerequisite the suite owns fails the suite on a lane that is supposed to provide it; only `env_skip` - a capability the lane genuinely lacks, such as a second machine - still skips. A capability some lanes promise and others cannot is skipped through `lane_skip <claim>`: it skips where the lane's `EBPFSENTINEL_LANE_CLAIMS` does not name the claim and fails where it does (the claims, and the lanes that make them, are listed at the top of `skip-policy.yaml`).
 
-**`datapath-suites` is provisioned by `scripts/provision-datapath-host.sh`**, the same script the agent VM's `base-packages` provisioner runs, so a tool added for a suite reaches both. The job checks the runner's kernel against the agent's floor first and stops with that reason if it is under it. The in-kernel harness (`ebpf_prog_test_run`, trace side effects, `signal_task`) runs on every pull request in `ebpf.yml`, and fails rather than skips when `EBPFSENTINEL_EBPF_DIR` names a directory without objects.
+**`datapath-suites` is provisioned by `scripts/provision-datapath-host.sh`**, the same script the agent VM's `base-packages` provisioner runs, so a tool added for a suite reaches both. The suites then run in a guest booting the floor kernel (below). The in-kernel harness (`ebpf_prog_test_run`, trace side effects, `signal_task`) runs on every pull request in `ebpf.yml`, and fails rather than skips when `EBPFSENTINEL_EBPF_DIR` names a directory without objects.
+
+**The floor guest** - a hosted runner boots a kernel below the agent's floor, so `pr-suites`, `pr-docker` and `datapath-suites` run their suites through `scripts/run-in-floor-vm.sh`, set up by the `.github/actions/floor-vm` action. It boots, under KVM with [virtme-ng](https://github.com/arighi/virtme-ng), the newest kernel.ubuntu.com mainline build of the `floor` release of `kernels.toml`, resolved by `check-kernel-matrix.py --resolve` and cached by build. The guest's root is the runner's own filesystem, read through tmpfs overlays, so what the job installed and built on the runner (bats, grpcurl, the provisioned tools, the agent build, the eBPF objects, certificates and keys) is what the suites find; the workspace, `$RUNNER_TEMP` and the exchange directory are written through. Before the command runs, the guest checks its kernel against the floor and fails with that reason if it is under it, mounts bpffs, loads the kfunc modules, applies the provisioned sysctls and lends the runner's bpftool to the booted release. `--docker` starts a dockerd of its own on a scratch disk and loads `images.tar` from the exchange directory (how `pr-docker` hands over the image it built), `--iperf3-server` starts the daemon `provision-datapath-host.sh` enables as a unit, since the guest has no systemd, and `--collect` copies files the guest wrote under its own `/tmp` out to the exchange directory (the agent logs of `/tmp/ebpfsentinel-artifacts`). The operator's kind jobs use the same script. To try it on a workstation with KVM:
+
+```bash
+tests/integration/scripts/run-in-floor-vm.sh setup
+tests/integration/scripts/run-in-floor-vm.sh run -- uname -r
+```
 
 **Budget guard** - the `pr-suites` job records its start epoch and asserts wall-clock ≤ `PR_BUDGET_MINUTES` (default 15) before exiting. Exceeding the budget fails the run rather than silently growing.
 

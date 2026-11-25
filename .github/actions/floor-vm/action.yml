@@ -1,0 +1,51 @@
+name: Floor kernel VM
+description: >-
+  Prepare tests/integration/scripts/run-in-floor-vm.sh on a hosted runner:
+  resolve the mainline build of the agent's floor release, restore its download
+  from the cache, install virtme-ng and open /dev/kvm. A step then runs its
+  suites with `bash "$FLOOR_VM" run [options] -- <command>`.
+
+inputs:
+  source-root:
+    # The enterprise and operator workflows check this repository out under
+    # `ebpfsentinel/` and use the action from there.
+    description: "Path to the ebpfsentinel checkout holding tests/integration"
+    required: false
+    default: "."
+  kernel:
+    description: "kernels.toml release to boot instead of the floor"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the floor kernel build
+      id: resolve
+      shell: bash
+      env:
+        FLOOR_VM_KERNEL: ${{ inputs.kernel }}
+      run: |
+        set -euo pipefail
+        script="$(cd "${{ inputs.source-root }}" && pwd)/tests/integration/scripts/run-in-floor-vm.sh"
+        build="$(bash "$script" resolve)"
+        echo "build=$build" >> "$GITHUB_OUTPUT"
+        {
+          echo "FLOOR_VM=$script"
+          echo "FLOOR_VM_BUILD=$build"
+          echo "FLOOR_VM_HOME=$RUNNER_TEMP/floor-vm-cache"
+          echo "FLOOR_VM_OUT=$RUNNER_TEMP/floor-vm"
+        } >> "$GITHUB_ENV"
+        echo "floor VM boots mainline $build"
+
+    # vng downloads the build's debs from kernel.ubuntu.com into its cache once;
+    # the key is the build, so a new point release is fetched once and reused.
+    - name: Restore the kernel download
+      uses: actions/cache@v5
+      with:
+        path: ${{ runner.temp }}/floor-vm-cache
+        key: floor-vm-${{ runner.os }}-${{ steps.resolve.outputs.build }}
+
+    - name: Install virtme-ng and open /dev/kvm
+      shell: bash
+      run: bash "$FLOOR_VM" setup

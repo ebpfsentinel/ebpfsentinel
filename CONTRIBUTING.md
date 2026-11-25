@@ -322,7 +322,7 @@ one unit: they are the load path.
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | `ci.yml` | Push and PR to main | Coverage matrix audit, format, clippy, tests, MSRV check, tests on aarch64, OpenAPI drift, cargo-deny, coverage floors, Helm lint, release build |
-| `integration.yml` | Push and PR to main | Build agent and eBPF objects, API and Docker bats suites, the eBPF lane that loads every program into the runner's kernel. The nightly attack and perf profile is dispatched by hand onto a self-hosted Vagrant runner |
+| `integration.yml` | Push and PR to main | Build agent and eBPF objects, API and Docker bats suites, the eBPF lane that loads every program into a kernel; every job that starts the agent runs its suites in a guest booting the floor kernel (`tests/integration/scripts/run-in-floor-vm.sh`). The nightly attack and perf profile is dispatched by hand onto a self-hosted Vagrant runner |
 | `docker.yml` | Push and PR touching the crates or a Dockerfile | Image builds |
 | `benchmarks.yml` | PR to main, weekly | Compile check, full run, regression detection |
 | `security.yml` | Daily | Audit, deny, unsafe code audit, SBOM generation |
