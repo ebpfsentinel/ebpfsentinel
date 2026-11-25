@@ -2193,7 +2193,7 @@ pub async fn run(
     //
     // Kernel version is MANDATORY: 6.18+ is required unconditionally.
     // No "API-only" fallback when the kernel is too old - every eBPF
-    // program depends on kfuncs introduced in 6.4 → 6.9 and the
+    // program depends on kfuncs introduced from 5.18 to 6.18 and the
     // verifier rejects them at load time on older kernels. The
     // correct remediation is upgrading the host kernel; running the
     // agent as a pure HTTP frontend on a 6.8 host gives operators a

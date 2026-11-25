@@ -16,8 +16,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Check kernel version >= 6.18, the agent's floor: the first release that
-# verifies a signed BPF program. BPF token delegation (6.9) and every kfunc
-# the programs call are older than it.
+# verifies a signed BPF program. BPF token delegation (6.9) is older than it,
+# and the newest kfunc the programs call (bpf_xdp_pull_data) arrived in 6.18.
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
