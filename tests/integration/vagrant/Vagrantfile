@@ -58,6 +58,11 @@ VAGRANT_3VM = %w[1 true yes on].include?((ENV["VAGRANT_3VM"] || "").downcase)
 # Mainline kernel the agent VM boots instead of the HWE one (empty: HWE).
 AGENT_KERNEL = (ENV["AGENT_KERNEL"] || "").strip
 
+# Kernel lockdown level the agent VM boots with (empty: none). Only
+# `integrity` and `confidentiality` are accepted; read by the lockdown
+# provisioner, which scripts/run-lockdown-lane.sh drives for suite 158.
+AGENT_LOCKDOWN = (ENV["AGENT_LOCKDOWN"] || "").strip
+
 # Internal network name shared by both VMs (faster than host-only)
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
@@ -147,6 +152,33 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         printf '%s\\n' "$want" > "$conf"
         update-grub
       fi
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: lockdown
+    #
+    # Boots the agent VM with `lockdown=<level>` when AGENT_LOCKDOWN names
+    # one, and without it when AGENT_LOCKDOWN is unset, so the VM goes back
+    # to the posture every other suite expects. The level can be raised at
+    # run time through /sys/kernel/security/lockdown but never lowered, so
+    # the boot line is the only way to have it and take it away again. The
+    # lockdown module must be among the security modules the kernel starts;
+    # Ubuntu's list carries it, and the bpf-lsm provisioner keeps the list
+    # it found. Suite 158 reads the level the kernel reports and skips where
+    # it is not the one asked for. A plain `vagrant up` never runs it; only
+    # `vagrant provision agent --provision-with lockdown` does.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "lockdown", reboot: true, run: "never",
+      env: { "AGENT_LOCKDOWN" => AGENT_LOCKDOWN }, inline: <<-SHELL
+      set -euxo pipefail
+      conf=/etc/default/grub.d/92-lockdown.cfg
+      case "${AGENT_LOCKDOWN}" in
+        "") rm -f "$conf" ;;
+        integrity|confidentiality)
+          printf 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX lockdown=%s"\\n' "${AGENT_LOCKDOWN}" > "$conf" ;;
+        *) echo "AGENT_LOCKDOWN must be integrity or confidentiality, not ${AGENT_LOCKDOWN}" >&2; exit 1 ;;
+      esac
+      update-grub
     SHELL
 
     # ----------------------------------------------------------

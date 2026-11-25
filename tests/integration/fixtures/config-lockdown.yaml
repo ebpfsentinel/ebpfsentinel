@@ -1,0 +1,195 @@
+# config-lockdown.yaml - every feature that carries a kernel program, loaded
+# through the BPF token the warden delegates (integration suite 158).
+#
+# The suite boots the agent VM with lockdown=confidentiality and holds the
+# kernel to tests/integration/lockdown-programs.toml: which programs load and
+# which the verifier refuses there. The features below are those of
+# config-ebpf-all-programs.yaml, so every program the agent can be asked for
+# is asked for; the agent block is the one of config-bpf-token.yaml, so the
+# loads go through the shipped split deployment rather than a root agent.
+#
+# Placeholders __DATA_DIR__, __EBPF_DIR__, __IFACE__ are substituted at runtime.
+
+agent:
+  interfaces:
+    - __IFACE__
+  bind_address: "127.0.0.1"
+  log_level: info
+  log_format: json
+  http_port: 18099
+  grpc_port: 18055
+  metrics_port: 18090
+  ebpf_program_dir: __EBPF_DIR__
+  bpf_token:
+    bpffs_path: /run/etok
+
+# xdp-firewall, plus tc-scrub through the scrub block.
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  # cgroup-workload-firewall. The object is loaded off the rules rather than
+  # off a key of its own, so the one way to ask for it is a rule naming a
+  # workload. It observes, which is this fixture's whole posture: nothing here
+  # is tuned to make traffic do anything, and an enforcing rule would refuse
+  # connections the other suites make.
+  rules:
+    - id: fw-workload-observes
+      priority: 100
+      action: allow
+      workload:
+        exe: /usr/bin/curl
+        mode: observe
+  scrub:
+    enabled: true
+    min_ttl: 64
+    max_mss: 1460
+    random_ip_id: true
+    strip_tcp_timestamps: true
+
+# tc-ids
+ids:
+  enabled: true
+  mode: alert
+  rules: []
+
+ips:
+  enabled: true
+  mode: alert
+  max_blacklist_duration_secs: 3600
+  auto_blacklist_threshold: 3
+  max_blacklist_size: 10000
+  whitelist: []
+  rules: []
+
+# uprobe-dlp
+dlp:
+  enabled: true
+  mode: alert
+  patterns:
+    - id: dlp-pii-ssn
+      name: "US Social Security Number"
+      regex: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+      severity: critical
+      data_type: pii
+
+# xdp-ratelimit, and its syncookie tail call through the ddos block.
+ratelimit:
+  enabled: true
+  default_rate: 1000
+  default_burst: 2000
+  rules: []
+
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 1000000
+  policies: []
+
+# tc-threatintel
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+# tc-dns
+dns:
+  enabled: true
+  cache:
+    max_entries: 1000
+    min_ttl_secs: 60
+    purge_interval_secs: 30
+  blocklist:
+    domains: []
+    action: block
+    inject_target: threatintel
+    grace_period_secs: 300
+
+# tc-conntrack
+conntrack:
+  enabled: true
+
+# tc-nat-ingress and tc-nat-egress, which load as a pair.
+nat:
+  enabled: true
+  snat_rules: []
+  dnat_rules: []
+
+# tc-qos. A pipe is needed for the shaper to have anything to attach to, and
+# the rate is high enough that no test traffic is shaped by accident.
+qos:
+  enabled: true
+  pipes:
+    - id: pipe-load-gate
+      bandwidth: "1gbps"
+      delay: 0
+      loss: 0.0
+      burst: "256kb"
+      direction: both
+      enabled: true
+  queues:
+    - id: queue-load-gate
+      pipe_id: pipe-load-gate
+      enabled: true
+  classifiers: []
+
+# xdp-loadbalancer, plus xdp-vip-announcer through the announce block.
+loadbalancer:
+  enabled: true
+  # One service, off, on a documentation address: the program loads with a
+  # service table that holds an entry, and no packet is steered.
+  services:
+    - id: lb-load-gate
+      name: load gate service
+      enabled: false
+      protocol: udp
+      listen_addr: "203.0.113.80"
+      listen_port: 8053
+      algorithm: maglev
+      mode: dnat
+      backends:
+        - id: lb-load-gate-a
+          addr: "192.0.2.81"
+          port: 53
+          weight: 3
+          enabled: true
+        - id: lb-load-gate-b
+          addr: "192.0.2.82"
+          port: 53
+          weight: 1
+          enabled: false
+          same_segment: true
+      health_check:
+        protocol: icmp
+        interval_secs: 30
+        timeout_secs: 3
+        unhealthy_threshold: 4
+        healthy_threshold: 2
+  announce:
+    role: primary
+    interface: __IFACE__
+    vips:
+      - name: load-gate-vip
+        addr: 10.200.0.250
+
+l7:
+  enabled: true
+  ports:
+    - 80
+    - 443
+  rules: []
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

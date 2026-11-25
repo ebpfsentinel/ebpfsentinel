@@ -34,9 +34,11 @@ claims:
   agent-build: "the release agent binary and its eBPF objects under target/ - the datapath lane, which downloads both build artifacts"
   mainline-kernel: "the agent VM booted on a kernel.ubuntu.com mainline build of kernels.toml - scripts/run-kernel-matrix.sh"
   root: "the suites run as root - the datapath lane (sudo -E bats) and the agent VM (sudo bats)"
+  lockdown: "the agent VM booted with lockdown=confidentiality - scripts/run-lockdown-lane.sh (the lockdown provisioner)"
 
 lane:
   - "the running kernel is not a kernel.ubuntu.com mainline build"
+  - "the kernel is not locked down at confidentiality (lockdown=confidentiality at boot)"
   - "the BPF LSM is not active on this host (lsm=bpf at boot)"
   - "the BPF LSM is not among this host's security modules"
   - "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
@@ -47,9 +49,11 @@ lane:
   - "agent binary not found:"
   - "agent binary not available on this host"
   - "eBPF objects not found in"
+  - "no signed loaders beside the objects in"
   - "requires root privileges"
 
 env:
+  - "the kernel does not verify BPF program signatures here"
   - "ebpfsentinel:integration-test image not built - run the docker build first"
   - "minikube cluster could not start on this host"
   - "eth2 not present - NPTv6 needs the multi-NIC topology"
@@ -108,6 +112,12 @@ env:
   - "suite 73 makes its guest devices beside the agent (local lane only)"
   - "suite 103 runs its sender beside the agent (local lane only)"
   - "suite 104 writes its files on the agent's host (local lane only)"
+  - "suite 149 runs its clients beside the agent (local lane only)"
+  - "the host does not run cgroup v2"
+  - "the kernel does not read cgroup labels on this host: $(_label_capability | jq -r '.reason')"
+  - "this kernel runs the bounded copy: $(_capability | jq -r '.reason // empty')"
+  - "suite 151 starts its processes on the agent's host (local lane only)"
+  - "suite 152 runs its clients beside the agent (local lane only)"
   - "libcrypto.so.3 is not installed on this host"
   - "suite 105 edits the configuration beside the agent (local lane only)"
   - "suite 106 listens on the agent's own loopback (local lane only)"

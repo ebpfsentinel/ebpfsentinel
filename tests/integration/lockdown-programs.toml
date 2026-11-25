@@ -1,0 +1,281 @@
+# Which of the agent's kernel programs the kernel loads under
+# `lockdown=confidentiality`, and which it refuses.
+#
+# One list, read by two readers: suite 158 (158-lockdown-confidentiality.bats)
+# holds the running kernel to it on the agent VM booted with the boot
+# parameter, and the documentation page on the agent and the warden
+# (ebpfsentinel-docs/docs/security/agent-and-warden.md) prints it and names
+# this file as its source. A program moved from one side to the other is moved
+# here, and both follow.
+#
+# How the verdicts were reached. Lockdown at `confidentiality` makes the
+# kernel answer "no such helper" for bpf_probe_read_kernel and
+# bpf_probe_read_kernel_str (kernel/trace/bpf_trace.c, bpf_tracing_func_proto,
+# and kernel/bpf/helpers.c, bpf_base_func_proto, both gated on
+# LOCKDOWN_BPF_READ_KERNEL). The verifier refuses a whole program that can
+# reach a helper it has no prototype for, whatever the branch does at run
+# time. So a program is listed `refused` when its source calls one of them,
+# directly or through ebpf-helpers/src/pidns.rs (`current_pid_tgid` reads the
+# task's pid namespace with bpf_probe_read_kernel), and `loads` otherwise.
+# bpf_probe_write_user and the legacy bpf_probe_read are the other gated
+# helpers; no program calls them. Kfuncs and reads through BTF pointers are
+# not gated.
+#
+# These are expectations read off the source. `confirmed` turns true for a
+# program once suite 158 has seen the running kernel agree, with the date of
+# the run in `confirmed_on`; until then the page says "expected from the
+# source, to be confirmed on the VM".
+#
+# Fields:
+#   verdict   loads | refused
+#   because   the helper the program reaches, or why nothing gates it
+#   status    the name the agent publishes for the program on
+#             GET /api/v1/ebpf/status and ebpfsentinel_ebpf_program_status;
+#             empty for a program the agent publishes no state for (tail-call
+#             targets, the warden's own guard, test scaffolding)
+#   asked     true when the suite's fixture (config-lockdown.yaml) asks for
+#             the program, so the suite requires a state for it
+#   reached_through
+#             a program the agent installs only from another one; when that
+#             one is refused, this one is never attempted
+#   loses     what the reader goes without where the program is refused
+
+level = "confidentiality"
+confirmed = true
+confirmed_on = "2026-11-25"
+
+[[program]]
+name = "xdp-firewall"
+verdict = "refused"
+because = "reads the conntrack state of an nf_conn with bpf_probe_read_kernel"
+status = "xdp-firewall"
+asked = true
+loses = "the XDP firewall, the IPS blacklist and the DDoS auto-block in the kernel; the agent runs in degraded mode for them"
+
+[[program]]
+name = "xdp-firewall-reject"
+verdict = "loads"
+because = "parses and forges packets only"
+status = ""
+asked = false
+reached_through = "xdp-firewall"
+loses = "REJECT answers, since the firewall that installs it is refused"
+
+[[program]]
+name = "xdp-ratelimit"
+verdict = "loads"
+because = "packet parsing and per-CPU maps only"
+status = "xdp-ratelimit"
+asked = true
+
+[[program]]
+name = "xdp-ratelimit-syncookie"
+verdict = "loads"
+because = "packet parsing and the syncookie helpers only"
+status = ""
+asked = false
+
+[[program]]
+name = "xdp-loadbalancer"
+verdict = "loads"
+because = "packet parsing and map lookups only"
+status = "xdp-loadbalancer"
+asked = true
+
+[[program]]
+name = "xdp-vip-announcer"
+verdict = "loads"
+because = "answers ARP and neighbour solicitations from a map"
+status = "xdp-vip-announcer"
+asked = false
+reached_through = "xdp-firewall"
+loses = "the VIP announcer, since the firewall chain that installs it is refused"
+
+[[program]]
+name = "xdp-pass"
+verdict = "loads"
+because = "returns XDP_PASS"
+status = ""
+asked = false
+
+[[program]]
+name = "tc-ids"
+verdict = "loads"
+because = "packet parsing and kfuncs only"
+status = "tc-ids"
+asked = true
+
+[[program]]
+name = "tc-threatintel"
+verdict = "loads"
+because = "packet parsing and map lookups only"
+status = "tc-threatintel"
+asked = true
+
+[[program]]
+name = "tc-dns"
+verdict = "loads"
+because = "packet parsing and ring buffers only"
+status = "tc-dns"
+asked = true
+
+[[program]]
+name = "tc-conntrack"
+verdict = "refused"
+because = "reads nf_conn fields with bpf_probe_read_kernel"
+status = "tc-conntrack"
+asked = true
+loses = "the connection table read from the kernel's conntrack"
+
+[[program]]
+name = "tc-nat-ingress"
+verdict = "loads"
+because = "packet rewriting and its own reverse tables only"
+status = "tc-nat-ingress"
+asked = true
+
+[[program]]
+name = "tc-nat-egress"
+verdict = "loads"
+because = "packet rewriting and its own reverse tables only"
+status = "tc-nat-egress"
+asked = true
+
+[[program]]
+name = "tc-scrub"
+verdict = "loads"
+because = "packet rewriting only"
+status = "tc-scrub"
+asked = true
+
+[[program]]
+name = "tc-qos"
+verdict = "loads"
+because = "classification and timestamps only"
+status = "tc-qos"
+asked = true
+
+[[program]]
+name = "cgroup-clusterip"
+verdict = "loads"
+because = "rewrites the connect address from a map"
+status = "cgroup-clusterip"
+asked = false
+
+[[program]]
+name = "cgroup-connect-redirect"
+verdict = "loads"
+because = "rewrites the connect address from a map"
+status = ""
+asked = false
+
+[[program]]
+name = "cgroup-attribution"
+verdict = "refused"
+because = "numbers the task in its pid namespace through current_pid_tgid, which reads the task with bpf_probe_read_kernel"
+status = "cgroup-attribution"
+asked = true
+loses = "the process and container a socket belongs to on alerts and flows"
+
+[[program]]
+name = "cgroup-workload-firewall"
+verdict = "refused"
+because = "bpf_probe_read_kernel on the task, and current_pid_tgid"
+status = "cgroup-workload-firewall"
+asked = true
+loses = "workload identity rules (which executables may reach the network)"
+
+[[program]]
+name = "tracepoint-process"
+verdict = "refused"
+because = "bpf_probe_read_kernel on the task and the binary's path, and current_pid_tgid"
+status = "tracepoint-process"
+asked = true
+loses = "the process table and every alert field read from it"
+
+[[program]]
+name = "tracepoint-signal"
+verdict = "refused"
+because = "current_pid_tgid"
+status = "tracepoint-signal"
+asked = false
+loses = "the signal sent from the kernel at the next syscall of a process a rule kills"
+
+[[program]]
+name = "tracepoint-drop-reason"
+verdict = "refused"
+because = "reads the sk_buff at kfree_skb with bpf_probe_read_kernel"
+status = "tracepoint-drop-reason"
+asked = false
+loses = "the kernel's drop reasons on GET /api/v1/ebpf/drop-reasons"
+
+[[program]]
+name = "tracepoint-tcp-health"
+verdict = "refused"
+because = "reads the socket at the TCP tracepoints with bpf_probe_read_kernel"
+status = "tracepoint-tcp-health"
+asked = false
+loses = "retransmission and reset counts per connection"
+
+[[program]]
+name = "uprobe-crypto"
+verdict = "refused"
+because = "current_pid_tgid"
+status = "uprobe-crypto"
+asked = false
+loses = "the inventory of processes calling a TLS library"
+
+[[program]]
+name = "uprobe-dlp"
+verdict = "refused"
+because = "its kTLS kprobes read the socket with bpf_probe_read_kernel, and the uprobes call current_pid_tgid"
+status = "uprobe-dlp"
+asked = true
+loses = "DLP on decrypted TLS payloads"
+
+[[program]]
+name = "lsm-exec-network"
+verdict = "refused"
+because = "bpf_probe_read_kernel on the task and the file, and current_pid_tgid"
+status = "lsm-exec-network"
+asked = false
+loses = "the executable a connection came from"
+
+[[program]]
+name = "lsm-exec-digest"
+verdict = "refused"
+because = "bpf_probe_read_kernel on the inode"
+status = "lsm-exec-digest"
+asked = false
+loses = "the executable's digest in the process table"
+
+[[program]]
+name = "lsm-write-refusal"
+verdict = "refused"
+because = "bpf_probe_read_kernel and bpf_probe_read_kernel_str on the path, and current_pid_tgid"
+status = "lsm-write-refusal"
+asked = false
+loses = "writes refused in the kernel to protected paths"
+
+[[program]]
+name = "lsm-tamper-guard"
+verdict = "refused"
+because = "bpf_probe_read_kernel and bpf_probe_read_kernel_str on the path, and current_pid_tgid"
+status = "lsm-tamper-guard"
+asked = false
+loses = "the refusal of writes to the agent's own files and of signals to its processes"
+
+[[program]]
+name = "lsm-bpf-guard"
+verdict = "refused"
+because = "bpf_probe_read_kernel on the map and link a bpf() call names"
+status = "lsm-bpf-guard"
+asked = false
+loses = "the refusal of writes to the agent's maps and detaches of its links by another task"
+
+[[program]]
+name = "lsm-bpf-load-guard"
+verdict = "loads"
+because = "reads the load attributes through the hook's arguments with no helper"
+status = ""
+asked = false
