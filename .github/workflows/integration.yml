@@ -186,6 +186,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The agent refuses to start below its kernel floor, so a runner image
+      # under it would fail every suite one by one; this says why once.
+      - name: Kernel at the agent's floor
+        run: |
+          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
+          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
+            echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
+            exit 1
+          fi
+
       - name: Record start time
         id: start
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
@@ -258,6 +268,16 @@ jobs:
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     steps:
       - uses: actions/checkout@v7
+
+      # The agent refuses to start below its kernel floor, so a runner image
+      # under it would fail every suite one by one; this says why once.
+      - name: Kernel at the agent's floor
+        run: |
+          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
+          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 18 ]; }; then
+            echo "::error::runner kernel $(uname -r) is below the agent's 6.18 floor"
+            exit 1
+          fi
 
       - name: Download agent binary
         uses: actions/download-artifact@v8
