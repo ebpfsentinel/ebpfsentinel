@@ -27,7 +27,7 @@
 #            fails under strict skips instead of reporting green.
 
 claims:
-  bpf-lsm: "the BPF LSM is active at boot - the agent VM (lsm=bpf provisioner); a hosted runner cannot set the boot line"
+  bpf-lsm: "the BPF LSM is active at boot - the agent VM (lsm=bpf provisioner) and the floor guest of the datapath lane (run-in-floor-vm.sh boots it with lsm=...,bpf)"
   openssl-mlkem: "an openssl offering X25519MLKEM768 - every host provisioned by provision-datapath-host.sh"
   userns: "unprivileged user namespaces are not refused by AppArmor - every host provisioned by provision-datapath-host.sh"
   transit-3vm: "the 3-VM transit topology - run-in-3vm.sh"
@@ -174,8 +174,6 @@ env:
   - "no statically linked busybox to build the test image from"
   - "suite 93 starts its processes on the agent's host (local lane only)"
   - "suite 94 writes its files on the agent's host (local lane only)"
-  - "systemd-run is not installed on this host"
-  - "this host does not run systemd"
 
 
 masking:

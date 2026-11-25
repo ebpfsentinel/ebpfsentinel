@@ -110,10 +110,6 @@ jobs:
           pr_list="$(tests/integration/scripts/list-suites-by-profile.sh --list pr)"
           datapath_list="$(tests/integration/scripts/list-suites-by-profile.sh --list datapath)"
           nightly_list="$(tests/integration/scripts/list-suites-by-profile.sh --list nightly)"
-          # Datapath suites holding tests the hosted runner cannot boot for
-          # (the BPF LSM): run again on the agent VM, which claims it.
-          vm_reruns="$(tests/integration/scripts/list-suites-by-profile.sh --list vm-rerun)"
-          nightly_list="$(echo $nightly_list $vm_reruns)"
           # JSON array form for matrix strategy expansion (GitHub Actions
           # expressions can't transform a space-separated string into a
           # matrix value, so we materialise the array here).
@@ -429,15 +425,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/datapath-logs"
           # What this lane provisions (scripts/provision-datapath-host.sh),
           # the agent build it downloads and the root it runs bats as; a
-          # test skipping for one of these fails here. The BPF LSM is
-          # not claimed: the guest is booted without it, and the suites
-          # relying on it run again nightly on the agent VM. The guest's
+          # test skipping for one of these fails here, the BPF LSM
+          # included: the guest boots with lsm=...,bpf and checks it is
+          # active before any suite starts. The guest's
           # dockerd serves the suites that start containers, and the agent's
           # own logs, written under /tmp in the guest, are copied out.
           bash "$FLOOR_VM" run --docker --iperf3-server \
             --env SUITE_IDS="$ids" \
             --env EBPFSENTINEL_STRICT_SKIPS=1 \
-            --env EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns agent-build root" \
+            --env EBPFSENTINEL_LANE_CLAIMS="bpf-lsm openssl-mlkem userns agent-build root" \
             --collect /tmp/ebpfsentinel-artifacts \
             -- bash -c '
               set -uo pipefail

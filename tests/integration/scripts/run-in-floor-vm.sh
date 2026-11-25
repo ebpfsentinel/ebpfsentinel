@@ -47,6 +47,15 @@
 #   FLOOR_VM_CPUS       guest vCPUs (default: every host CPU)
 #   FLOOR_VM_MEMORY     guest memory in MiB (default: host memory less 2 GiB)
 #   FLOOR_VM_ALLOW_TCG  1 boots without /dev/kvm, emulated and many times slower
+#   FLOOR_VM_LSM        the guest's lsm= boot list (default: the agent VM's,
+#                       BPF LSM last; empty boots the kernel's built-in list)
+#
+# The guest boots with the BPF LSM on, as the agent VM does, so the suites
+# resting on it (`bpf-lsm` in skip-policy.yaml) run on this lane; the guest
+# checks /sys/kernel/security/lsm against the list before any suite starts.
+# There is no systemd in the guest (vng's own init is PID 1) and no AppArmor
+# policy is loaded, since nothing runs apparmor.service: a suite needing a
+# unit or a profile provides it itself or says why it cannot.
 #
 # Writes inside the guest land in tmpfs overlays and vanish at exit, except in
 # the job's workspace, $RUNNER_TEMP, $FLOOR_VM_OUT and every --rwdir, which are
@@ -62,6 +71,7 @@ RESOLVER="$SCRIPT_DIR/check-kernel-matrix.py"
 
 VIRTME_NG_VERSION="1.42"
 VIRTME_NG_VENV="/opt/virtme-ng"
+DEFAULT_LSM="lockdown,landlock,yama,apparmor,ima,evm,bpf"
 
 die() {
   echo "::error::run-in-floor-vm: $*" >&2
@@ -123,8 +133,8 @@ write_guest_entry() {
   {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
-    printf 'FLOOR=%q\nOUT=%q\nCWD=%q\nAS_USER=%q\nWITH_DOCKER=%q\nWITH_IPERF3=%q\n' \
-      "$floor" "$OUT" "$PWD" "$AS_USER" "$WITH_DOCKER" "$WITH_IPERF3"
+    printf 'FLOOR=%q\nOUT=%q\nCWD=%q\nAS_USER=%q\nWITH_DOCKER=%q\nWITH_IPERF3=%q\nLSM=%q\n' \
+      "$floor" "$OUT" "$PWD" "$AS_USER" "$WITH_DOCKER" "$WITH_IPERF3" "$LSM"
     printf 'COLLECT=(' ; printf '%q ' "${COLLECT[@]+"${COLLECT[@]}"}" ; echo ')'
     printf 'CMD=(' ; printf '%q ' "${CMD[@]}" ; echo ')'
     # The job's environment, by name: vng starts the guest with an empty one.
@@ -155,6 +165,17 @@ fi
 echo "floor-vm: kernel $running, floor $FLOOR"
 
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
+mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security
+active_lsm="$(cat /sys/kernel/security/lsm 2>/dev/null)"
+echo "floor-vm: active LSMs ${active_lsm:-none}"
+if [ -n "$LSM" ]; then
+  for want in ${LSM//,/ }; do
+    case ",$active_lsm," in
+      *",$want,"*) ;;
+      *) echo "::error::floor-vm: lsm=$LSM was asked for and $want is not active ($active_lsm)"; finish 1 ;;
+    esac
+  done
+fi
 # The kfunc providers the datapath objects resolve at load, as the agent VM's
 # provisioner loads them at boot; a module this build lacks is the probe's call.
 modprobe -a nf_conntrack fou fou6 xfrm_interface 2>/dev/null || true
@@ -264,6 +285,7 @@ cmd_run() {
     die "/dev/kvm is not usable here; set FLOOR_VM_ALLOW_TCG=1 to boot emulated"
   fi
 
+  LSM="${FLOOR_VM_LSM-$DEFAULT_LSM}"
   local floor build
   floor="$(floor_release)"
   [ -n "$rel" ] || rel="$floor"
@@ -291,6 +313,7 @@ cmd_run() {
   rw+=("${extra_rw[@]+"${extra_rw[@]}"}")
 
   local args=(-r "v$build" --cpus "$cpus" --memory "${mem}M" --network user)
+  [ -n "$LSM" ] && args+=(--append "lsm=$LSM")
   local seen=" " d
   for d in "${rw[@]}"; do
     d="$(cd "$d" && pwd)"

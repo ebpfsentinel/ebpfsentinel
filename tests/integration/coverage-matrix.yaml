@@ -253,17 +253,6 @@ suite_profiles:
   "perf/13": nightly
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
-# Datapath suites the nightly lane runs a second time on the agent VM. Each
-# holds tests resting on the BPF LSM, which a hosted runner cannot boot with:
-# there they skip as unclaimed, and on the VM, which claims `bpf-lsm`
-# (skip-policy.yaml), a skip is a failure.
-vm_reruns:
-  "83": "a write past the count is refused by the LSM hook"
-  "88": "a detach of the agent's link is refused"
-  "91": "only listed executables open internet sockets"
-  "100": "ordinary work under the write refusal hook"
-  "132": "start-up refusals with and without the BPF LSM"
-
 coverage:
   # ── eBPF programs (17) ──────────────────────────────────────────
   - kind: ebpf_program

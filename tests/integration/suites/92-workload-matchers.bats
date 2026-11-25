@@ -261,13 +261,16 @@ _expect() {
 }
 
 @test "unit refuses a task in the named scope and not outside it" {
-    command -v systemd-run >/dev/null 2>&1 \
-        || env_skip "systemd-run is not installed on this host"
-    [ -d /run/systemd/system ] || env_skip "this host does not run systemd"
-
     local out
-    out="$(PYTHONHOME="$PYTHONHOME_DIR" systemd-run --quiet --scope --unit=ebpf-wl-unit \
-        "$SYS_PYTHON" "${DATA_DIR}/client.py" "$EBPF_NS_IP" 7203)"
+    if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
+        out="$(PYTHONHOME="$PYTHONHOME_DIR" systemd-run --quiet --scope --unit=ebpf-wl-unit \
+            "$SYS_PYTHON" "${DATA_DIR}/client.py" "$EBPF_NS_IP" 7203)"
+    else
+        # No systemd here (the floor guest boots without it): the matcher
+        # reads the unit off the cgroup path, so the cgroup systemd would
+        # have made for the scope stands in for it.
+        out="$(_run_in_cgroup system.slice/ebpf-wl-unit.scope 7203)"
+    fi
     _expect refused "$out" "the client in ebpf-wl-unit.scope on 7203"
     out="$(_run "$SYS_PYTHON" 7203)"
     _expect ok "$out" "the client outside the scope on 7203"

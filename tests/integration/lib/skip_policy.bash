@@ -13,7 +13,8 @@
 #              skips. Nothing is being hidden - the test could not run.
 #
 #   lane_skip  <claim> <reason>: a capability some lanes provide and others
-#              cannot (the BPF LSM, which a hosted runner cannot boot with).
+#              cannot (the BPF LSM, which only a lane setting the boot line
+#              has).
 #              Skips like env_skip on a lane that does not claim it, and
 #              like soft_skip on one that does: a lane listing the claim in
 #              EBPFSENTINEL_LANE_CLAIMS has promised the capability, so its
