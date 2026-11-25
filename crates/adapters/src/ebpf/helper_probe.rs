@@ -80,6 +80,7 @@ helpers! {
     BPF_FUNC_skb_ecn_set_ce => "bpf_skb_ecn_set_ce",
     BPF_FUNC_skb_set_tstamp => "bpf_skb_set_tstamp",
     BPF_FUNC_xdp_adjust_tail => "bpf_xdp_adjust_tail",
+    BPF_FUNC_xdp_get_buff_len => "bpf_xdp_get_buff_len",
     BPF_FUNC_tail_call => "bpf_tail_call",
     BPF_FUNC_redirect => "bpf_redirect",
     BPF_FUNC_redirect_map => "bpf_redirect_map",
@@ -225,6 +226,7 @@ const HELPER_UNIVERSE: &[Helper] = &[
     BPF_FUNC_skb_ecn_set_ce,
     BPF_FUNC_skb_set_tstamp,
     BPF_FUNC_xdp_adjust_tail,
+    BPF_FUNC_xdp_get_buff_len,
     BPF_FUNC_tail_call,
     BPF_FUNC_redirect,
     BPF_FUNC_redirect_map,
@@ -259,12 +261,17 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_loop,
             BPF_FUNC_probe_read_kernel,
             BPF_FUNC_tail_call,
+            BPF_FUNC_xdp_get_buff_len,
         ],
         true,
     ),
     xdp(
         "xdp-firewall-reject",
-        &[BPF_FUNC_ktime_get_boot_ns, BPF_FUNC_xdp_adjust_tail],
+        &[
+            BPF_FUNC_ktime_get_boot_ns,
+            BPF_FUNC_xdp_adjust_tail,
+            BPF_FUNC_xdp_get_buff_len,
+        ],
         false,
     ),
     xdp(
@@ -286,6 +293,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_tcp_raw_gen_syncookie_ipv4,
             BPF_FUNC_tcp_raw_gen_syncookie_ipv6,
             BPF_FUNC_xdp_adjust_tail,
+            BPF_FUNC_xdp_get_buff_len,
         ],
         false,
     ),
@@ -300,6 +308,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_loop,
             BPF_FUNC_redirect,
             BPF_FUNC_redirect_map,
+            BPF_FUNC_xdp_get_buff_len,
         ],
         true,
     ),
@@ -916,6 +925,11 @@ mod tests {
         }
         if code.contains("ctx.store(") {
             add(&["bpf_skb_store_bytes"]);
+        }
+        // `ebpf_helpers::xdp`: the whole frame length, and the pull of the
+        // headers past the first buffer, which measures the frame first.
+        if code.contains("frame_len(") || code.contains("pull_past_first_buffer(") {
+            add(&["bpf_xdp_get_buff_len"]);
         }
 
         // `emit_packet_event!` has three arms: the bare one stamps time and
