@@ -10,6 +10,15 @@
       "unlocks": "programs attached at security module hooks, which is where the kernel decides a call before it happens"
     },
     {
+      "condition": "a kernel built with it",
+      "fallback": "programs load unsigned, as on every other node, and the crypto posture says the kernel does not verify signatures here",
+      "id": "bpf_prog_signing",
+      "needs_lsm": false,
+      "probe": "signed_load",
+      "since": "6.18",
+      "unlocks": "a BPF program load checked by the kernel against a signature and a named keyring, and refused when the signature does not verify"
+    },
+    {
       "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
       "fallback": "executables are identified by the device and inode read in userspace, and paths and attributes are read off the filesystem",
       "id": "file_kfuncs",

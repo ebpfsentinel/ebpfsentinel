@@ -66,6 +66,9 @@ pub enum ProbeKind {
     /// The attach status the adapter behind the capability publishes once it
     /// has tried.
     AttachStatus,
+    /// A trivial program is loaded with a signature and a keyring named in
+    /// its load, and the kernel's answer says whether it read them.
+    SignedLoad,
 }
 
 impl ProbeKind {
@@ -78,6 +81,7 @@ impl ProbeKind {
             Self::SleepableLsm => "sleepable_lsm",
             Self::ActiveSecurityModules => "active_security_modules",
             Self::AttachStatus => "attach_status",
+            Self::SignedLoad => "signed_load",
         }
     }
 }
@@ -111,6 +115,16 @@ pub const CATALOGUE: &[Capability] = &[
         since: KernelVersion::FLOOR,
         needs_lsm: true,
         fallback: "each capability resting on it runs its own fallback, listed beside it",
+    },
+    Capability {
+        id: "bpf_prog_signing",
+        unlocks: "a BPF program load checked by the kernel against a signature and a named \
+                  keyring, and refused when the signature does not verify",
+        probe: ProbeKind::SignedLoad,
+        since: KernelVersion::FLOOR,
+        needs_lsm: false,
+        fallback: "programs load unsigned, as on every other node, and the crypto posture \
+                   says the kernel does not verify signatures here",
     },
     Capability {
         id: "file_kfuncs",
@@ -308,7 +322,8 @@ impl Capability {
             ProbeKind::Loaded
             | ProbeKind::DeclaredInBtf
             | ProbeKind::SleepableLsm
-            | ProbeKind::ActiveSecurityModules => "a kernel built with it".to_owned(),
+            | ProbeKind::ActiveSecurityModules
+            | ProbeKind::SignedLoad => "a kernel built with it".to_owned(),
         }
     }
 }
@@ -354,6 +369,7 @@ mod tests {
     /// so it has to be made here on purpose.
     const PUBLISHED_IDS: &[&str] = &[
         "bpf_lsm",
+        "bpf_prog_signing",
         "file_kfuncs",
         "kprobe_session",
         "copy_from_user_str",

@@ -197,7 +197,8 @@ mod tests {
             rlim_max: 0,
         };
         // SAFETY: `now` is a valid, writable rlimit for the duration of the call.
-        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut now) }, 0);
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut now) };
+        assert_eq!(rc, 0);
         assert_eq!(limit.after, now.rlim_cur);
         assert_eq!(now.rlim_cur, now.rlim_max);
         assert!(limit.before <= limit.after);

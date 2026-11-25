@@ -25,6 +25,7 @@ use super::file_kfunc_probe::FileKfuncStatus;
 use super::kernel_probe::distribution_family;
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
+use super::prog_signing_probe::ProgSigningStatus;
 use super::signal_task::DirectSignalProbe;
 use super::workload_firewall_attach::CgroupLabelProbe;
 use super::xdp_pull_probe::XdpPullStatus;
@@ -326,6 +327,34 @@ pub fn xdp_pull_evidence(status: Option<&XdpPullStatus>) -> Evidence {
     }
 }
 
+/// The signed-load probe, restated as evidence. The kernel reading the
+/// signature fields is what it declares; nothing is confirmed by a load,
+/// because the probe's signature is one no key verifies.
+#[must_use]
+pub fn prog_signing_evidence(status: Option<&ProgSigningStatus>) -> Evidence {
+    let Some(status) = status else {
+        return Evidence::Kfunc {
+            declared: None,
+            load: Load::NotRun("startup has not run the signed-load probe".to_string()),
+        };
+    };
+    let why = || status.reason.clone().unwrap_or_default();
+    match status.verifies {
+        Some(true) => Evidence::Kfunc {
+            declared: Some(true),
+            load: Load::NotAttempted,
+        },
+        Some(false) => Evidence::Kfunc {
+            declared: Some(false),
+            load: Load::Refused(why()),
+        },
+        None => Evidence::Kfunc {
+            declared: None,
+            load: Load::NotRun(why()),
+        },
+    }
+}
+
 /// One kfunc fact, restated as evidence.
 #[must_use]
 pub fn kfunc_feature_evidence(feature: &KfuncFeature) -> Evidence {
@@ -430,11 +459,13 @@ fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
         attribution_attach, bpf_guard, dlp_record, exec_digest, exec_network, file_kfunc_probe,
-        kfunc_feature_probe, lsm_probe, process_attach, quarantine_map_manager, signal_attach,
-        tamper_guard, tcp_health, workload_firewall_attach, write_refusal, xdp_pull_probe,
+        kfunc_feature_probe, lsm_probe, process_attach, prog_signing_probe, quarantine_map_manager,
+        signal_attach, tamper_guard, tcp_health, workload_firewall_attach, write_refusal,
+        xdp_pull_probe,
     };
     match id {
         "bpf_lsm" => Some(lsm_evidence(lsm_probe::status())),
+        "bpf_prog_signing" => Some(prog_signing_evidence(prog_signing_probe::cached())),
         "file_kfuncs" => Some(file_kfunc_evidence(file_kfunc_probe::cached())),
         "xdp_pull_data" => Some(xdp_pull_evidence(xdp_pull_probe::cached())),
         "attribution" => {
@@ -675,6 +706,40 @@ mod tests {
         let unprobed = xdp_pull_evidence(None);
         assert_eq!(
             classify(pull, false, &unprobed).expect("inactive").code(),
+            "not_probed"
+        );
+    }
+
+    #[test]
+    fn program_signing_is_active_only_where_the_kernel_read_the_signature() {
+        let signing = find("bpf_prog_signing").expect("entry");
+        let read = prog_signing_evidence(Some(&ProgSigningStatus {
+            verifies: Some(true),
+            reason: None,
+        }));
+        assert_eq!(classify(signing, false, &read), None);
+
+        let absent = prog_signing_evidence(Some(&ProgSigningStatus {
+            verifies: Some(false),
+            reason: Some("no signature field".into()),
+        }));
+        assert_eq!(
+            classify(signing, true, &absent),
+            Some(Inactive::NotDeclared)
+        );
+
+        let not_asked = prog_signing_evidence(Some(&ProgSigningStatus {
+            verifies: None,
+            reason: Some("no bpf system call".into()),
+        }));
+        assert_eq!(
+            classify(signing, true, &not_asked),
+            Some(Inactive::NotProbed("no bpf system call".into()))
+        );
+
+        let unprobed = prog_signing_evidence(None);
+        assert_eq!(
+            classify(signing, true, &unprobed).expect("inactive").code(),
             "not_probed"
         );
     }

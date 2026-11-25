@@ -2009,11 +2009,11 @@
         "tags": [
           "TLS"
         ],
-        "summary": "`GET /api/v1/crypto/posture` - the key exchange each of the agent's own\nlinks is built to accept and the one it last negotiated.",
+        "summary": "`GET /api/v1/crypto/posture` - the key exchange each of the agent's own\nlinks is built to accept and the one it last negotiated, and where the\nagent stands on signed BPF programs.",
         "operationId": "crypto_posture",
         "responses": {
           "200": {
-            "description": "Each link, its key exchange policy and the group it last negotiated",
+            "description": "Each link, its key exchange policy and the group it last negotiated, and the program signing posture",
             "content": {
               "application/json": {
                 "schema": {
@@ -11019,6 +11019,31 @@
           }
         }
       },
+      "BpfProgSigningReport": {
+        "type": "object",
+        "description": "Whether the kernel verifies BPF program signatures, as start-up asked it.",
+        "required": [
+          "probed",
+          "verifies"
+        ],
+        "properties": {
+          "probed": {
+            "type": "boolean",
+            "description": "Start-up asked the kernel. When false, `verifies` claims nothing."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it does not, or why nothing was asked, in one sentence."
+          },
+          "verifies": {
+            "type": "boolean",
+            "description": "The kernel reads a signature and a keyring in a program load and\nchecks one against the other."
+          }
+        }
+      },
       "BulkTriageRequest": {
         "type": "object",
         "description": "`POST /api/v1/alerts/triage` body: one change applied to many alerts.",
@@ -12312,11 +12337,12 @@
       },
       "CryptoPostureResponse": {
         "type": "object",
-        "description": "The agent's own links.",
+        "description": "The agent's own links, and whether the kernel verifies its programs.",
         "required": [
           "outbound_mode",
           "all_required",
-          "links"
+          "links",
+          "signing"
         ],
         "properties": {
           "all_required": {
@@ -12333,6 +12359,10 @@
           "outbound_mode": {
             "type": "string",
             "description": "The policy the agent's own clients dial with:\n`agent.tls.outbound_pq_mode`, or what it derives from `pq_mode`."
+          },
+          "signing": {
+            "$ref": "#/components/schemas/SigningPostureBody",
+            "description": "Whether the kernel verifies BPF program signatures here, whether the\nBPF LSM is active, and what the agent does about it."
           }
         }
       },
@@ -14991,6 +15021,7 @@
           "process_signal",
           "quarantine",
           "bpf_lsm",
+          "bpf_prog_signing",
           "network_executables",
           "write_refusal",
           "self_protection",
@@ -15007,6 +15038,10 @@
           "bpf_lsm": {
             "$ref": "#/components/schemas/BpfLsmReport",
             "description": "Whether an LSM program can attach on this host. Read from the host\nrather than from any attach, because it is asked before anything that\nneeds it is configured, and the kernel version does not answer it."
+          },
+          "bpf_prog_signing": {
+            "$ref": "#/components/schemas/BpfProgSigningReport",
+            "description": "Whether the kernel reads a signature in a program load and checks it\nagainst a keyring. Asked by loading a trivial program with a\nsignature attached, never by the kernel version."
           },
           "capabilities": {
             "type": "array",
@@ -20070,6 +20105,93 @@
             "description": "The container, else the cgroup, else the systemd unit it was counted\nunder."
           }
         }
+      },
+      "SigningPostureBody": {
+        "type": "object",
+        "description": "Whether the kernel verifies the agent's programs, and what could refuse\nan unsigned one.",
+        "required": [
+          "kernel_verifies_signatures",
+          "bpf_lsm_active",
+          "state",
+          "load_guard_attached",
+          "signed_programs",
+          "unsigned_programs",
+          "refused_programs",
+          "reason"
+        ],
+        "properties": {
+          "bpf_lsm_active": {
+            "type": "boolean",
+            "description": "The BPF LSM is among the active security modules."
+          },
+          "certificate_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the DER certificate the loaders verify against, the digest\nthe release's measurements record; `null` unless the state is\n`verified_not_enforced` or `enforced`."
+          },
+          "kernel_verifies_signatures": {
+            "type": "boolean",
+            "description": "The kernel reads a signature in a program load and checks it against\na keyring, as start-up asked it. False when nobody asked."
+          },
+          "keyring_serial": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The serial of the keyring the kernel checked the signed loaders\nagainst; `null` unless the state is `verified_not_enforced` or\n`enforced`."
+          },
+          "load_guard_attached": {
+            "type": "boolean",
+            "description": "The warden's guard on program loads is attached: every load through\na BPF token on this host passes only signed against its keyring."
+          },
+          "not_enforced_because": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first condition `enforced` lacks on this host; `null` when\nenforced."
+          },
+          "reason": {
+            "type": "string",
+            "description": "The state in one sentence."
+          },
+          "refused_programs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Programs the guard refused because they had no signed loader.",
+            "minimum": 0
+          },
+          "signed_programs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Programs loaded through a signed loader.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/SigningStateBody",
+            "description": "What the agent does about it."
+          },
+          "unsigned_programs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Programs loaded unsigned while the kernel could have checked them.",
+            "minimum": 0
+          }
+        }
+      },
+      "SigningStateBody": {
+        "type": "string",
+        "description": "What the agent does about BPF program signatures on this node.",
+        "enum": [
+          "not_probed",
+          "unsupported",
+          "unsigned",
+          "verified_not_enforced",
+          "enforced"
+        ]
       },
       "SlotContentionResponse": {
         "type": "object",

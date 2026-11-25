@@ -9,6 +9,10 @@
 #     a cause and a reason, and none decided without its fallback.
 #   * The start-up log carries one summary line and one line per inactive
 #     entry, naming the same entries the route calls inactive.
+#   * Whether the kernel verifies program signatures is answered as booleans
+#     on the kernel-features route, and again with the BPF LSM fact in the
+#     signing block of the crypto posture, which names a state and never
+#     claims enforcement.
 #   * With `bpf` left out of the active security modules, every entry resting
 #     on the BPF LSM is inactive, and the BPF LSM entry itself names the
 #     boot parameter that would turn it on. The list is shown through a bind
@@ -102,6 +106,41 @@ _inactive_in_log() {
     from_log="$(_inactive_in_log "$AGENT_LOG_FILE")"
     [ "$from_log" = "$from_route" ]
     [ "$(grep -c 'kernel capabilities above the floor' "$AGENT_LOG_FILE")" = "1" ]
+}
+
+@test "program signing is answered as booleans on both routes, and never as enforced" {
+    start_ebpf_agent "$PREPARED_CONFIG"
+    wait_for_ebpf_loaded 30 || {
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+
+    local features
+    features="$(api_get /api/v1/ebpf/kernel-features)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    echo "$features" | jq -e '.bpf_prog_signing.probed | type == "boolean"' >/dev/null
+    echo "$features" | jq -e '.bpf_prog_signing.verifies | type == "boolean"' >/dev/null
+    # Start-up probed before the programs loaded, so the answer is there.
+    echo "$features" | jq -e '.bpf_prog_signing.probed == true' >/dev/null
+    echo "$features" | jq -e '[.capabilities[].id] | index("bpf_prog_signing") != null' >/dev/null
+
+    local posture
+    posture="$(api_get /api/v1/crypto/posture)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    echo "$posture" | jq -e '.signing.kernel_verifies_signatures | type == "boolean"' >/dev/null
+    echo "$posture" | jq -e '.signing.bpf_lsm_active | type == "boolean"' >/dev/null
+    echo "$posture" | jq -e '.signing.state | IN("not_probed", "unsupported", "unsigned", "signed")' >/dev/null
+    echo "$posture" | jq -e '.signing.signed_programs | type == "number"' >/dev/null
+    echo "$posture" | jq -e '.signing.unsigned_programs | type == "number"' >/dev/null
+    echo "$posture" | jq -e '.signing.reason | type == "string" and length > 0' >/dev/null
+
+    # Both routes read the same probe and the same host.
+    [ "$(echo "$posture" | jq '.signing.kernel_verifies_signatures')" = \
+        "$(echo "$features" | jq '.bpf_prog_signing.verifies')" ]
+    [ "$(echo "$posture" | jq '.signing.bpf_lsm_active')" = \
+        "$(echo "$features" | jq '.bpf_lsm.active')" ]
 }
 
 @test "without bpf among the security modules, every LSM entry is off and the boot parameter is named" {

@@ -34,6 +34,7 @@ pub mod nat;
 pub mod netpol;
 pub mod network_program;
 pub mod process;
+pub mod prog_signing;
 pub mod qos;
 pub mod ransom;
 pub mod ratelimit;

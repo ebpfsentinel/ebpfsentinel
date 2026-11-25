@@ -1992,6 +1992,26 @@ pub struct CryptoPostureResponse {
     pub outbound_mode: String,
     pub all_required: bool,
     pub links: Vec<LinkPostureBody>,
+    /// Absent from an agent that predates the signing block.
+    #[serde(default)]
+    pub signing: Option<SigningPostureBody>,
+}
+
+/// Whether the kernel verifies the agent's programs, and what the agent does
+/// about it.
+#[derive(Deserialize, Serialize)]
+pub struct SigningPostureBody {
+    pub kernel_verifies_signatures: bool,
+    pub bpf_lsm_active: bool,
+    pub state: String,
+    #[serde(default)]
+    pub load_guard_attached: bool,
+    #[serde(default)]
+    pub refused_programs: u64,
+    #[serde(default)]
+    pub not_enforced_because: Option<String>,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2737,6 +2757,9 @@ pub struct KernelFeaturesResponse {
     /// answer from a host where the BPF LSM is inactive.
     #[serde(default)]
     pub bpf_lsm: Option<BpfLsmReport>,
+    /// Absent from an agent that predates the signed-load probe.
+    #[serde(default)]
+    pub bpf_prog_signing: Option<BpfProgSigningReport>,
     /// Absent from an agent that predates the list.
     #[serde(default)]
     pub network_executables: Option<NetworkExecutablesReport>,
@@ -2888,6 +2911,15 @@ pub struct NetworkExecutablesReport {
     pub enforcing: bool,
     #[serde(default)]
     pub executables: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Whether the kernel verifies BPF program signatures, as the node answered.
+#[derive(Deserialize, Serialize)]
+pub struct BpfProgSigningReport {
+    pub probed: bool,
+    pub verifies: bool,
     #[serde(default)]
     pub reason: Option<String>,
 }

@@ -160,6 +160,10 @@ pub struct KernelFeaturesResponse {
     /// rather than from any attach, because it is asked before anything that
     /// needs it is configured, and the kernel version does not answer it.
     pub bpf_lsm: BpfLsmReport,
+    /// Whether the kernel reads a signature in a program load and checks it
+    /// against a keyring. Asked by loading a trivial program with a
+    /// signature attached, never by the kernel version.
+    pub bpf_prog_signing: BpfProgSigningReport,
     /// Whether the kernel decides which executables reach the network, and
     /// whether it refuses or only reports. Reported whether or not the list is
     /// configured, with the reason it is not in force.
@@ -504,6 +508,35 @@ impl From<&adapters::ebpf::BpfLsmStatus> for BpfLsmReport {
             modules: status.modules.clone(),
             reason: status.reason.clone(),
             remedy: status.remedy.clone(),
+        }
+    }
+}
+
+/// Whether the kernel verifies BPF program signatures, as start-up asked it.
+#[derive(Serialize, ToSchema)]
+pub struct BpfProgSigningReport {
+    /// Start-up asked the kernel. When false, `verifies` claims nothing.
+    pub probed: bool,
+    /// The kernel reads a signature and a keyring in a program load and
+    /// checks one against the other.
+    pub verifies: bool,
+    /// Why it does not, or why nothing was asked, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl From<Option<&adapters::ebpf::prog_signing_probe::ProgSigningStatus>> for BpfProgSigningReport {
+    fn from(status: Option<&adapters::ebpf::prog_signing_probe::ProgSigningStatus>) -> Self {
+        let Some(status) = status else {
+            return Self {
+                probed: false,
+                verifies: false,
+                reason: Some("startup has not run the signed-load probe".to_string()),
+            };
+        };
+        Self {
+            probed: status.verifies.is_some(),
+            verifies: status.verifies(),
+            reason: status.reason.clone(),
         }
     }
 }
@@ -947,6 +980,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let process_signal = process_signal_report(adapters::ebpf::signal_attach::status());
     let quarantine = quarantine_report(adapters::ebpf::quarantine_map_manager::status());
     let bpf_lsm = BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
+    let bpf_prog_signing = BpfProgSigningReport::from(adapters::ebpf::prog_signing_probe::cached());
     let network_executables =
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
     let write_refusal = WriteRefusalReport::from(adapters::ebpf::write_refusal::status());
@@ -977,6 +1011,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             process_signal,
             quarantine,
             bpf_lsm,
+            bpf_prog_signing,
             network_executables,
             write_refusal,
             self_protection,
@@ -1029,6 +1064,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         process_signal,
         quarantine,
         bpf_lsm,
+        bpf_prog_signing,
         network_executables,
         write_refusal,
         self_protection,
@@ -1445,6 +1481,50 @@ mod tests {
         assert_eq!(resp.bpf_lsm.modules, host.modules);
         assert_eq!(resp.bpf_lsm.remedy, host.remedy);
         assert_eq!(resp.bpf_lsm.active, resp.bpf_lsm.remedy.is_none());
+    }
+
+    #[test]
+    fn program_signing_before_startup_probed_says_so_and_claims_nothing() {
+        let report = BpfProgSigningReport::from(None);
+        assert!(!report.probed);
+        assert!(!report.verifies);
+        assert!(report.reason.is_some());
+        let resp = kernel_features_body(None);
+        assert!(resp.bpf_prog_signing.probed || resp.bpf_prog_signing.reason.is_some());
+    }
+
+    #[test]
+    fn program_signing_restates_each_probe_answer() {
+        use adapters::ebpf::prog_signing_probe::ProgSigningStatus;
+        let status = |verifies, reason: Option<&str>| ProgSigningStatus {
+            verifies,
+            reason: reason.map(str::to_string),
+        };
+        let present = BpfProgSigningReport::from(Some(&status(Some(true), None)));
+        assert!(present.probed && present.verifies);
+        assert_eq!(present.reason, None);
+
+        let absent = BpfProgSigningReport::from(Some(&status(Some(false), Some("no field"))));
+        assert!(absent.probed && !absent.verifies);
+        assert_eq!(absent.reason.as_deref(), Some("no field"));
+
+        let not_asked = BpfProgSigningReport::from(Some(&status(None, Some("no syscall"))));
+        assert!(!not_asked.probed && !not_asked.verifies);
+        assert_eq!(not_asked.reason.as_deref(), Some("no syscall"));
+    }
+
+    #[test]
+    fn program_signing_serializes_as_two_booleans_and_a_reason() {
+        let json = serde_json::to_value(BpfProgSigningReport {
+            probed: true,
+            verifies: true,
+            reason: None,
+        })
+        .expect("serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({ "probed": true, "verifies": true, "reason": null })
+        );
     }
 
     #[test]

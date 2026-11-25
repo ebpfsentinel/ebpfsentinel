@@ -5738,6 +5738,19 @@ fn print_bpf_lsm(report: &crate::cli::api_client::BpfLsmReport) {
     }
 }
 
+fn print_bpf_prog_signing(report: &crate::cli::api_client::BpfProgSigningReport) {
+    println!("\nBPF program signing");
+    let verifies = if report.probed {
+        yes_no(report.verifies)
+    } else {
+        "not probed"
+    };
+    println!("  Kernel verifies: {verifies}");
+    if let Some(reason) = &report.reason {
+        println!("  Reason:          {reason}");
+    }
+}
+
 /// What the list of executables allowed to reach the network is called in
 /// the one line a buyer reads first.
 const NETWORK_EXECUTABLES_LABEL: &str = "Executables allowed to reach the network";
@@ -5790,6 +5803,10 @@ fn print_lsm_blocks(resp: &crate::cli::api_client::KernelFeaturesResponse) {
             print_bpf_lsm(report);
         }
         None => println!("\nBPF LSM\n  Not reported by this agent."),
+    }
+    match &resp.bpf_prog_signing {
+        Some(report) => print_bpf_prog_signing(report),
+        None => println!("\nBPF program signing\n  Not reported by this agent."),
     }
     match &resp.network_executables {
         Some(report) => print_network_executables(report),
@@ -6571,6 +6588,23 @@ pub async fn cmd_tls_links(client: &ApiClient, output: OutputFormat) -> Result<(
     println!("Outbound policy: {}", resp.outbound_mode);
     if resp.all_required {
         println!("Every link requires the post-quantum hybrid group.");
+    }
+    if let Some(signing) = &resp.signing {
+        println!(
+            "Program signing: {} (kernel verifies: {}, BPF LSM active: {})",
+            signing.state,
+            yes_no(signing.kernel_verifies_signatures),
+            yes_no(signing.bpf_lsm_active)
+        );
+        if signing.refused_programs > 0 {
+            println!(
+                "  The warden's guard refused {} program(s) with no signed loader.",
+                signing.refused_programs
+            );
+        }
+        if let Some(why) = &signing.not_enforced_because {
+            println!("  Not enforced: {why}");
+        }
     }
     if resp.links.is_empty() {
         println!("No link has been built yet.");
