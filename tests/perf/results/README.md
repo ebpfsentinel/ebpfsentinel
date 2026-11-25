@@ -9,6 +9,28 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-11-25-bpf-qdisc-vs-edt-fq.json`
+
+`tests/perf/09-bpf-qdisc-vs-edt-fq.bats` on the two-machine lane of
+`tests/integration/vagrant`, agent VM kernel 7.0.0-44-generic, 4 vCPUs, seven
+profiles, three runs of 20 s each per arm. Three arms on the same traffic:
+`edt-fq` (tc-qos writes a departure time per cgroup, `sch_fq` serves it, what
+ships), `edt-bpf-fq` (the same departure times served by the kernel's
+`bpf_fq` selftest registered as `fq`), `bpf-shaper` (a BPF qdisc shaping by
+cgroup itself, tc-qos standing aside). `medians` holds the median run per arm
+and profile, `criteria` each BPF arm against `edt-fq`.
+
+**What to quote.** Neither BPF arm holds every criterion, so departure times
+served by `sch_fq` stay. Kernel time per packet against `edt-fq`: `edt-bpf-fq`
+3.6 times at 100 Mbit/s with eight flows (18.5 against 5.1 us) and 4.3 times at
+1 Gbit/s (8.8 against 2.1 us); `bpf-shaper` 3.5 and 4.1 times. Under eight
+shaped flows the ping outside the shaped cgroup rose to a p99 of 40.8 ms with
+`edt-bpf-fq`, against 1.21 ms with `edt-fq`. At 8 and 100 Mbit/s and in the
+pair, `bpf-shaper` holds each cgroup 4.4 to 4.6 points under its rate where
+`edt-fq` stays within 1.3. Both BPF
+arms keep the unshaped throughput, the fairness between flows and the
+overload rate of `edt-fq`.
+
 ## `2026-11-08-memory-footprint.json`
 
 `tests/perf/measure-footprint.sh` on the agent VM of `tests/integration/vagrant`,

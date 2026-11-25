@@ -87,7 +87,7 @@ setup_file() {
 
     _agent_ssh rm -rf "$REMOTE_DIR"
     local file
-    for file in build.sh bench-shaper.bpf.c run-profile.sh; do
+    for file in build.sh kfunc-externs.py bench-shaper.bpf.c run-profile.sh; do
         _agent_scp "${FIXTURE_DIR}/bpf-qdisc/${file}" "${REMOTE_DIR}/${file}" || {
             echo "cannot copy ${file} to the agent VM" >&2
             return 1
@@ -126,6 +126,7 @@ setup_file() {
 teardown_file() {
     stop_ebpf_agent 2>/dev/null || true
     _qdisc_reset
+    _fq_default_restore
     local class port
     for class in $CLASSES; do
         _agent_ssh_sudo rmdir "/sys/fs/cgroup/${class%%:*}" 2>/dev/null || true
@@ -154,6 +155,15 @@ _qdisc_reset() {
         bpftool struct_ops unregister name fq 2>/dev/null || true
         bpftool struct_ops unregister name bench_shaper 2>/dev/null || true
         rm -f /sys/fs/bpf/fq /sys/fs/bpf/bench_shaper
+    " 2>/dev/null || true
+}
+
+# Puts back the default qdisc the edt-bpf-fq arm lowered.
+_fq_default_restore() {
+    _remote "
+        [ -s ${REMOTE_DIR}/default_qdisc.before ] || exit 0
+        sysctl -qw net.core.default_qdisc=\$(cat ${REMOTE_DIR}/default_qdisc.before)
+        rm -f ${REMOTE_DIR}/default_qdisc.before
     " 2>/dev/null || true
 }
 
@@ -389,14 +399,28 @@ _agent_honours_eth1() {
     stop_ebpf_agent 2>/dev/null || true
     _qdisc_reset
     local rc=0
+    # The lab boots with net.core.default_qdisc=fq, so every mq child on the
+    # VM's interfaces holds sch_fq. The default is lowered for this arm and the
+    # interfaces still on fq go back to their default before the module leaves;
+    # _fq_default_restore puts it back.
     _remote "
+        sysctl -n net.core.default_qdisc > ${REMOTE_DIR}/default_qdisc.before
+        sysctl -qw net.core.default_qdisc=fq_codel
+        for dev in \$(ls /sys/class/net); do
+            tc qdisc show dev \$dev | grep -qw fq || continue
+            # A default root (handle 0) cannot be deleted: replaced first, the
+            # delete then gives the interface its default under fq_codel.
+            tc qdisc replace dev \$dev root pfifo_fast
+            tc qdisc del dev \$dev root
+        done
         if lsmod | grep -q '^sch_fq '; then modprobe -r sch_fq || exit 3; fi
         grep -qx 'CONFIG_NET_SCH_FQ=y' /boot/config-\$(uname -r) && exit 3
         exit 0
     " || rc=$?
     if [ "$rc" -eq 3 ]; then
         _arm_status edt-bpf-fq "not run: sch_fq could not be taken out of the kernel"
-        skip "sch_fq is built in or in use, so the BPF fq cannot take its name"
+        _fq_default_restore
+        soft_skip "sch_fq is built in or still in use, so the BPF fq cannot take its name"
     fi
     _remote "bpftool -d struct_ops register ${REMOTE_DIR}/out/fq.bpf.o /sys/fs/bpf" >"${DATA_DIR}/register-fq.log" 2>&1 || {
         _arm_status edt-bpf-fq "not run: bpf_fq refused at registration"
@@ -416,6 +440,7 @@ _agent_honours_eth1() {
 
     stop_ebpf_agent 2>/dev/null || true
     _qdisc_reset
+    _fq_default_restore
 }
 
 @test "bpf-shaper: each cgroup held to its rate by a BPF qdisc, tc-qos standing aside" {

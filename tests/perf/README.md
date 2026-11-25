@@ -78,9 +78,15 @@ or with every other perf suite through `scripts/run-in-2vm.sh --performance`.
 length and number of runs per profile. The agent VM needs `clang` (provisioner
 `bpf-c-toolchain`) and a kernel built with `CONFIG_NET_SCH_BPF`; the qdiscs are
 built there by `fixtures/bpf-qdisc/build.sh`, which fetches the kernel's
-`bpf_fq` selftest at the running kernel's tag and never commits it. The fq arm
-backed by the BPF qdisc runs first, because it needs `sch_fq` out of the
-kernel, and is skipped with its reason where the module is built in.
+`bpf_fq` selftest at the running kernel's tag and never commits it. Where the
+kernel's BTF carries its kfuncs without the tag bpftool reads to print their
+prototypes (Ubuntu's 7.0), `fixtures/bpf-qdisc/kfunc-externs.py` declares the
+ones the sources call. The fq arm backed by the BPF qdisc runs first, because
+it needs `sch_fq` out of the kernel: the lab boots with
+`net.core.default_qdisc=fq`, so the arm lowers the default to `fq_codel`, puts
+every interface still on fq back to its default, unloads the module, and
+restores the default when it ends. Where the module is built in the arm is
+skipped with its reason, and fails under `EBPFSENTINEL_STRICT_SKIPS=1`.
 
 Nothing in `fixtures/bpf-qdisc/` is part of the agent: no crate loads it and no
 release carries it. The suite registers each qdisc, measures it, and

@@ -15,7 +15,7 @@
 # come from its release tarball, pinned by digest. The objects stay in
 # <out_dir> and are removed with it.
 #
-# Needs: clang (BPF target), bpftool able to dump kernel function prototypes,
+# Needs: clang (BPF target), bpftool, python3,
 # curl, tar, sha256sum, and a kernel built with CONFIG_NET_SCH_BPF. Each
 # missing piece is reported on stderr and the script exits 2, which the suite
 # turns into a skip naming it.
@@ -34,7 +34,7 @@ missing() {
     exit 2
 }
 
-for tool in clang bpftool curl tar sha256sum; do
+for tool in clang bpftool curl tar sha256sum python3; do
     command -v "$tool" >/dev/null 2>&1 || missing "${tool} not installed"
 done
 
@@ -59,7 +59,8 @@ mkdir -p "$OUT/include/bpf"
 cd "$OUT"
 
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-grep -q 'bpf_qdisc_skb_drop' vmlinux.h || missing "bpftool $(bpftool version 2>/dev/null | head -1) does not dump kernel function prototypes, or the kernel has no BPF qdisc"
+bpftool -j btf dump file /sys/kernel/btf/vmlinux > btf.json
+grep -q '"name":"bpf_qdisc_skb_drop"' btf.json || missing "kernel ${release} has no BPF qdisc kfuncs in its BTF"
 
 curl -fsSL --retry 3 -o libbpf.tar.gz "$LIBBPF_URL"
 echo "${LIBBPF_SHA256}  libbpf.tar.gz" | sha256sum -c --quiet - || missing "libbpf ${LIBBPF_VERSION} tarball does not match its pinned digest"
@@ -81,6 +82,24 @@ grep -q '\.id[[:space:]]*=[[:space:]]*"bpf_fq"' bpf_qdisc_fq.c || missing "bpf_q
 sed 's/\(\.id[[:space:]]*=[[:space:]]*\)"bpf_fq"/\1"fq"/' bpf_qdisc_fq.c > fq.bpf.c
 
 cp "${HERE}/bench-shaper.bpf.c" .
+
+# The selftest includes <errno.h> for its E* constants. libc's header pulls the
+# 32-bit stubs under the BPF target, which a 64-bit host does not install; the
+# kernel's own list of the constants is all it needs.
+printf '#include <asm-generic/errno.h>\n' > include/errno.h
+
+# bpftool writes kfunc prototypes only where the kernel's BTF tags its kfuncs;
+# a distribution kernel built without those tags (Ubuntu's 7.0) leaves them
+# out, so the ones the sources call are declared from the BTF here.
+if ! grep -q 'bpf_qdisc_skb_drop(' vmlinux.h; then
+    {
+        echo
+        echo "/* kfuncs this BTF carries without a bpf_kfunc tag, declared by kfunc-externs.py */"
+        python3 "${HERE}/kfunc-externs.py" btf.json vmlinux.h bpf_experimental.h include/bpf/bpf_helper_defs.h \
+            -- fq.bpf.c bpf_qdisc_common.h bench-shaper.bpf.c
+    } >> vmlinux.h
+fi
+rm -f btf.json
 
 arch="$(uname -m)"
 case "$arch" in
