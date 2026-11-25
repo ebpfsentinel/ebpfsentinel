@@ -317,12 +317,13 @@ impl DirectSignal {
             .map(|prog| Self { prog })
             .map_err(|(errno, log)| {
                 let last = log.lines().rev().find(|l| !l.trim().is_empty());
+                let note = super::kfunc_loader::signed::guard_refusal_note_here(errno);
                 refused(match last {
                     Some(line) => format!(
-                        "the kernel refused the signal program (errno {errno}): {}",
+                        "the kernel refused the signal program (errno {errno}): {}{note}",
                         line.trim()
                     ),
-                    None => format!("the kernel refused the signal program (errno {errno})"),
+                    None => format!("the kernel refused the signal program (errno {errno}){note}"),
                 })
             })
     }

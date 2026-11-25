@@ -321,6 +321,25 @@ pub fn hand_over(sock: &Path) -> HandOver {
     let mut held = report.held.clone();
     held.sort_unstable();
     let _ = HELD.set(held);
+    // Every probe this process assembles at run time has run by now, and no
+    // input has been read: the warden's guard on program loads, which refuses
+    // those unsigned, can be attached.
+    let guard = client
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .arm_load_guard()
+        .unwrap_or_else(|e| ebpfsentinel_warden_proto::LoadGuard::Absent {
+            reason: format!("the warden could not be asked to attach its guard: {e}"),
+        });
+    match &guard {
+        ebpfsentinel_warden_proto::LoadGuard::Attached => {
+            info!("the warden's guard on program loads is attached");
+        }
+        ebpfsentinel_warden_proto::LoadGuard::Absent { reason } => {
+            info!(reason, "no guard on program loads");
+        }
+    }
+    ebpfsentinel_warden::load_guard::record_armed(guard);
     report
 }
 

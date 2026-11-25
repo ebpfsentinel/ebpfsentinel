@@ -158,8 +158,9 @@ fn judge_load(outcome: Result<(), (i32, String)>) -> SleepableStatus {
             loads: None,
             reason: Some(format!(
                 "the probe could not load an LSM program ({}): it needs CAP_BPF and \
-                 CAP_PERFMON, or a BPF token allowing LSM programs",
-                std::io::Error::from_raw_os_error(errno)
+                 CAP_PERFMON, or a BPF token allowing LSM programs{}",
+                std::io::Error::from_raw_os_error(errno),
+                super::kfunc_loader::signed::guard_refusal_note_here(errno)
             )),
         },
         Err((errno, log)) => {

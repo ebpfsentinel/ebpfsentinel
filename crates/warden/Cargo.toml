@@ -23,6 +23,7 @@ object = { workspace = true }
 sha2 = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
 domain = { workspace = true }
+ebpf-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

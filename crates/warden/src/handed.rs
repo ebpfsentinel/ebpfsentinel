@@ -76,6 +76,24 @@ impl Peer {
         Ok(Self { pidfd, ino })
     }
 
+    /// Whether the process has exited.
+    #[must_use]
+    pub fn has_exited(&self) -> bool {
+        exited(&self.pidfd)
+    }
+
+    /// A second handle on the same process, kept past the connection.
+    ///
+    /// # Errors
+    ///
+    /// The pidfd could not be duplicated.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            pidfd: self.pidfd.try_clone()?,
+            ino: self.ino,
+        })
+    }
+
     /// The process's identity: its pidfs inode, never reused while the host
     /// runs and the same whichever pid namespace it is seen from.
     #[must_use]

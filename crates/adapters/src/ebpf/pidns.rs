@@ -244,8 +244,9 @@ fn ancestor_namespace(up: u32) -> Result<Ancestor, String> {
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
         format!(
-            "the kernel refused the namespace program (errno {errno}): {}",
-            last.trim()
+            "the kernel refused the namespace program (errno {errno}): {}{}",
+            last.trim(),
+            super::kfunc_loader::signed::guard_refusal_note_here(errno)
         )
     })?;
     let mut ctx = [0u8; CTX_LEN];

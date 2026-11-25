@@ -46,6 +46,7 @@ exclude = [
     "crates/ebpf-programs/lsm-exec-network",
     "crates/ebpf-programs/lsm-exec-digest",
     "crates/ebpf-programs/lsm-bpf-guard",
+    "crates/ebpf-programs/lsm-bpf-load-guard",
     "crates/ebpf-programs/lsm-tamper-guard",
     "crates/ebpf-programs/lsm-write-refusal",
 ]

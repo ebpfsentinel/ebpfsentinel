@@ -1,6 +1,6 @@
 """Ask the warden for a route, as the agent would, and print how it answered.
 
-Says `Hello` at protocol version 4, then sends one `RouteAdd` frame (a u32 little-endian length, then the postcard
+Says `Hello` at protocol version 5, then sends one `RouteAdd` frame (a u32 little-endian length, then the postcard
 encoding of the command) for the default route through <gateway> on <iface>,
 and prints the answer's kind:
 
@@ -22,7 +22,7 @@ import struct
 import sys
 
 HELLO = 0
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 ROUTE_ADD = 5
 OK = 6
 ERROR = 8

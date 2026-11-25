@@ -1,0 +1,12 @@
+[package]
+name = "lsm-bpf-load-guard"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.3.0"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+
+[[bin]]
+name = "lsm-bpf-load-guard"
+path = "src/main.rs"

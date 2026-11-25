@@ -19,6 +19,12 @@
 //! host process is read there. Writes are fenced by the read-only root the
 //! compose file, the chart and the unit give it instead.
 //!
+//! The keyring the kernel checks the agent's signed program loaders against
+//! is made before this runs (`loader_keyring::install_from_image`), so the
+//! key management calls stay among the ones that kill: nothing the warden
+//! answers afterwards adds a key or changes a keyring. The guard on program
+//! loads is attached before this runs too (`load_guard::install`).
+//!
 //! An unknown call answers `EPERM` rather than killing so that a call this
 //! list missed fails one request with an error the agent logs, instead of
 //! taking every agent's datapath helper down. The calls that matter are named

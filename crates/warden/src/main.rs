@@ -12,8 +12,10 @@
 //! the extended privileges (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW`) and
 //! does nothing on its own initiative - it only answers validated requests.
 //!
-//! This binary is a pure privilege broker: it loads no eBPF and holds no maps (the
-//! rootless agent loads its own programs against the bpffs the warden delegates).
+//! This binary is a privilege broker: it holds no maps and loads one eBPF program
+//! of its own, the guard on program loads (`load_guard`), which refuses a load
+//! through the agent's token not signed against the warden's keyring. The
+//! rootless agent loads its own programs against the bpffs the warden delegates.
 //! The protocol logic itself lives in [`ebpfsentinel_warden::server`].
 
 #![allow(clippy::cast_possible_truncation)]
@@ -161,8 +163,9 @@ fn install_profile(dir: &Path, profile: &[u8]) -> ExitCode {
 /// Bind the listening socket (mode `0666`, peer-uid gated) and broker for
 /// rootless agents.
 ///
-/// The warden is a pure privilege broker: it loads no eBPF and holds no maps (the
-/// rootless agent loads its own programs against the bpffs the warden delegates).
+/// The warden is a privilege broker: it holds no maps and loads only its guard
+/// on program loads (the rootless agent loads its own programs against the
+/// bpffs the warden delegates).
 /// It answers only the privileged operations the agent cannot perform from its
 /// user namespace - bpffs delegation + module-BTF/pcap fd hand-off (`Delegate`),
 /// conntrack read/teardown, route programming, and gratuitous ARP.
@@ -224,6 +227,12 @@ fn serve(
     }
     // Everything privileged that is not an answer is done: confine before the
     // first connection is read.
+    // The loader keyring is made here, while `add_key` and `keyctl` still
+    // pass: the seccomp filter kills both.
+    ebpfsentinel_warden::loader_keyring::install_from_image("[warden]");
+    // The guard on program loads is held to that keyring, so it comes after
+    // it, and before the first `Delegated` reports it.
+    ebpfsentinel_warden::load_guard::install("[warden]");
     match ebpfsentinel_warden::confine::confine() {
         Ok(()) => eprintln!("[warden] confined: no new privileges, seccomp filter"),
         Err(e) => {

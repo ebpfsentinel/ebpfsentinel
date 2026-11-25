@@ -13,7 +13,9 @@ use std::os::unix::net::UnixStream;
 use std::process::{Child, Command as Proc, Stdio};
 use std::ptr;
 
-use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+use ebpfsentinel_warden_proto::{
+    Command, LoadGuard, PROTOCOL_VERSION, Response, read_frame, write_frame,
+};
 
 fn spawn_warden(sock: &str, uid: u32) -> Child {
     Proc::new(env!("CARGO_BIN_EXE_warden"))
@@ -128,6 +130,51 @@ fn delegate_with_non_bpffs_fd_is_refused() {
     unsafe {
         libc::close(read_fd);
         libc::close(write_fd);
+    }
+    drop(guard);
+}
+
+/// The agent asks for the guard on program loads once its probes have run.
+/// A warden that could not read the guard (no keyring here) answers why,
+/// rather than an error, and serves on.
+#[test]
+fn arming_the_load_guard_answers_its_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir
+        .path()
+        .join("warden.sock")
+        .to_string_lossy()
+        .into_owned();
+
+    let guard = Guard {
+        child: spawn_warden(&sock, current_uid()),
+        sock: sock.clone(),
+    };
+    let mut s = connect(&sock);
+
+    write_frame(
+        &mut s,
+        &Command::Hello {
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        read_frame::<_, Response>(&mut s).unwrap(),
+        Response::HelloOk { .. }
+    ));
+
+    for _ in 0..2 {
+        write_frame(&mut s, &Command::ArmLoadGuard).unwrap();
+        match read_frame::<_, Response>(&mut s).unwrap() {
+            Response::LoadGuardState {
+                load_guard: LoadGuard::Absent { reason },
+            } => assert!(!reason.is_empty()),
+            Response::LoadGuardState {
+                load_guard: LoadGuard::Attached,
+            } => {}
+            other => panic!("expected the guard's state, got {other:?}"),
+        }
     }
     drop(guard);
 }

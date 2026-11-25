@@ -241,7 +241,8 @@ pub(crate) fn judge_refusal(errno: i32, log: &str, what: &str) -> (Option<bool>,
             None,
             format!(
                 "the probe could not load {what} ({err}): it needs CAP_BPF and CAP_PERFMON, or \
-                 a BPF token allowing it"
+                 a BPF token allowing it{}",
+                super::kfunc_loader::signed::guard_refusal_note_here(errno)
             ),
         );
     }

@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 /// Protocol version negotiated by the [`Command::Hello`] handshake. Bump on any
 /// wire-breaking change so a mismatched agent/warden image pair refuses to talk
 /// rather than misinterpreting each other's frames.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Largest frame payload accepted from a peer. A conntrack dump is the largest
 /// legitimate message and stays far below this; the bound just stops a hostile or
@@ -1219,6 +1219,14 @@ pub enum Command {
         /// A held program whose target is a raw tracepoint or a kprobe.
         program: String,
     },
+    /// Attach the warden's guard on program loads now: the agent has loaded
+    /// its kernel-reading programs, run every probe it assembles at run time
+    /// and handed the programs over, and has read no input yet. Answered with
+    /// [`Response::LoadGuardState`]. Idempotent: the guard, once attached,
+    /// stays attached for the life of the process that asked, and is lifted
+    /// only for the bpffs delegation of a new agent once that process has
+    /// exited.
+    ArmLoadGuard,
 }
 
 /// What [`Command::ReadPodmanRecord`] found.
@@ -1410,6 +1418,22 @@ impl TaskIdentity {
     }
 }
 
+/// The warden's guard on `BPF_PROG_LOAD`, as it reports it to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoadGuard {
+    /// Attached at the BPF LSM's `bpf_prog_load` hook, or attached as soon as
+    /// the agent asks with [`Command::ArmLoadGuard`] once its start-up probes
+    /// are done: from then on every load through a BPF token on this host
+    /// passes only signed against the warden's keyring.
+    Attached,
+    /// Not attached, and why: the kernel does not verify signatures, the BPF
+    /// LSM is not active, no keyring was made, or the load or attach failed.
+    Absent {
+        /// The missing condition or the failure, in one sentence.
+        reason: String,
+    },
+}
+
 /// A reply from the warden to the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
@@ -1426,6 +1450,15 @@ pub enum Response {
         btf_names: Vec<String>,
         /// Number of pcap fds following the BTF fds.
         pcap_count: u32,
+        /// The serial of the keyring the warden made for program signatures,
+        /// holding the certificate from its own image, which the agent names
+        /// in every signed load. `None` when the kernel does not verify
+        /// signatures or the warden ships no certificate.
+        loader_keyring: Option<i32>,
+        /// Whether the warden attached its guard on program loads, which
+        /// refuses every load through a BPF token not signed against
+        /// `loader_keyring`.
+        load_guard: LoadGuard,
     },
     /// Raw conntrack table bytes; the agent parses them exactly as if it had read
     /// the proc file itself.
@@ -1558,6 +1591,11 @@ pub enum Response {
         /// What the policy found wrong, naming the parameter when one was.
         reason: String,
     },
+    /// The guard on program loads after [`Command::ArmLoadGuard`].
+    LoadGuardState {
+        /// Attached, or why not.
+        load_guard: LoadGuard,
+    },
 }
 
 /// The groups of commands a warden policy switches on one by one, each
@@ -1675,7 +1713,8 @@ impl Command {
             | Self::PinnedLinks
             | Self::OpenPinnedLink { .. }
             | Self::UnpinLinks { .. }
-            | Self::HoldProgram { .. } => None,
+            | Self::HoldProgram { .. }
+            | Self::ArmLoadGuard => None,
         }
     }
 
@@ -1729,6 +1768,7 @@ impl Command {
             Self::ReadPodmanRecord { .. } => "ReadPodmanRecord",
             Self::HoldProgram { .. } => "HoldProgram",
             Self::AttachHeld { .. } => "AttachHeld",
+            Self::ArmLoadGuard => "ArmLoadGuard",
         }
     }
 
@@ -1785,7 +1825,8 @@ impl Command {
             | Self::ConnectRootRuntime { .. }
             | Self::ReadPodmanRecord { .. }
             | Self::HoldProgram { .. }
-            | Self::AttachHeld { .. } => CONTROL_FRAME_LEN,
+            | Self::AttachHeld { .. }
+            | Self::ArmLoadGuard => CONTROL_FRAME_LEN,
         }
     }
 
@@ -1929,6 +1970,7 @@ impl Command {
             Self::AttachHeld {
                 program: "process_exec".into(),
             },
+            Self::ArmLoadGuard,
         ]
     }
 
@@ -2045,7 +2087,7 @@ mod tests {
     use super::{
         BindProbe, Command, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity,
         FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, LINK_PIN_NAME_MAX,
-        ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan, NamespaceIdReading,
+        ListedPort, LoadGuard, MAX_FRAME_LEN, MappedFile, MappingScan, NamespaceIdReading,
         NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
         PidObservation, PodmanRecord, PodmanStoreRead, ProcessFactsReading, ProcessMappings,
         ProcessStamp, ROOTED_CHUNK_MAX, Response, RootRuntime, RootedFile, RootedRead, RouteSpec,
@@ -2308,6 +2350,16 @@ mod tests {
             Response::Delegated {
                 btf_names: vec!["nf_conntrack".into(), "fou".into()],
                 pcap_count: 2,
+                loader_keyring: Some(0x2f3e_4d5c),
+                load_guard: LoadGuard::Attached,
+            },
+            Response::Delegated {
+                btf_names: Vec::new(),
+                pcap_count: 0,
+                loader_keyring: None,
+                load_guard: LoadGuard::Absent {
+                    reason: "the kernel does not verify BPF program signatures".into(),
+                },
             },
             Response::Conntrack {
                 table: vec![0xde, 0xad, 0xbe, 0xef],
@@ -2796,7 +2848,7 @@ mod tests {
         let hello = Command::Hello {
             version: super::PROTOCOL_VERSION,
         };
-        assert_eq!(postcard::to_allocvec(&hello).expect("encode"), [0, 4]);
+        assert_eq!(postcard::to_allocvec(&hello).expect("encode"), [0, 5]);
         let refused = Response::Refused {
             family: super::Family::Routing,
             reason: String::new(),

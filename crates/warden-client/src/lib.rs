@@ -25,7 +25,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+use ebpfsentinel_warden_proto::{
+    Command, LoadGuard, PROTOCOL_VERSION, Response, read_frame, write_frame,
+};
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
@@ -650,6 +652,17 @@ impl WardenClient {
         }
     }
 
+    /// Ask the warden to attach its guard on program loads, once start-up has
+    /// run every probe it assembles at run time and before it reads input.
+    pub fn arm_load_guard(&mut self) -> io::Result<LoadGuard> {
+        self.send(&Command::ArmLoadGuard)?;
+        match self.recv("ArmLoadGuard")? {
+            Response::LoadGuardState { load_guard } => Ok(load_guard),
+            Response::Error { message } => Err(io::Error::other(message)),
+            other => Err(unexpected("ArmLoadGuard", &other)),
+        }
+    }
+
     /// Ask the warden to attach the held program `program` to the raw
     /// tracepoint or kernel function listed for it. Returns the link fd; the
     /// agent owns it and dropping it detaches.
@@ -1072,6 +1085,12 @@ impl ReconnectingClient {
     #[cfg(feature = "fd-pass")]
     pub fn hold_program(&mut self, name: &str, prog_fd: std::os::fd::RawFd) -> io::Result<()> {
         self.with_retry(|c| c.hold_program(name, prog_fd))
+    }
+
+    /// Attach the guard on program loads, reconnecting if the warden
+    /// bounced.
+    pub fn arm_load_guard(&mut self) -> io::Result<LoadGuard> {
+        self.with_retry(WardenClient::arm_load_guard)
     }
 
     /// Attach a held program to its listed target, reconnecting if the

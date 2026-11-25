@@ -58,6 +58,8 @@ pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod host_ops;
 pub mod link_pins;
+pub mod load_guard;
+pub mod loader_keyring;
 pub mod namespace_ids;
 pub mod net_ops;
 pub mod netlink;

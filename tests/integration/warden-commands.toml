@@ -8,7 +8,7 @@ gap_ceiling = 0
 reason = "the version handshake, carrying the version and nothing else"
 
 [unfenced.Delegate]
-reason = "the bpffs delegation every agent loads its datapath with, handed once per agent process by the ledger"
+reason = "the bpffs delegation every agent loads its datapath with, and the serial of the read-only loader keyring the kernel checks its signed loads against, and whether the guard holding token loads to that keyring is attached, handed once per agent process by the ledger"
 
 [unfenced.PcapOpen]
 reason = "a capture socket from the pool opened at start, handed up to the per-process ceiling of the ledger"
@@ -72,3 +72,6 @@ reason = "the agent hands over its kernel-reading programs once, before it reads
 
 [unfenced.AttachHeld]
 reason = "the family is the held program's own: none for the raw tracepoints, whose one target is compiled into the warden, uprobe for the TLS kprobes, so the scan's arm-by-arm reading does not see it; the policy refuses the uprobe ones with the uprobe family off"
+
+[unfenced.ArmLoadGuard]
+reason = "attaches the warden's own guard on program loads, read before it confined itself; it narrows what a token may load and widens nothing, and a second ask answers the same state"

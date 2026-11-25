@@ -105,20 +105,23 @@ fn bootstrap(bpffs: &str, sock: &str) -> io::Result<()> {
     if !send_fd(stream.as_raw_fd(), fs) {
         return Err(io::Error::other("failed to send bpffs fd for delegation"));
     }
-    let (btf_names, pcap_count) = match read_frame::<_, Response>(&mut stream)? {
-        Response::Delegated {
-            btf_names,
-            pcap_count,
-        } => (btf_names, pcap_count),
-        Response::Error { message } => {
-            return Err(io::Error::other(format!("warden delegation: {message}")));
-        }
-        other => {
-            return Err(io::Error::other(format!(
-                "unexpected delegate reply: {other:?}"
-            )));
-        }
-    };
+    let (btf_names, pcap_count, loader_keyring, load_guard) =
+        match read_frame::<_, Response>(&mut stream)? {
+            Response::Delegated {
+                btf_names,
+                pcap_count,
+                loader_keyring,
+                load_guard,
+            } => (btf_names, pcap_count, loader_keyring, load_guard),
+            Response::Error { message } => {
+                return Err(io::Error::other(format!("warden delegation: {message}")));
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "unexpected delegate reply: {other:?}"
+                )));
+            }
+        };
     let want = btf_names.len() + pcap_count as usize;
     let fds = recv_msg_fds(stream.as_raw_fd(), want);
     if fds.len() < want {
@@ -146,6 +149,16 @@ fn bootstrap(bpffs: &str, sock: &str) -> io::Result<()> {
         .collect::<Vec<_>>()
         .join(",");
     setenv("EBPF_MODULE_BTF_FDS", &btf_env);
+    if let Some(serial) = loader_keyring {
+        setenv(
+            crate::loader_keyring::LOADER_KEYRING_ENV,
+            &serial.to_string(),
+        );
+    }
+    setenv(
+        crate::load_guard::LOAD_GUARD_ENV,
+        &crate::load_guard::encode_env(&load_guard),
+    );
     if !pcap_env.is_empty() {
         setenv("EBPFSENTINEL_PCAP_FDS", &pcap_env);
     }
@@ -157,8 +170,9 @@ fn bootstrap(bpffs: &str, sock: &str) -> io::Result<()> {
 /// `setenv(3)` so the value reaches the re-exec'd image through the C `environ`.
 fn setenv(key: &str, value: &str) {
     let k = CString::new(key).expect("every variable name here is a literal without NUL");
-    let v =
-        CString::new(value).expect("every value here is module names and fd numbers, never a NUL");
+    let v = CString::new(value).expect(
+        "every value here is module names, fd numbers or text with its NUL bytes taken out",
+    );
     // SAFETY: single-threaded (pre-runtime); key/value are valid NUL-terminated.
     unsafe { libc::setenv(k.as_ptr(), v.as_ptr(), 1) };
 }

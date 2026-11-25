@@ -1,8 +1,8 @@
 //! The warden control-plane server loop.
 //!
-//! The `warden` binary is a pure privilege broker: it loads no eBPF and holds no
-//! maps (the rootless agent loads its own programs against the bpffs the warden
-//! delegates). This loop answers only the privileged operations the agent cannot
+//! The `warden` binary is a privilege broker: it holds no maps and loads only
+//! its guard on program loads, before this loop starts (the rootless agent
+//! loads its own programs against the bpffs the warden delegates). This loop answers only the privileged operations the agent cannot
 //! perform from its user namespace - bpffs delegation + module-BTF/pcap fd hand-off
 //! (`Delegate`), an on-demand pcap capture socket (`PcapOpen`), the conntrack-table
 //! read, conntrack teardown, route programming, and gratuitous ARP.
@@ -586,7 +586,20 @@ fn handle_conn_with_timeouts(
                     serve_passed_fd(&mut writer, Err(message))
                 }
             }
-            Command::Delegate => serve_delegate(&mut writer, btf, pcap.fds()),
+            Command::Delegate => {
+                crate::load_guard::before_delegation();
+                serve_delegate(&mut writer, btf, pcap.fds())
+            }
+            Command::ArmLoadGuard => {
+                let status = crate::load_guard::arm(peer.as_ref().ok());
+                reply(
+                    &mut writer,
+                    &Response::LoadGuardState {
+                        load_guard: status.into_proto(),
+                    },
+                )
+                .is_ok()
+            }
             Command::WriteRefusalGroup => match write_refusal::permission_group() {
                 Ok(group) => {
                     eprintln!("[warden] write refusal group handed over");
@@ -913,6 +926,8 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
     let resp = Response::Delegated {
         btf_names,
         pcap_count: u32::try_from(pcap.len()).unwrap_or(0),
+        loader_keyring: crate::loader_keyring::installed(),
+        load_guard: crate::load_guard::installed().into_proto(),
     };
     if reply(writer, &resp).is_err() {
         return false;
