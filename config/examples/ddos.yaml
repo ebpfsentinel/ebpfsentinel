@@ -50,6 +50,10 @@ ratelimit:
 
 ddos:
   enabled: true
+  # Sources each per-source guard table holds at once (SYN, ICMP and
+  # amplification rates, half-open and RST/FIN/ACK counters), per CPU, the
+  # least recently seen evicted when full. 1024 to 1048576 (next start).
+  max_tracked_sources: 16384
 
   # ── SYN Flood Protection (eBPF-side) ──────────────────────────
   #
@@ -117,6 +121,7 @@ ddos:
     rst_threshold: 50           # Max RST packets/sec per source
     fin_threshold: 50           # Max FIN packets/sec per source
     ack_threshold: 200          # Max ACK packets/sec per source (no matching conn)
+    max_entries: 65536          # Kernel connection table, per CPU (next start)
 
   # ── Detection Policies (userspace domain engine) ──────────────
   #

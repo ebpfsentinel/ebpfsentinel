@@ -62,7 +62,7 @@ pub use capture::{
     CaptureConfig, DEFAULT_MAX_CAPTURE_DURATION_SECS, MAX_CAPTURE_DURATION_CEILING_SECS,
 };
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
-pub use conntrack::ConnTrackSectionConfig;
+pub use conntrack::{ConnTrackConfig, DdosConnTrackConfig};
 pub use container::{
     ContainerConfig, NetworkPolicyConfig, NetworkPolicyMode,
     ResolverConfig as ContainerResolverConfig,
@@ -197,7 +197,7 @@ pub struct AgentConfig {
     pub auth: AuthConfig,
 
     #[serde(default)]
-    pub conntrack: ConnTrackSectionConfig,
+    pub conntrack: ConnTrackConfig,
 
     #[serde(default)]
     pub container: ContainerConfig,
@@ -952,7 +952,6 @@ impl AgentConfig {
         // Validate DDoS policies and the per-source tables
         check_limit("ddos.policies", self.ddos.policies.len(), MAX_DDOS_POLICIES)?;
         self.ddos.validate_capacity()?;
-        self.conntrack.refuse_capacity()?;
         for (idx, policy_cfg) in self.ddos.policies.iter().enumerate() {
             policy_cfg.validate(idx)?;
         }
@@ -5692,7 +5691,7 @@ conntrack:
   max_entries: 8192
 ";
         let err = AgentConfig::from_yaml(refused).unwrap_err().to_string();
-        assert!(err.contains("conntrack.max_entries"), "{err}");
+        assert!(err.contains("max_entries"), "{err}");
 
         let sized = r"
 agent:
@@ -5703,7 +5702,37 @@ ddos:
 ";
         let cfg = AgentConfig::from_yaml(sized).unwrap();
         assert_eq!(cfg.ddos.connection_tracking.capacity(), 8_192);
-        assert_eq!(cfg.conntrack.capacity(), 65_536);
+    }
+
+    #[test]
+    fn a_flood_threshold_under_conntrack_fails_to_load() {
+        // The flood thresholds are the DDoS guard's: under the top-level
+        // section they would parse and change nothing.
+        let misplaced = r"
+agent:
+  interfaces: [eth0]
+conntrack:
+  enabled: true
+  half_open_threshold: 128
+";
+        let err = AgentConfig::from_yaml(misplaced).unwrap_err().to_string();
+        assert!(err.contains("half_open_threshold"), "{err}");
+    }
+
+    #[test]
+    fn a_per_source_ceiling_under_ddos_connection_tracking_fails_to_load() {
+        // The per-source ceilings are the connection tracker's: under the
+        // DDoS guard they would parse and change nothing.
+        let misplaced = r"
+agent:
+  interfaces: [eth0]
+ddos:
+  connection_tracking:
+    enabled: true
+    max_src_states: 512
+";
+        let err = AgentConfig::from_yaml(misplaced).unwrap_err().to_string();
+        assert!(err.contains("max_src_states"), "{err}");
     }
 
     #[test]

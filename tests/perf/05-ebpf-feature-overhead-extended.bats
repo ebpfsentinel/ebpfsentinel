@@ -124,10 +124,6 @@ qos:
 
 conntrack:
   enabled: ${conntrack}
-  half_open_threshold: 100
-  rst_threshold: 50
-  fin_threshold: 50
-  ack_threshold: 200
 
 # The DDoS guards run inside the rate-limit program, which this suite does
 # not measure; the conntrack arm is tc-conntrack alone.

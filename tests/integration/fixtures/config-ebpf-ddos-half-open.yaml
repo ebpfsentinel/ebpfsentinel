@@ -57,6 +57,9 @@ ddos:
     rst_threshold: 100000
     fin_threshold: 100000
     ack_threshold: 100000
+    # The connection table at its smallest: the half-open count it feeds
+    # holds a handful of handshakes, far from any eviction.
+    max_entries: 1024
 
 l7:
   enabled: false

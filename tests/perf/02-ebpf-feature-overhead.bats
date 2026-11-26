@@ -174,10 +174,6 @@ threatintel:
 
 conntrack:
   enabled: ${enable_conntrack}
-  half_open_threshold: 100
-  rst_threshold: 50
-  fin_threshold: 50
-  ack_threshold: 200
 
 ddos:
   enabled: ${enable_conntrack}

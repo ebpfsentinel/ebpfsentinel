@@ -65,10 +65,6 @@ aliases:
 
 conntrack:
   enabled: true
-  half_open_threshold: 128
-  rst_threshold: 50
-  fin_threshold: 50
-  ack_threshold: 100
 
 # ── NAT ────────────────────────────────────────────────────────────
 
@@ -132,6 +128,35 @@ nat:
       translated_addr: "2001:db8:1::1"
       match_src: "fd00::/8"
       port_range: "32768-60999"
+
+    # SNAT toward the branch office, steered through an IPsec xfrmi device
+    # (the if_id it was created with, never 0; link 0 for no underlying
+    # link). Priority orders rules, lower first (default 100); match_dst
+    # narrows the rule to one destination range.
+    - id: nat-snat-branch-ipsec
+      type: snat
+      priority: 50
+      translated_addr: "203.0.113.2"
+      match_src: "10.0.1.0/24"
+      match_dst: "198.51.100.0/24"
+      ipsec:
+        if_id: 42
+        link: 0
+
+    # SNAT wrapped in a FOU or GUE header toward a tunnel endpoint
+    # (dport never 0; sport 0 lets the kernel pick one per flow). Tenant 7
+    # keeps its own translation for an overlapping private range; 0, the
+    # default, is global. Kept in the file, not loaded until enabled.
+    - id: nat-snat-tenant7-fou
+      enabled: false
+      type: snat
+      translated_addr: "203.0.113.3"
+      match_src: "10.7.0.0/16"
+      tenant_id: 7
+      fou:
+        dport: 5555
+        sport: 0
+        encapsulation: gue        # fou (the default) or gue
 
   # ── DNAT rules (tc-nat-ingress) ────────────────────────────────
   #
@@ -226,6 +251,7 @@ nat:
   #   internal_prefix - Site-local IPv6 prefix (e.g. ULA)
   #   external_prefix - Provider-assigned or globally-routable prefix
   #   prefix_len      - Length of the prefix in bits (1-64)
+  #   interfaces      - Interface groups the rule applies to (default: all)
 
   nptv6_rules:
     # Map ULA site prefix fd00:1::/48 to provider prefix 2001:db8:1::/48
@@ -241,6 +267,7 @@ nat:
       internal_prefix: "fd00:2::"
       external_prefix: "2001:db8:2::"
       prefix_len: 48
+      interfaces: [wan]           # only on the "wan" group (default: all)
 
 # ── Firewall (allow NATed traffic) ─────────────────────────────────
 

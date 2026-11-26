@@ -121,10 +121,6 @@ firewall:
 
 conntrack:
   enabled: true
-  half_open_threshold: 128
-  rst_threshold: 50
-  fin_threshold: 50
-  ack_threshold: 200
 
 nat:
   enabled: true

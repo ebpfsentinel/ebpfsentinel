@@ -36,12 +36,9 @@ agent:
 conntrack:
   enabled: true
 
-  # Flood detection thresholds (alert when exceeded).
-  # These are BPF-side counters - kernel netfilter handles actual CT.
-  half_open_threshold: 128
-  rst_threshold: 50
-  fin_threshold: 50
-  ack_threshold: 100
+  # Per-source flood thresholds (half-open, RST, FIN, ACK) are the DDoS
+  # guard's and are written under ddos.connection_tracking (see ddos.yaml);
+  # this section refuses them.
 
   # Per-source connection guard, enforced by the XDP firewall on new
   # connections that matched an allow rule. Both ceilings default to 0,

@@ -7,7 +7,7 @@ use domain::ddos::entity::{DdosAttackType, DdosMitigationAction, DdosPolicy};
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, default_true};
-use super::conntrack::ConnTrackSectionConfig;
+use super::conntrack::DdosConnTrackConfig;
 
 /// Maximum number of `DDoS` policies.
 pub(super) const MAX_DDOS_POLICIES: usize = 100;
@@ -30,9 +30,9 @@ pub struct DdosConfig {
     #[serde(default)]
     pub amplification_protection: AmpProtectionConfig,
 
-    /// TCP connection tracking settings (eBPF-side).
+    /// Per-source flood thresholds and the kernel connection table (eBPF-side).
     #[serde(default)]
-    pub connection_tracking: ConnTrackSectionConfig,
+    pub connection_tracking: DdosConnTrackConfig,
 
     /// Detection policies (userspace domain engine).
     #[serde(default)]
@@ -62,7 +62,7 @@ impl Default for DdosConfig {
             syn_protection: SynProtectionConfig::default(),
             icmp_protection: IcmpProtectionConfig::default(),
             amplification_protection: AmpProtectionConfig::default(),
-            connection_tracking: ConnTrackSectionConfig::default(),
+            connection_tracking: DdosConnTrackConfig::default(),
             policies: Vec::new(),
             max_tracked_sources: default_max_tracked_sources(),
         }
