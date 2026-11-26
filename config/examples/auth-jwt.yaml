@@ -1,0 +1,29 @@
+# Auth example - EdDSA JWT verified against static key files, with the
+# ML-DSA-65 cosignature required.
+#
+# The dashboard signs each token with Ed25519 and cosigns it with ML-DSA-65.
+# Where the agent cannot reach the dashboard's JWKS (see auth-jwks.yaml), the
+# two public keys are copied next to it as files, under /etc/ebpfsentinel/,
+# /etc/ssl/, /etc/tls/, /etc/pki/, /var/lib/ebpfsentinel/, /run/secrets/ or
+# /tmp/.
+#
+# Reference: docs/configuration/auth.md
+
+agent:
+  interfaces: [eth0]
+
+auth:
+  enabled: true
+  # prefer (default): a cosignature present must verify. require: a token
+  # without one is refused too, which with a static key needs
+  # ml_dsa_public_key_path. disable: the cosignature is never read.
+  pq_tokens: require
+  jwt:
+    algorithm: EdDSA
+    # Ed25519 public key in PEM format.
+    public_key_path: /etc/ebpfsentinel/jwt-ed25519-pub.pem
+    # Base64 of the raw 1952-byte ML-DSA-65 public key, the file the
+    # dashboard writes beside its signing key.
+    ml_dsa_public_key_path: /etc/ebpfsentinel/jwt-ml-dsa-65.pub
+    issuer: "https://dashboard.example.com"
+    audience: "ebpfsentinel-agent"

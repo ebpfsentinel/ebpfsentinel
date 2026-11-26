@@ -62,6 +62,41 @@ ids:
     high_risk_rate: 1.0    # Sample rate for high-risk countries (1.0 = all events)
     default_rate: 0.1      # Sample rate for all other countries (10%)
 
+  # Also attach the classifier on the egress hook, so outbound traffic is
+  # inspected and decided too. Egress is attached anyway when the container
+  # resolver or L7 is on; this forces it on its own.
+  inspect_egress: true
+
+  # ── Suricata rulesets ──────────────────────────────────────────────
+  #
+  # Ruleset files compiled into detection rules when the configuration is
+  # loaded, read in order; a sid is one rule across all of them. A listed
+  # file that cannot be read refuses the configuration, so the list is left
+  # empty here: add, for example, /etc/suricata/rules/emerging-all.rules.
+  suricata:
+    rulesets: []
+    # Laid over the stock suricata.yaml variables, by name without the `$`.
+    vars:
+      addresses:
+        HOME_NET: "[10.0.0.0/8,192.168.0.0/16]"
+      ports:
+        HTTP_PORTS: "[80,8080]"
+    # Share of a ruleset's enabled rules that may be refused (0 to 1) before
+    # the configuration is rejected and the one running stays.
+    max_refused_share: 0.5
+    # The sets `dataset` and `datarep` rules read, by name: string, md5 or
+    # sha256, one value per line. A rule naming a set whose file cannot be
+    # read is refused; the set itself only warns.
+    datasets:
+      bad_agents:
+        type: string
+        path: /etc/ebpfsentinel/suricata/bad-agents.lst
+    # The lists `iprep` rules read. Without them an iprep rule is refused.
+    reputation:
+      categories: /etc/ebpfsentinel/suricata/categories.txt
+      lists:
+        - /etc/ebpfsentinel/suricata/reputation.list
+
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # Fields:

@@ -13,6 +13,10 @@
 #   * An IDS rule scoped to one container by name fires on that container's
 #     packets and not on a second container sending the same, both on the
 #     bridge network, each behind its own link.
+#   * With no socket answering, the agent restarted on sockets that lead
+#     nowhere names a rootful and a rootless container from their owner's
+#     container store, by name and image, and reports each runtime as read
+#     from its store.
 #
 # Both containers share the node's network, so the probe leaves through the
 # inspected veth on egress where the sending socket's cgroup is readable.
@@ -85,18 +89,19 @@ PY
 }
 
 teardown_file() {
-    podman rm -f "probe-rootful-$$" "${SCOPED_NAME:-probe-scoped-$$}" "probe-unscoped-$$" >/dev/null 2>&1 || true
+    podman rm -f "probe-rootful-$$" "${SCOPED_NAME:-probe-scoped-$$}" "probe-unscoped-$$" \
+        "probe-store-rootful-$$" >/dev/null 2>&1 || true
     [ -n "${SCOPED_LISTENER_PID:-}" ] && kill "${SCOPED_LISTENER_PID}" 2>/dev/null
     pkill -f "nc -l -p ${SCOPED_PORT}" 2>/dev/null || true
     if [ -n "${ROOTLESS_USER:-}" ]; then
-        _rootless podman rm -f "probe-rootless-$$" >/dev/null 2>&1 || true
+        _rootless podman rm -f "probe-rootless-$$" "probe-store-rootless-$$" >/dev/null 2>&1 || true
     fi
     [ -n "${PROBE_LISTENER_PID:-}" ] && kill "${PROBE_LISTENER_PID}" 2>/dev/null
     ip netns exec "${EBPF_TEST_NS}" pkill -f "nc -l -p ${PROBE_PORT}" 2>/dev/null || true
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR}"
-    rm -f "${PREPARED_CONFIG:-}"
+    rm -f "${PREPARED_CONFIG:-}" "/tmp/ebpfsentinel-test-ebpf-store-$$.yaml"
 }
 
 _probe_script() {
@@ -206,4 +211,67 @@ _scoped_script() {
     [ "$(api_get /api/v1/alerts | jq --arg id "${scoped}" \
         '[.alerts[] | select(.rule_id == "ids-scoped-container") | select(.container.id? != $id)] | length')" -eq 0 ]
     [ -n "${unscoped}" ]
+}
+
+# Restart the agent, once, on sockets that lead nowhere, so a Podman
+# container can only be named from its owner's container store. Each test
+# runs in its own subshell, so a file in the data directory says it is done.
+_on_store_only() {
+    [ -f "${DATA_DIR}/store-only" ] && return 0
+    local config="/tmp/ebpfsentinel-test-ebpf-store-$$.yaml"
+    prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-runtimes-store.yaml" "${config}" >/dev/null
+    stop_ebpf_agent
+    start_ebpf_agent "${config}"
+    wait_for_ebpf_loaded 30 || {
+        tail -20 "${AGENT_LOG_FILE}" >&2
+        return 1
+    }
+    touch "${DATA_DIR}/store-only"
+}
+
+@test "with no socket answering, root's container store names a rootful container" {
+    _on_store_only
+    local name="probe-store-rootful-$$" id
+    id="$(podman run -d --name "${name}" --network host "${PROBE_IMAGE}" sh -c "$(_probe_script)")"
+    podman wait "${name}" >/dev/null
+
+    run _alert_for "${id}"
+    [ "$status" -eq 0 ] || {
+        echo "# no alert carried container ${id}" >&3
+        api_get /api/v1/alerts | jq -c '[.alerts[] | .container] | .[0:5]' >&3
+        false
+    }
+    local ctr="$output"
+    [ "$(jq -r .runtime <<<"${ctr}")" = "podman" ]
+    [ "$(jq -r .name <<<"${ctr}")" = "${name}" ]
+    [[ "$(jq -r .image <<<"${ctr}")" == *busybox* ]]
+    [ "$(_runtime_reach "")" = "store" ] || {
+        echo "# root's runtime: $(_runtime_reach "")" >&3
+        false
+    }
+}
+
+@test "with no socket answering, a user's container store names a rootless container" {
+    [ -n "${ROOTLESS_USER}" ] || soft_skip "no user runs a rootless podman.socket"
+    _on_store_only
+    local uid name="probe-store-rootless-$$" id
+    uid="$(id -u "${ROOTLESS_USER}")"
+    id="$(_rootless podman run -d --name "${name}" --network host "${PROBE_IMAGE}" sh -c "$(_probe_script)")"
+    _rootless podman wait "${name}" >/dev/null
+
+    run _alert_for "${id}"
+    [ "$status" -eq 0 ] || {
+        echo "# no alert carried container ${id}" >&3
+        api_get /api/v1/alerts | jq -c '[.alerts[] | .container] | .[0:5]' >&3
+        false
+    }
+    local ctr="$output"
+    [ "$(jq -r .runtime <<<"${ctr}")" = "podman" ]
+    [[ "$(jq -r .cgroup_path <<<"${ctr}")" == *"user@${uid}.service"*"libpod-${id}"* ]]
+    [ "$(jq -r .name <<<"${ctr}")" = "${name}" ]
+    [[ "$(jq -r .image <<<"${ctr}")" == *busybox* ]]
+    [ "$(_runtime_reach "${uid}")" = "store" ] || {
+        echo "# the runtime of uid ${uid}: $(_runtime_reach "${uid}")" >&3
+        false
+    }
 }

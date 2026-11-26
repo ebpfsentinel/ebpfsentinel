@@ -1,0 +1,59 @@
+# eBPFsentinel - Agent Block Example
+# ==================================
+#
+# Every key of the agent block the other examples leave at its default:
+# how the control API is protected, how fast it answers, where the eBPF
+# objects and the delegated bpffs live, and what happens to the programs
+# when the agent stops.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/agent.yaml
+#
+# Reference: docs/configuration/agent.md
+
+agent:
+  interfaces: [eth0]
+  # Loopback keeps the control API on the host. A routable address needs
+  # auth.enabled and agent.tls.enabled, or the matching risk written below.
+  bind_address: 127.0.0.1
+
+  # Both default to false. true accepts, in writing, an API without
+  # authentication or without TLS on a routable address, for an API fenced
+  # off by other means (a network policy, a sidecar proxy).
+  allow_unauthenticated_api: false
+  allow_plaintext_api: false
+
+  # Whether PUT /api/v1/config/{section} may rewrite this file: refused
+  # (default) or allowed. Leave it refused where the operator renders the file.
+  config_writes: refused
+
+  # What a graceful exit does with the pinned XDP, TC and cgroup links: keep
+  # (default) leaves them enforcing the last rules written, detach removes them.
+  on_exit: keep
+
+  # Per client address. Write calls refill a token bucket per second, read
+  # calls per minute (at most 60000). Loopback clients are exempt by default.
+  api_rate_limit:
+    write_per_second: 1
+    write_burst: 60
+    read_per_minute: 200
+    read_burst: 200
+    exempt_loopback: true
+
+  # Where the compiled eBPF objects are read. EBPF_PROGRAM_DIR wins over it;
+  # unset, the agent uses the programs embedded in its binary.
+  ebpf_program_dir: /usr/local/lib/ebpfsentinel
+
+  # eBPF is loaded only through a BPF token created on this delegated bpffs,
+  # the one the warden delegates and the agent's bootstrap mounts.
+  bpf_token:
+    bpffs_path: /sys/fs/bpf/ebpfsentinel
+
+  # Parallel event dispatchers, each owning a fixed share of the sources so
+  # one source's events stay in order. 1 is single threaded.
+  event_workers: 4
+
+  # Node directory shared with the pod profile agents of this node: the node
+  # agent reads which pods they inspect inside and stands back from those
+  # links. Absolute, the same on every agent of the node. Unset, nobody looks.
+  pod_claims_dir: /run/ebpfsentinel-claims

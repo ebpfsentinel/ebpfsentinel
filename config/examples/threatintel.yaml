@@ -42,6 +42,32 @@ threatintel:
   # Per-feed "default_action" can override this for individual feeds.
   mode: alert
 
+  # Entries each kernel table holds, 4096 to 4194304. Unset, the enabled
+  # feeds' max_iocs plus crowdsec.max_decisions, rounded up to a power of
+  # two. A feed set larger than this is refused and the set in force stays.
+  max_entries: 1048576
+
+  # ── CrowdSec local API ───────────────────────────────────────────
+  #
+  # Read the bans a CrowdSec local API holds (as a bouncer) and, optionally,
+  # write this agent's own blocks back to it (as a machine). Both are off by
+  # default. A report carries the blocked source address, the scenario
+  # `ebpfsentinel/<component>`, a count and the first and last time, and
+  # nothing else about this host.
+  crowdsec:
+    enabled: true
+    lapi_url: "http://127.0.0.1:8080"
+    bouncer_key: "from cscli bouncers add ebpfsentinel"
+    refresh_interval_secs: 60     # at least 60
+    max_decisions: 100000
+    default_action: block         # alert or block; unset inherits mode
+    report:
+      enabled: true
+      machine_id: "ebpfsentinel"
+      password: "from cscli machines add ebpfsentinel"
+      interval_secs: 60           # at least 10
+      decision_duration: "4h"     # like 4h, 30m or 1h30m
+
   # ── Country confidence boost ─────────────────────────────────────
   # Adjusts IOC confidence score based on the source IP's country.
   # Positive values increase confidence (more likely to trigger action),
@@ -180,6 +206,7 @@ threatintel:
       name: MISP Threat Sharing (STIX 2.1)
       url: https://misp.internal.corp/feeds/stix2.1/bundle.json
       format: stix
+      enabled: false               # listed, not fetched until set to true
       min_confidence: 40
       refresh_interval_secs: 1800  # Every 30 minutes
       auth_header: "Authorization: Bearer your-misp-api-key"
@@ -239,18 +266,4 @@ threatintel:
 
 # ── CrowdSec local API ──────────────────────────────────────────────
 #
-# Read the bans a CrowdSec local API holds (as a bouncer) and, optionally,
-# write this agent's own blocks back to it (as a machine). Both are off by
-# default. A report carries the blocked source address, the scenario
-# `ebpfsentinel/<component>`, a count and the first and last time, and
-# nothing else about this host. Add the threatintel.crowdsec block:
-
-#   crowdsec:
-#     enabled: true
-#     lapi_url: "http://127.0.0.1:8080"
-#     bouncer_key: "from cscli bouncers add ebpfsentinel"
-#     report:
-#       enabled: true
-#       machine_id: "ebpfsentinel"
-#       password: "from cscli machines add ebpfsentinel"
-#       decision_duration: "4h"
+# See threatintel.crowdsec above.

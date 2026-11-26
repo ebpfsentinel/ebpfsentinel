@@ -41,14 +41,30 @@ l7:
   # The first payload of each connection on a well-known port is compared
   # with the protocols that port promises (22 promises SSH, 53 DNS, 443
   # TLS, ...), and a connection speaking something else raises an alert.
-  # On by default; uncomment to switch it off or to leave a port out.
-  # A listed port must be one that promises something, or the file is
-  # refused at load: an ignored port that promises nothing ignores nothing.
-  #
-  # port_mismatch:
-  #   enabled: true
-  #   # A host that multiplexes SSH and TLS on 443 leaves 443 out.
-  #   ignore_ports: [443]
+  # On by default. A listed port must be one that promises something, or
+  # the file is refused at load: an ignored port that promises nothing
+  # ignores nothing.
+  port_mismatch:
+    enabled: true
+    # A host that multiplexes SSH and TLS on 443 leaves 443 out.
+    ignore_ports: [443]
+
+  # ── Stream reassembly ──────────────────────────────────────────────
+  # Off by default: each captured payload is parsed on its own. On, the
+  # bytes of each flow are joined before parsing, so a request split over
+  # several segments is still read whole.
+  reassembly:
+    enabled: true
+    max_flows: 1000              # oldest flow evicted past this
+    max_buffer_per_flow: 16384   # bytes kept per flow
+    idle_timeout_secs: 5         # a flow idle this long is flushed to the parser
+    sweep_interval_secs: 1       # how often idle flows are looked for
+
+  # ── JA4 fingerprints ───────────────────────────────────────────────
+  # Unset, the JA4 cache lives in memory only. Set, it is mirrored to this
+  # database and read back after a restart.
+  fingerprints:
+    persistence_path: /var/lib/ebpfsentinel/ja4.redb
 
   # ── Rules ──────────────────────────────────────────────────────────
   #
@@ -143,6 +159,16 @@ l7:
       protocol: tls
       dst_port: 443
       src_ip: "10.0.0.0/8"
+
+    # Log TLS from the internal range to the partner network; kept in the
+    # file but not loaded until enabled.
+    - id: l7-log-partner-tls
+      enabled: false
+      priority: 101
+      action: log
+      protocol: tls
+      src_ip: "10.0.0.0/8"
+      dst_ip: "203.0.113.0/24"
 
     # ── gRPC rules ───────────────────────────────────────────────────
     # Block access to admin gRPC service from outside the cluster

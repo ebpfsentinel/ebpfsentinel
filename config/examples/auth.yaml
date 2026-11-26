@@ -41,7 +41,12 @@ auth:
   # Where the generated key would be kept. Listing api_keys below means none
   # is drawn, so this path stays unwritten. Set it to "" to state that refusal
   # explicitly: the agent then refuses to start if no method is configured.
-  # bootstrap_key_path: /var/lib/ebpfsentinel/auth/api-key
+  bootstrap_key_path: /var/lib/ebpfsentinel/auth/api-key
+
+  # Salt the API keys are hashed with in memory. Unset, a random 32-byte salt
+  # is drawn at each start; set it for hashes that stay the same across
+  # restarts.
+  api_key_salt: "CHANGE-ME-TO-A-RANDOM-SALT"
 
   # Whether /metrics endpoint requires authentication.
   # Set to true if your metrics contain sensitive topology information.

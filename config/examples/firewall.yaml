@@ -131,7 +131,7 @@ firewall:
   #
   # Named groups of IPs, CIDRs, or ports reusable across rules.
   # Types: ip_set, port_set, nested, url_table, url_table_json,
-  #        geoip, dynamic_dns, mac_set, bgp_asn, external
+  #        geoip, dynamic_dns, interface_group, mac_set, bgp_asn, external
   #
   # Small aliases are expanded inline into rule entries.
   # Large aliases (blocklists) use kernel IP set HashMap for O(1) lookup.
@@ -174,35 +174,41 @@ firewall:
     #   country_codes: [CN, RU, KP]
 
     # Dynamic DNS - resolve hostnames periodically
-    # vpn_gateway:
-    #   type: dynamic_dns
-    #   hostnames: ["vpn.example.com"]
-    #   refresh_interval: 300
+    vpn_gateway:
+      type: dynamic_dns
+      hostnames: ["vpn.example.com"]
+      refresh_interval: 300
 
     # IP set with exclusions - all RFC 1918 except a specific subnet
-    # rfc1918_except_lab:
-    #   type: ip_set
-    #   values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
-    #   exclude: ["10.0.5.0/24"]
+    rfc1918_except_lab:
+      type: ip_set
+      values: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+      exclude: ["10.0.5.0/24"]
 
     # MAC address set - group known server NICs
-    # trusted_macs:
-    #   type: mac_set
-    #   values: ["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"]
+    trusted_macs:
+      type: mac_set
+      values: ["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"]
+      description: "Server NICs in rack A"
 
     # URL table (JSON) - fetch IPs from a JSON API with JSONPointer path
-    # abuseipdb_blocklist:
-    #   type: url_table_json
-    #   url: "https://api.example.com/blocklist.json"
-    #   json_path: "/data/ips"
-    #   refresh_interval: 3600
+    abuseipdb_blocklist:
+      type: url_table_json
+      url: "https://api.example.com/blocklist.json"
+      json_path: "/data/ips"
+      refresh_interval: 3600
 
     # BGP ASN - block all networks announced by specific AS numbers.
     # Uses the MaxMind GeoLite2-ASN database (same as GeoIP lookup).
     # Requires geoip.enabled: true with an ASN .mmdb database.
-    # bulletproof_hosters:
-    #   type: bgp_asn
-    #   asn_numbers: [4134, 4837]
+    bulletproof_hosters:
+      type: bgp_asn
+      asn_numbers: [4134, 4837]
+
+    # Interface group - a named set of links.
+    lan_links:
+      type: interface_group
+      interfaces: [eth0, eth1]
 
     # External - placeholder whose content is pushed via REST API.
     # Use PUT /api/v1/aliases/{id}/content with {"ips": ["1.2.3.0/24"]}
@@ -321,6 +327,51 @@ firewall:
       dst_port: 8443
       scope: global
 
+    # ── Ports, MAC addresses, negation, tenants ──────────────────────
+    # A source port range and a source MAC set: web traffic from the
+    # server NICs of rack A, from an ephemeral port.
+    - id: fw-allow-rack-a-web
+      priority: 24
+      action: allow
+      protocol: tcp
+      src_port: "1024-65535"
+      dst_port_alias: http_ports
+      src_mac_alias: trusted_macs
+      scope: global
+
+    # Replies from the web ports, toward one gateway MAC, logged.
+    - id: fw-log-web-replies-to-gateway
+      priority: 25
+      action: log
+      protocol: tcp
+      src_port_alias: http_ports
+      dst_mac: "aa:bb:cc:dd:ee:01"
+      scope: global
+
+    # Anything leaving for a MAC outside the trusted set and an address
+    # outside RFC 1918. `mode: shadow` evaluates the rule and counts what it
+    # would have done without deciding anything; `negate_destination`
+    # inverts dst_ip.
+    - id: fw-shadow-deny-offnet
+      priority: 26
+      action: deny
+      dst_ip: "10.0.0.0/8"
+      negate_destination: true
+      dst_mac_alias: trusted_macs
+      mode: shadow
+      scope: global
+
+    # A rule kept in the file but not loaded (`enabled: false`), and owned
+    # by tenant 7: tenant 0, the default, is global.
+    - id: fw-tenant-7-deny-telnet
+      enabled: false
+      priority: 27
+      action: deny
+      protocol: tcp
+      dst_port: 23
+      tenant_id: 7
+      scope: global
+
     # ── Workload rules ───────────────────────────────────────────────
     # A rule may name the workload that opened the connection instead of,
     # or as well as, an address: an executable, a systemd unit, a cgroup
@@ -376,6 +427,67 @@ firewall:
       workload:
         container: payments
         fqdn: ["api.psp.example", "*.cdn.psp.example"]
+        mode: observe
+
+    # A unit and its cgroup path, both required of the same task.
+    - id: fw-allow-backup-unit-ssh
+      priority: 43
+      action: allow
+      protocol: tcp
+      dst_ip: "10.30.0.0/16"
+      dst_port: 22
+      workload:
+        unit: backup.service
+        cgroup: /system.slice/backup.service
+        mode: observe
+
+    # A label written on the cgroup directory, in the
+    # user.ebpfsentinel.workload extended attribute.
+    - id: fw-deny-labelled-batch
+      priority: 44
+      action: deny
+      workload:
+        cgroup_label: payments-batch
+        mode: observe
+
+    # Lineage: anything below nginx, however deep, or curl started
+    # directly by cron. A selector names a parent or an ancestor, not both.
+    - id: fw-deny-below-nginx
+      priority: 45
+      action: deny
+      workload:
+        ancestor: /usr/sbin/nginx
+        mode: observe
+    - id: fw-allow-cron-curl
+      priority: 46
+      action: allow
+      protocol: tcp
+      dst_ip: "10.20.0.0/16"
+      dst_port: 443
+      workload:
+        exe: /usr/bin/curl
+        parent: /usr/sbin/cron
+        mode: observe
+
+    # Pods by namespace labels and service account, toward a remote
+    # workload (`peer`) instead of an address. Remote workloads are named
+    # through the list the console serves (Enterprise edition); a node
+    # holding no list names none.
+    - id: fw-allow-api-to-db
+      priority: 47
+      action: allow
+      protocol: tcp
+      dst_port: 5432
+      workload:
+        namespaces:
+          match_labels:
+            kubernetes.io/metadata.name: shop
+        service_account: api
+        peer:
+          kind: pod
+          pods:
+            match_labels:
+              app: db
         mode: observe
 
     # ── IPv6 examples ────────────────────────────────────────────────
@@ -612,5 +724,6 @@ firewall:
     scrub_tcp_flags: true       # Clear TCP reserved/NS/CWR/ECE bits (anti-fingerprint)
     strip_ecn: false            # Clear ECN bits in IP TOS / IPv6 Traffic Class
     normalize_tos: false        # Force TOS/DSCP to a specific value
-    # tos_value: 0              # Target TOS value when normalize_tos is enabled (default: 0)
+    tos_value: 0                # Target TOS value when normalize_tos is enabled (default: 0)
     strip_tcp_timestamps: true  # Remove TCP timestamp option (anti-fingerprint)
+    drop_fragments: false       # Drop IPv4 fragments (closes a fragment-evasion vector)

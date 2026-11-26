@@ -1,0 +1,26 @@
+# Auth example - tokens from an OIDC provider, verified through its JWKS.
+#
+# Kubernetes service account tokens, Auth0, Okta or any provider publishing
+# a JWKS. OIDC and auth.jwt are exclusive; API keys may sit beside either.
+#
+# Reference: docs/configuration/auth.md
+
+agent:
+  interfaces: [eth0]
+
+auth:
+  enabled: true
+  oidc:
+    # Kubernetes: https://kubernetes.default.svc/openid/v1/jwks
+    # Auth0:      https://YOUR_DOMAIN.auth0.com/.well-known/jwks.json
+    # Okta:       https://YOUR_ORG.okta.com/oauth2/default/v1/keys
+    jwks_url: "https://kubernetes.default.svc/openid/v1/jwks"
+    # Expected "iss" and "aud" claims, each checked when set.
+    issuer: "https://kubernetes.default.svc"
+    audience: "ebpfsentinel"
+
+  # A break-glass key beside OIDC.
+  api_keys:
+    - name: emergency-admin
+      key: "sk-emergency-CHANGE-ME-TO-A-SECURE-VALUE"
+      role: admin

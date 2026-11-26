@@ -53,6 +53,12 @@ ratelimit:
   # Note: SYN cookie protection has moved to the DDoS module (see ddos.yaml).
   default_algorithm: token_bucket
 
+  # Sources tracked at once in the kernel bucket table, 1024 to 4194304
+  # (default 65536). The table is per CPU, so it costs this many slots on
+  # every online CPU; the least recently seen source is evicted when full.
+  # Applies at the next agent start.
+  max_buckets: 65536
+
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # A rule overrides the defaults for one source host. Sources no rule
@@ -71,6 +77,7 @@ ratelimit:
   #              Aliases: "deny"/"block" = drop, "allow" = pass
   #   algorithm - Per-rule algorithm override (see default_algorithm above)
   #   interfaces - Interface groups the rule applies to (default: all)
+  #   tenant_id - Tenant the rule belongs to; 0 (the default) is global
 
   rules:
     # A scraper that keeps hammering the WAN: far below the default.
@@ -111,6 +118,7 @@ ratelimit:
       algorithm: leaky_bucket
       action: drop
       enabled: false
+      tenant_id: 0           # global, the only tenant a standalone agent has
 
     # ── Per-country rate limit tiers ───────────────────────────────
     # Country-specific rate limits enforced via kernel-side LPM Trie maps.

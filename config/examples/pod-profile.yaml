@@ -1,0 +1,44 @@
+# eBPFsentinel - Pod Profile Example
+# ==================================
+#
+# A second agent that runs beside the node agent and attaches inside the
+# pods its selector names. It names no interface of its own, and the node
+# sections (firewall, ratelimit, ddos, loadbalancer, nat, routing, qos,
+# zones, interface_groups, dlp, attribution, process_table, auto_capture,
+# response.kill_process) are refused in this file rather than ignored.
+#
+# Usage:
+#   ebpfsentinel-agent --config config/examples/pod-profile.yaml
+#
+# Reference: docs/configuration/agent.md
+
+agent:
+  profile: pod
+  interfaces: []
+  # The pods this agent attaches inside: by namespace, by label or both.
+  pod_selector:
+    namespaces: [shop]
+    match_labels:
+      app: checkout
+  # The same directory the node agent reads, so it stands back from the
+  # links of the pods claimed here instead of inspecting them twice.
+  pod_claims_dir: /run/ebpfsentinel-claims
+
+# The pods are selected from the Kubernetes pod inventory, read only with
+# the Kubernetes enricher on.
+container:
+  kubernetes:
+    enabled: true
+    # Empty: EBPFSENTINEL_NODE_NAME, then HOSTNAME, then the kernel hostname.
+    node_name: worker-1
+
+ids:
+  enabled: true
+  mode: alert
+  rules:
+    - id: checkout-reverse-shell
+      protocol: tcp
+      dst_port: 4444
+      pattern: "(?i)(bash\\s+-i|/dev/tcp/)"
+      severity: critical
+      description: "Reverse shell attempt from a checkout pod"

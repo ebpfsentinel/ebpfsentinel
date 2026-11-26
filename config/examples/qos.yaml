@@ -121,6 +121,7 @@ qos:
       burst: "32kb"
       direction: egress
       enabled: false           # Disabled - for testing only
+      tenant_id: 0             # 0 (the default) shapes for every tenant
 
   # ── Queues ─────────────────────────────────────────────────────────
   # Queues group the classifiers that share a pipe. `weight` (default 1, at
@@ -228,6 +229,22 @@ qos:
       match:
         protocol: tcp
         dst_port: 6881
+
+    # One host pair, by exact address (a bare address or a /32; shorter
+    # prefixes and IPv6 are refused), from source port 5000 on VLAN 20
+    # (0 matches untagged traffic only). Priority settles two classifiers
+    # with the same match, lower wins (default 0, ties keep the earlier
+    # one); tenant_id 0 (the default) applies to every tenant.
+    - id: cls-backup-replica
+      queue_id: queue-bulk
+      priority: 5
+      tenant_id: 0
+      match:
+        protocol: tcp
+        src_ip: "10.0.1.10"
+        dst_ip: "10.0.2.20/32"
+        src_port: 5000
+        vlan_id: 20
 
     # Default catch-all - everything else goes to default queue
     - id: cls-default

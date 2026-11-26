@@ -2,7 +2,7 @@
 # scripts/audit-config-fixtures.py; exactly one of reason, gap per line, and
 # gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 2
+gap_ceiling = 0
 
 [keys."AgentConfig.enterprise"]
 reason = "captured opaquely for the enterprise loader, whose own gate walks its keys"
@@ -19,9 +19,6 @@ reason = "pod profile only: the selector names pods on a Kubernetes node, and no
 [keys."PodSelectorConfig.namespaces"]
 reason = "pod profile only: the selector names pods on a Kubernetes node, and no lane runs a pod-profile agent"
 
-[keys."ConnTrackSectionConfig.max_entries"]
-reason = "refused at load: the connection table is sized by ddos.connection_tracking.max_entries, and the key exists only to name that"
-
 [keys."JwtConfig.ml_dsa_public_key_path"]
 reason = "an ML-DSA-65 public key file read at start-up; no lane carries an ML-DSA signer to mint the cosigned tokens it would verify"
 
@@ -33,9 +30,3 @@ reason = "read from a Kubernetes API server, which requires container.kubernetes
 
 [keys."ScopeMap.namespace"]
 reason = "a namespace scope matches only traffic of a container the enricher has named, which no fixture-started agent has; suite 07 writes namespace-scoped rules through the API, where the role decides by that namespace"
-
-[keys."PodmanEnricherConfig.storage_root"]
-gap = "no suite yet names a rootful Podman container read from its store with the socket off"
-
-[keys."PodmanEnricherConfig.rootless_storage"]
-gap = "no suite yet names a rootless Podman container read from its store with the socket off"

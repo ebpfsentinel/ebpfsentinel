@@ -1,0 +1,75 @@
+# eBPFsentinel - Response Configuration Example
+# =============================================
+#
+# What the agent may do about a threat besides raising an alert:
+#   - response: the ceilings on every block, throttle or quarantine it
+#     installs, the process kill and the cgroup quarantine.
+#   - auto_response: policies that block or throttle the source of an alert
+#     on their own (at most 3 policies in the open-source edition).
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/response.yaml
+#
+# Reference: docs/configuration/response.md and auto-response.md
+
+agent:
+  interfaces: [eth0]
+
+response:
+  # Longest TTL a response may carry, in seconds (at most 2592000, 30 days).
+  # Default: 86400.
+  max_ttl_secs: 86400
+
+  # Stop the process behind a flow an IPS rule with `kill_process: true`
+  # matched. Off by default.
+  kill_process:
+    enabled: true
+    signal: 9                 # 1 to 64; 9 is SIGKILL
+    window_ms: 2000           # how long the flow's owner is looked for, 1 to 30000
+    protected_commands: [sshd, systemd, containerd]
+    protected_pids: [1]
+
+  # Cut a cgroup off the network for a window. Off by default.
+  quarantine:
+    enabled: true
+    window_secs: 900          # default window, at most max_window_secs
+    max_window_secs: 86400    # ceiling a request is clamped to, at most 604800
+    tear_down_flows: true     # end the flows the cgroup already holds
+    max_flows_scanned: 65536  # flows read to find those, 1 to 1048576
+    protected_paths:          # cgroups never quarantined, by path
+      - /system.slice/sshd.service
+    protected_ids: [1]        # and by cgroup id
+    sweep_interval_secs: 30   # how often expired windows are lifted, 1 to 3600
+
+auto_response:
+  enabled: true
+  policies:
+    - name: block-critical-intrusions
+      min_severity: critical          # low, medium, high, critical
+      components: [ids, ips]          # empty means every component
+      action: block                   # block or throttle
+      ttl_secs: 3600
+    - name: throttle-flooders
+      min_severity: high
+      components: [ddos, ratelimit]
+      action: throttle
+      ttl_secs: 600
+      rate_pps: 100                   # required for throttle
+
+# An IPS rule asks for the process behind a flow it blocks to be stopped
+# with `kill_process: true`. It must block, and response.kill_process must
+# be enabled, or the agent refuses to start.
+ips:
+  enabled: true
+  mode: block
+  rules:
+    - id: ips-reverse-shell-kill
+      description: "Block a reverse shell and stop the process that opened it"
+      severity: critical
+      mode: block
+      protocol: tcp
+      dst_port: 4444
+      pattern: "(?i)/bin/(ba)?sh\\s+-i"
+      enabled: true
+      tenant_id: 0              # 0 is the shared tenant
+      kill_process: true

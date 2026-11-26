@@ -43,6 +43,44 @@ dlp:
   # different regex or severity, or `enabled: false` to switch it off - and the
   # built-ins it does not name stay as they ship. Any other id is rejected by
   # the OSS validator.
+  #
+  # Here the US SSN pattern is restated with its regex as shipped, renamed,
+  # lowered to high and switched off; `mode` stays alert in OSS.
+  patterns:
+    - id: dlp-pii-ssn
+      name: US SSN (off on this host)
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
+      severity: high
+      data_type: pii
+      mode: alert
+      description: "No US personnel here; the pattern only raised false positives"
+      enabled: false
+
+  # ── Scope ─────────────────────────────────────────────────────────
+  #
+  # Which workloads the TLS probes read. `all` (the default) reads every
+  # task on the node and takes no list. `workloads` reads only the cgroups
+  # and selectors listed: every matcher set in a selector must match, and an
+  # `exclude` selector takes a workload out whatever includes it. The lists
+  # are resolved to cgroups again every refresh_seconds (1 to 3600).
+  scope:
+    mode: workloads
+    cgroups:
+      - /system.slice/nginx.service
+    selectors:
+      - name: payments-api
+        action: include
+        namespace: payments
+        container: api
+      - name: no-vault
+        action: exclude
+        exe: /usr/bin/vault
+    refresh_seconds: 15
+
+  # Most plaintext bytes one DLP event carries, 4096 to 16384 (one whole TLS
+  # record, the default). Kernels without bpf_probe_read_user_dynptr copy at
+  # most 4096 whatever this says.
+  record_bytes: 16384
 
   # ── Custom patterns - PROFESSIONAL AND ABOVE ───────────────────────
   #

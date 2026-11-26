@@ -69,14 +69,14 @@ alerting:
   #   ca_cert    - PEM bundle trusted on top of the system roots (default: none)
   #   verify_tls - Verify the collector certificate. Turning it off is only
   #                accepted with protocol "http" (default: true)
-  # otlp:
-  #   endpoint: "https://otel-collector:4317"
-  #   protocol: grpc
-  #   timeout_ms: 5000
-  #   headers:
-  #     authorization: "Bearer <token>"
-  #   ca_cert: "/etc/ebpfsentinel/collector-ca.pem"
-  #   verify_tls: true
+  otlp:
+    endpoint: "https://otel-collector:4317"
+    protocol: grpc
+    timeout_ms: 5000
+    headers:
+      authorization: "Bearer CHANGE-ME"
+    ca_cert: "/etc/ebpfsentinel/collector-ca.pem"
+    verify_tls: true
 
   routes:
     # Log everything (catch-all for observability)
@@ -121,6 +121,6 @@ alerting:
       webhook_url: "https://security.example.com/api/dlp-alerts"
 
     # OTLP export - all alerts to OpenTelemetry collector (requires otlp config above)
-    # - name: otlp-all
-    #   destination: otlp
-    #   min_severity: low
+    - name: otlp-all
+      destination: otlp
+      min_severity: low

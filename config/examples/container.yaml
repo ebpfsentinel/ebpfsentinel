@@ -28,6 +28,7 @@ container:
     enabled: true
     cache_size: 4096           # Max cached cgroup → container mappings
     proc_path: /host/proc      # Use /host/proc when running in a container
+    cgroup_root: /sys/fs/cgroup  # cgroup v2 mount, read to name a cgroup id
 
   # Docker metadata enrichment (requires socket access).
   docker:
@@ -41,7 +42,7 @@ container:
   # Kubernetes pod metadata enrichment (requires in-cluster SA).
   kubernetes:
     enabled: true
-    # node_name: ""           # Empty = EBPFSENTINEL_NODE_NAME, HOSTNAME, then kernel hostname
+    node_name: ""              # Empty = EBPFSENTINEL_NODE_NAME, HOSTNAME, then kernel hostname
     label_filter: []           # One key=value pair per entry; empty = every pod on the node
     # NetworkPolicy objects read from the cluster: off (not read), observe
     # (evaluated on every new connection, refusals counted and let through)
@@ -79,6 +80,24 @@ container:
     cache_ttl_seconds: 300
     timeout_ms: 2000
 
+  # LXC and Incus system containers, named off the cgroup path, then
+  # enriched from Proxmox's CT configuration files and the Incus daemon.
+  # On by default; each source is read only where it exists, and an empty
+  # path or socket is never read.
+  lxc:
+    enabled: true
+    proxmox_dir: /etc/pve/lxc
+    incus_socket: /var/lib/incus/unix.socket
+    cache_size: 1024
+    cache_ttl_seconds: 300
+    timeout_ms: 2000
+
+  # Virtual machines, named from the hypervisor's records for each tap or
+  # macvtap device. Nothing is cached, so there is nothing to size.
+  guests:
+    proxmox_dir: /etc/pve/qemu-server
+    libvirt_dir: /run/libvirt/qemu
+
 # ── Example: DLP with pod context ─────────────────────────────────
 #
 # DLP events carry cgroup_id from bpf_get_current_cgroup_id().
@@ -101,6 +120,50 @@ ids:
       pattern: "(?i)(bash\\s+-i|/dev/tcp/|nc\\s+-e)"
       severity: critical
       description: "Reverse shell attempt"
+
+    # A rule scoped to a workload is decided on the cgroup behind the
+    # flow, so it carries no content pattern and no interfaces. The
+    # Kubernetes matchers (pods, namespaces, service_account) need the
+    # Kubernetes enricher above.
+    - id: checkout-pods-ssh
+      protocol: tcp
+      dst_port: 22
+      severity: high
+      description: "SSH from a checkout pod"
+      workload:
+        pods:
+          match_labels:
+            app: checkout
+        service_account: checkout
+
+    # A container by name, and a systemd cgroup path: both must hold.
+    - id: payments-smtp
+      protocol: tcp
+      dst_port: 25
+      severity: medium
+      description: "Mail sent by the payments container"
+      workload:
+        container: payments
+        cgroup: /system.slice/docker.service
+
+    # A virtual machine, by the name its hypervisor gives it, decided on
+    # its tap or macvtap device. A guest is named alone.
+    - id: build-vm-irc
+      protocol: tcp
+      dst_port: 6667
+      severity: high
+      description: "IRC from the build VM"
+      workload:
+        guest: build-01
+
+    # A source port, a tenant, and a rule kept in the file but not loaded.
+    - id: tenant-3-dns-from-high-port
+      enabled: false
+      protocol: udp
+      src_port: 53
+      severity: low
+      description: "DNS answers seen by tenant 3"
+      tenant_id: 3
 
 conntrack:
   enabled: true

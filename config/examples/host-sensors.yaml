@@ -6,7 +6,8 @@
 #   - Network inventory: the node's packet sockets
 #   - Kernel drops: packets the kernel drops, by reason and interface
 #   - Writes to new file shares: SMB writes to servers never written to before
-#   - File watch: changes under watched directories, detected, never prevented
+#   - File watch: changes under watched directories, detected, never prevented;
+#     its write_refusal block is the one part that refuses, in the kernel
 #
 # Hidden checks, network inventory and kernel drops are on by default;
 # share writes and file watch are off unless enabled.
@@ -70,3 +71,36 @@ file_watch:
   paths:
     - /etc/ssh
     - /etc/shadow
+
+  # Canary files planted into data directories: no legitimate process has a
+  # reason to open one, so an open is a decisive mass encryption signal.
+  # Off by default, since planting writes files into these directories.
+  canaries:
+    enabled: true
+    directories: [/srv/share, /home]
+    names: [0000-archive.docx, zzzz-ledger.xlsx]
+    exempt: [/usr/bin/restic]  # a backup that walks these directories by design
+
+  # The composed mass encryption verdict. shadow (the default) counts each
+  # verdict by workload and raises nothing; enforce raises an alert. stop
+  # also kills the run and needs enforce and response.kill_process.enabled.
+  mass_encryption:
+    mode: shadow
+    stop: false
+
+  # Write-opens refused in the kernel past a count, through the BPF LSM
+  # where it is active at boot and a fanotify permission group elsewhere
+  # (route: auto, bpf_lsm or fanotify). Independent of file_watch.enabled.
+  # A data path is refused at the threshold-th write-open by one writer in
+  # the window; a system path at the first write by an executable not in
+  # system_writers. It fails open: an agent that stops refuses nothing.
+  write_refusal:
+    enabled: true
+    mode: shadow               # shadow counts what would be refused; enforce refuses
+    paths: [/srv/share]
+    system_paths: [/usr/bin, /usr/sbin]
+    system_writers: [/usr/bin/dpkg, /usr/bin/apt-get]
+    threshold: 100             # 1 and up
+    window_secs: 60            # 1 to 3600
+    count_by: cgroup           # process, or cgroup for a container or unit as one writer
+    route: auto

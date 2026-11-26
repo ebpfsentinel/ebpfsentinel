@@ -242,6 +242,10 @@ process_table:
   enabled: true
   capacity: 8192
   capture_command_line: false
+  # Take the executable's SHA-256 in the kernel at exec, from IMA's hash,
+  # where the host runs both the BPF LSM and IMA; elsewhere the agent reads
+  # the file itself.
+  kernel_digest: true
   # Three detections read off the table where a process touches the network:
   # a shell or interpreter on a socket, a binary with no file on disk, and a
   # server's descendant connecting out. They alert and stop nothing unless
@@ -253,6 +257,11 @@ process_table:
       reverse_shell: true
       fileless: true
       server_descendant: true
+    # The shells and interpreters a reverse shell is made of, and the servers
+    # whose descendants should answer rather than dial out. A name, a full
+    # path when it carries a /, either ending in * for a prefix.
+    interpreters: [sh, bash, dash, zsh, ksh, ash, busybox, "python*", "perl*", "ruby*", php, "php[0-9]*", node, "lua*"]
+    servers: [nginx, apache2, httpd, "php-fpm*", lighttpd, caddy, uwsgi]
     expected: []
     kill_process: false
 
@@ -275,6 +284,7 @@ learning:
   enabled: true
   max_edges: 8192
   sample_interval_secs: 10
+  storage_path: data/learning.redb
 
 # Flow export. Off by default, and off here means no record is built at all:
 # a node exporting nowhere should not pay for a flow table. The source is the
@@ -477,7 +487,7 @@ management:
 # page in the documentation for the exact message that is sent.
 telemetry:
   enabled: true
-  # state_path: /var/lib/ebpfsentinel/telemetry/installation
+  state_path: /var/lib/ebpfsentinel/telemetry/installation
   # The machine identifier the installation identifier is derived from, so a
   # machine is counted once whatever happens to state_path. Empty reads none.
-  # machine_id_path: /etc/machine-id
+  machine_id_path: /etc/machine-id

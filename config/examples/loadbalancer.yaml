@@ -129,6 +129,56 @@ loadbalancer:
         unhealthy_threshold: 2
         healthy_threshold: 2
 
+    # Direct server return on one L2 segment: the agent rewrites only the
+    # destination MAC, and the backends answer the client themselves from
+    # the VIP. `listen_addr` pins the service to that VIP (unset: any local
+    # address); l2dsr requires every backend flagged same_segment.
+    - id: lb-media
+      name: media-dsr
+      protocol: udp
+      listen_addr: "10.0.6.100"
+      listen_port: 5004
+      algorithm: maglev
+      mode: l2dsr                # dnat (default) | l2dsr
+      backends:
+        - id: media-1
+          addr: "10.0.6.11"
+          port: 5004
+          same_segment: true
+        - id: media-2
+          addr: "10.0.6.12"
+          port: 5004
+          same_segment: true
+
+  # Kernel table sizes. Unset, they follow the services listed; set, they
+  # leave room for services and backends added through the API later.
+  max_maglev_services: 16        # 1 to 256, at least the maglev services listed
+  max_backends: 256              # 1 to 65536, at least the backends listed
+  max_flows: 262144              # 1 to 16777216 tracked flows
+
+  # VIP announcement: the speaker answers ARP for the VIPs on `interface`
+  # and, with bgp enabled, has BIRD announce them to its peers.
+  announce:
+    role: elected                # primary | standby | elected | disabled (default)
+    interface: eth0
+    vips:
+      - name: media-vip
+        addr: "10.0.6.100"
+    bgp:
+      enabled: true
+      local_asn: 64512
+      local_port: 179
+      router_id: "10.0.0.11"
+      socket: /run/bird/bird.ctl
+      config_path: /run/bird/ebpfsentinel.conf
+      peers:
+        - name: tor1
+          address: "10.0.0.1"
+          asn: 64513
+          port: 179
+          hold_time: 90
+          password_file: /etc/ebpfsentinel/secrets/tor-md5/password
+
 # ── Firewall (companion rules) ─────────────────────────────────────
 
 firewall:

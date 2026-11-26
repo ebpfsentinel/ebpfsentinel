@@ -1,0 +1,20 @@
+# eBPFsentinel - Package Inventory Configuration Example
+# ======================================================
+#
+# What the package managers say is installed, read in every root: the host
+# and each container. A database that has not changed since the last sweep
+# is only looked at, not read again. On by default.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/package-inventory.yaml
+#
+# Reference: docs/configuration/package-inventory.md
+
+agent:
+  interfaces: [eth0]
+
+package_inventory:
+  enabled: true
+
+  # How often every root is read, in seconds (60 to 86400).
+  interval_secs: 900

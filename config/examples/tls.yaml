@@ -61,4 +61,8 @@ agent:
     # of those links is hybrid only: a TLS flow collector that only speaks
     # classical key exchange stops start-up and says so, any other peer is
     # refused at its handshake with the same reason.
-    # outbound_pq_mode: require
+    outbound_pq_mode: prefer
+
+    # Accept TLS 1.2 clients beside TLS 1.3. Off by default; refused with
+    # pq_mode: require, since the hybrid group is TLS 1.3 only.
+    allow_tls12: false

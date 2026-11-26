@@ -1,0 +1,49 @@
+# eBPFsentinel - Packet Capture Configuration Example
+# ===================================================
+#
+# Two blocks bound packet capture:
+#   - capture: the ceiling on every capture the agent runs, whoever asked
+#     for it (POST /api/v1/captures/manual, `ebpfsentinel-agent capture
+#     start`, or an alert), and how long the files are kept.
+#   - auto_capture: whether a capture starts on its own when an alert fires.
+#     One capture runs at a time, at most 60 seconds long.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/capture.yaml
+#
+# Reference: docs/configuration/capture.md and auto-capture.md
+
+agent:
+  interfaces: [eth0]
+
+capture:
+  # Longest capture accepted, in seconds (1 to 3600). A longer request is
+  # refused rather than clamped. Default: 300.
+  max_duration_secs: 600
+
+  # Days a capture file is kept; 0 keeps every file. At most 365. Default: 7.
+  retention_days: 14
+
+  # Room every capture file together may take, in megabytes; 0 is no
+  # ceiling. The oldest files go first, never the one still writing.
+  # Default: 1024.
+  max_total_size_mb: 2048
+
+auto_capture:
+  enabled: true
+
+  # Lowest alert severity that starts a capture: low, medium, high, critical.
+  min_severity: high
+
+  # Only alerts from these components start one; empty means any of them.
+  # Accepted: ai-security, ddos, firewall, ids, ips, l7, ratelimit, threatintel.
+  components: [ids, ips, threatintel]
+
+  # Seconds each capture runs (at most 60).
+  duration_secs: 30
+
+  # Bytes kept of each packet.
+  snap_length: 1500
+
+  # Interface captured on. Absent, the first entry of agent.interfaces.
+  interface: eth0

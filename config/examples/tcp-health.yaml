@@ -1,0 +1,32 @@
+# eBPFsentinel - TCP Health Configuration Example
+# ===============================================
+#
+# Retransmissions, resets and connections opened, failed and closed, per
+# edge, counted by the TCP stack's own tracepoints. On by default; each hook
+# fires on an event the stack already handles slowly, so a segment delivered
+# in order costs nothing.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/tcp-health.yaml
+#
+# Reference: docs/configuration/tcp-health.md
+
+agent:
+  interfaces: [eth0]
+
+tcp_health:
+  enabled: true
+
+  # How often the counts are read into the metrics, in seconds (1 to 3600).
+  poll_interval_secs: 10
+
+  # Time writes from the kernel's transmit timestamps: queued, handed to the
+  # driver and acknowledged. Off, the round-trip time sampled when a
+  # connection opens and closes remains.
+  send_latency: true
+
+  # Alert on a source drawing resets faster than its line.
+  reset_scan:
+    enabled: true
+    window_secs: 60           # resets of one source summed over (1 to 3600)
+    resets: 100               # resets over the window that raise the alert

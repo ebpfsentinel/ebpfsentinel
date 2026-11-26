@@ -1,9 +1,14 @@
-#![allow(clippy::panic)]
+#![allow(clippy::panic, clippy::unwrap_used)]
 // Regression guard: every shipped config under `config/` must parse and
 // validate through the real loader, so docs, examples and the host profiles
 // the packages install can never drift into a state that fails
 // `ebpfsentinel-agent --config`.
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
 use infrastructure::config::AgentConfig;
+use regex::Regex;
+use serde_norway::Value;
 
 fn yaml_files_in(dir: &str) -> Vec<std::path::PathBuf> {
     let mut ents: Vec<_> = std::fs::read_dir(dir)
@@ -258,4 +263,269 @@ fn every_integration_fixture_loads_whole() {
     let _ = std::fs::remove_dir_all(&data_dir);
     assert!(loaded > 50, "only {loaded} fixtures loaded under {dir}");
     assert!(fails.is_empty(), "fixtures the agent refuses: {fails:#?}");
+}
+
+/// What serde reads off the configuration document: for each struct deriving
+/// `Deserialize` under `src/config/`, each key under the name serde gives it,
+/// with the type names its field declares. A `flatten` field, and each newtype
+/// variant of an untagged enum, stands for the keys of the struct it names.
+#[derive(Default)]
+struct ConfigSchema {
+    structs: BTreeMap<String, BTreeMap<String, SchemaField>>,
+}
+
+struct SchemaField {
+    flatten: bool,
+    types: Vec<String>,
+}
+
+/// Containers a field's type is seen through to the struct it holds.
+const TYPE_WRAPPERS: &[&str] = &[
+    "Option", "Vec", "Box", "Arc", "HashMap", "BTreeMap", "IndexMap", "HashSet", "BTreeSet",
+];
+
+impl ConfigSchema {
+    fn read(dir: &Path) -> Self {
+        let item = Regex::new(
+            r"(?s)#\[derive\(([^)]*)\)\]((?:\s*#\[[^\]]*\]|\s*///[^\n]*)*)\s*pub struct (\w+)\s*\{(.*?)\n\}",
+        )
+        .unwrap();
+        let untagged = Regex::new(
+            r"(?s)#\[serde\([^)]*\buntagged\b[^)]*\)\]((?:\s*#\[[^\]]*\]|\s*///[^\n]*)*)\s*pub enum (\w+)\s*\{(.*?)\n\}",
+        )
+        .unwrap();
+        let variant = Regex::new(r"^\w+\s*\(\s*([A-Za-z_]\w*)\s*\)\s*,?$").unwrap();
+        let field = Regex::new(r"^pub(?:\([^)]*\))?\s+(?:r#)?(\w+)\s*:\s*(.+?),?$").unwrap();
+        let rename_all = Regex::new(r#"rename_all\s*=\s*"([^"]+)""#).unwrap();
+        let rename = Regex::new(r#"\brename\s*=\s*"([^"]+)""#).unwrap();
+        let skip = Regex::new(r"\bskip\b|skip_deserializing").unwrap();
+        let flatten = Regex::new(r"\bflatten\b").unwrap();
+        let ident = Regex::new(r"[A-Za-z_]\w*").unwrap();
+
+        let mut sources = Vec::new();
+        rust_files_under(dir, &mut sources);
+        sources.sort();
+        let texts: Vec<String> = sources
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+
+        let mut schema = Self::default();
+        for text in &texts {
+            for caps in item.captures_iter(text) {
+                if !caps[1].contains("Deserialize")
+                    || rename_all
+                        .captures(&caps[2])
+                        .is_some_and(|r| &r[1] != "snake_case")
+                {
+                    continue;
+                }
+                let fields = schema.structs.entry(caps[3].to_string()).or_default();
+                let mut pending = String::new();
+                for raw in caps[4].split('\n') {
+                    let line = raw.trim();
+                    if line.starts_with("#[") {
+                        pending.push_str(line);
+                        continue;
+                    }
+                    if let Some(f) = field.captures(line) {
+                        let serde = std::mem::take(&mut pending);
+                        if skip.is_match(&serde) {
+                            continue;
+                        }
+                        let types = ident
+                            .find_iter(&f[2])
+                            .map(|m| m.as_str())
+                            .filter(|t| !TYPE_WRAPPERS.contains(t))
+                            .map(ToString::to_string)
+                            .collect();
+                        let is_flatten = flatten.is_match(&serde);
+                        let key = if is_flatten {
+                            format!("<flatten {}>", &f[1])
+                        } else {
+                            rename
+                                .captures(&serde)
+                                .map_or_else(|| f[1].to_string(), |r| r[1].to_string())
+                        };
+                        fields.insert(
+                            key,
+                            SchemaField {
+                                flatten: is_flatten,
+                                types,
+                            },
+                        );
+                    } else if !line.is_empty() && !line.starts_with("//") {
+                        pending.clear();
+                    }
+                }
+            }
+        }
+        for text in &texts {
+            for caps in untagged.captures_iter(text) {
+                let fields = schema.structs.entry(caps[2].to_string()).or_default();
+                for raw in caps[3].split('\n') {
+                    if let Some(v) = variant.captures(raw.trim()) {
+                        fields.insert(
+                            format!("<variant {}>", &v[1]),
+                            SchemaField {
+                                flatten: true,
+                                types: vec![v[1].to_string()],
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        schema
+    }
+
+    /// Every `Struct.key` the loader reads.
+    fn inventory(&self) -> BTreeSet<String> {
+        self.structs
+            .iter()
+            .flat_map(|(name, fields)| {
+                fields
+                    .iter()
+                    .filter(|(_, f)| !f.flatten)
+                    .map(move |(key, _)| format!("{name}.{key}"))
+            })
+            .collect()
+    }
+
+    /// The keys a value of this type may carry, through flattens and variants.
+    fn keys(&self, name: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (key, f) in self.structs.get(name).into_iter().flatten() {
+            if !f.flatten {
+                out.insert(key.clone());
+                continue;
+            }
+            for t in f.types.iter().filter(|t| t.as_str() != name) {
+                out.extend(self.keys(t));
+            }
+        }
+        out
+    }
+
+    /// Records each `Struct.key` this value sets, read as the struct `name`.
+    fn walk(&self, name: &str, value: &Value, seen: &mut BTreeSet<String>) {
+        let (Some(fields), Value::Mapping(map)) = (self.structs.get(name), value) else {
+            return;
+        };
+        for f in fields.values().filter(|f| f.flatten) {
+            for t in &f.types {
+                self.walk(t, value, seen);
+            }
+        }
+        for (key, child) in map {
+            let Some(key) = yaml_key(key) else { continue };
+            let Some(f) = fields.get(&key).filter(|f| !f.flatten) else {
+                continue;
+            };
+            seen.insert(format!("{name}.{key}"));
+            for t in f.types.iter().filter(|t| self.structs.contains_key(*t)) {
+                self.descend(t, child, seen);
+            }
+        }
+    }
+
+    /// A field's value: the struct itself, a list of it, or a map whose values
+    /// are it.
+    fn descend(&self, name: &str, value: &Value, seen: &mut BTreeSet<String>) {
+        match value {
+            Value::Sequence(items) => {
+                for item in items {
+                    self.descend(name, item, seen);
+                }
+            }
+            Value::Mapping(map) => {
+                let keys = self.keys(name);
+                if map.is_empty() || map.keys().filter_map(yaml_key).any(|k| keys.contains(&k)) {
+                    self.walk(name, value, seen);
+                } else {
+                    for item in map.values() {
+                        self.descend(name, item, seen);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn yaml_key(key: &Value) -> Option<String> {
+    match key {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files_under(&path, out);
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Keys no shipped configuration can show, each with why.
+const KEYS_NO_EXAMPLE_SETS: &[(&str, &str)] = &[(
+    "AgentConfig.enterprise",
+    "read by the enterprise loader only, documented with the enterprise examples",
+)];
+
+/// Every key the loader reads is set by the default configuration, an
+/// example or a host profile, so a reader looking for how a key is written
+/// finds it in a file the agent is proven to load.
+///
+/// Each file is walked from `AgentConfig` along the types the fields declare,
+/// so a key counts only where the loader would read it. A key no file sets
+/// fails here; so does a line of the exemption list the files now cover.
+#[test]
+fn every_config_key_is_set_by_an_example() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema = ConfigSchema::read(&crate_dir.join("src/config"));
+    let inventory = schema.inventory();
+    assert!(
+        inventory.len() >= 700 && schema.structs.contains_key("AgentConfig"),
+        "read {} keys: the scanner no longer reads the loader",
+        inventory.len()
+    );
+
+    let root = crate_dir.join("../../config");
+    let mut files = vec![root.join("ebpfsentinel.yaml")];
+    for dir in ["examples", "profiles"] {
+        files.extend(yaml_files_in(&root.join(dir).to_string_lossy()));
+    }
+    let mut seen = BTreeSet::new();
+    for f in &files {
+        let doc: Value = serde_norway::from_str(&std::fs::read_to_string(f).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        schema.walk("AgentConfig", &doc, &mut seen);
+    }
+
+    let exempt: BTreeSet<String> = KEYS_NO_EXAMPLE_SETS
+        .iter()
+        .map(|(k, _)| (*k).to_string())
+        .collect();
+    let unset: Vec<_> = inventory
+        .iter()
+        .filter(|k| !seen.contains(*k) && !exempt.contains(*k))
+        .collect();
+    let stale: Vec<_> = exempt
+        .iter()
+        .filter(|k| seen.contains(*k) || !inventory.contains(*k))
+        .collect();
+    assert!(
+        unset.is_empty(),
+        "keys no example under config/ sets: {unset:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "exempt keys an example now sets or the loader no longer has: {stale:#?}"
+    );
 }
