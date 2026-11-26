@@ -59,10 +59,13 @@ owners:
   restart-state: "State that survives a restart and the reports read from it: learning, the RCF baseline, MITRE coverage, eBPF coverage, crypto posture, trace, TLS probe coverage, DLP scope"
   unplanned: "No suite is planned yet; listed so the gap reads as one"
 
-# Every path of openapi.json is asserted by a suite that names it. The audit
-# finds the suites itself by matching the path, with `{param}` read as one
-# segment, against every suite file, so a route a suite already requests
-# needs no line here. A route listed below either carries the suites that
+# Every operation of openapi.json, its method and its path, is asserted by a
+# suite that requests it. The audit finds the suites itself by matching the
+# path, with `{param}` read as one segment, on a line that requests it with
+# that method (`api_get`/`api_status` GET, `api_post`, `api_put`,
+# `api_patch`, `api_delete`, or `curl` with `-X`, a body for POST, else GET),
+# so a route a suite already requests needs no line here. A line is keyed
+# `METHOD /path`. A route listed below either carries the suites that
 # reach it under a name built at run time (`suites`), or names the owner of
 # the suite it is waiting on (`owner`). A route listed with an owner that a
 # suite has since started requesting fails the audit, so the list shrinks
@@ -71,10 +74,9 @@ owners:
 # lowers the ceiling in the same change.
 routes_gap_ceiling: 0
 routes:
-  /api/v1/agent/stop: {suites: [], elsewhere: ["ebpfsentinel-enterprise/62"]}
-  /api/v1/ebpf/hidden-ports: {suites: ["79"]}
-  /api/v1/ebpf/hidden-processes: {suites: ["79"]}
-  /api/v1/netpol/replay: {suites: ["87"]}
+  POST /api/v1/agent/stop: {suites: [], elsewhere: ["ebpfsentinel-enterprise/62"]}
+  GET /api/v1/ebpf/hidden-ports: {suites: ["79"]}
+  GET /api/v1/ebpf/hidden-processes: {suites: ["79"]}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml). Every suite on disk carries
@@ -234,7 +236,8 @@ suite_profiles:
   "156": datapath
   "157": datapath
   "158": datapath
-  # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
+  "159": nightly
+  # 10, 134 and 159 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
   # 38-47, 50, 107, 108 and 139 need the attacker or backend VM.
@@ -849,7 +852,7 @@ coverage:
     topology: none
     kernel_min: "6.18"
     profile: datapath
-    notes: "NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The replay against a cluster's pods, and the refusal of a flow a policy denies, need a node reading a cluster: the operator's coexistence suite 04-networkpolicy-enforce.bats asserts both on kind"
+    notes: "NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The refusal of a flow a policy denies is asserted by 159 on a node the chart alone installs; the replay against a cluster's pods needs a node reading a cluster, and the operator's coexistence suite 04-networkpolicy-enforce.bats asserts it on kind"
 
   - kind: cli_subcommand
     feature: hostrules
@@ -1151,12 +1154,12 @@ coverage:
 
   - kind: domain_module
     feature: netpol
-    suites: []
+    suites: ["159"]
     elsewhere: ["ebpfsentinel-operator/coexistence/04"]
     topology: k8s
     kernel_min: "6.18"
-    profile: manual
-    notes: "Kubernetes NetworkPolicy compiled for the pods of one node. Applied in enforce mode by the operator's coexistence suite 04-networkpolicy-enforce.bats on kind; the compilation needs the node's pod inventory, which no lane here provides"
+    profile: nightly
+    notes: "Kubernetes NetworkPolicy compiled for the pods of one node. 159 installs the OSS chart alone on a minikube node whose bridge CNI enforces no policy, with no operator and no custom resource: in enforce a policy admitting nothing into a pod refuses a connect and ingress_refused rises, lifted the path reopens, and in observe the same policy lets the connect through while ingress_would_refuse rises and ingress_refused stays. The operator's coexistence suite 04-networkpolicy-enforce.bats applies it beside Calico and Cilium on kind"
 
   - kind: domain_module
     feature: process
@@ -1769,7 +1772,7 @@ attack_suites:
     kernel_min: "6.18"
     profile: nightly
     surfaces: ["container", "ids"]
-    notes: "A rootful and a rootless Podman container named on their alerts by id, name and image, each runtime reported reachable; an IDS rule scoped to one container by name fires on it and not on its neighbour. Podman lives on the vagrant-runtimes VM only, so the agent VM's lane does not run it"
+    notes: "A rootful and a rootless Podman container named on their alerts by id, name and image, each runtime reported reachable; an IDS rule scoped to one container by name fires on it and not on its neighbour; with no socket answering, both are named from their owner's container store and each runtime reported as read from it. Podman lives on the vagrant-runtimes VM only, so the agent VM's lane does not run it"
 
   - suite: "131"
     name: cri-runtimes-attribution

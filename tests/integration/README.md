@@ -136,7 +136,7 @@ Require **root** and **kernel >= 6.18** (or 2-VM mode). Measure agent overhead u
 
 ## Coverage Matrix
 
-`coverage-matrix.yaml` is the single source of truth that maps every observable agent surface - each eBPF program, each CLI subcommand, each domain module, each capability of `capabilities.json` - to the bats suite(s) that exercise it. Every path of `openapi.json` must be requested by a suite, which the audit finds by reading the suites themselves (a full-line comment requests nothing; a path requested inside a `lib/` helper counts for every suite calling that helper), or be listed under `routes:` with the suites that build it at run time or the owner of the suite it waits on. The matrix is enforced by `scripts/audit-coverage.sh`, which runs on every PR and fails the build if a new feature or route lands without a row, or a gap without an owner.
+`coverage-matrix.yaml` is the single source of truth that maps every observable agent surface - each eBPF program, each CLI subcommand, each domain module, each capability of `capabilities.json` - to the bats suite(s) that exercise it. Every operation of `openapi.json` must be requested by a suite with its method and path, which the audit finds by reading the suites themselves (the method from the helper the line calls, `api_get`/`api_status`, `api_post`, `api_put`, `api_patch`, `api_delete`, or from a `curl`'s `-X` or body; a full-line comment requests nothing; a path requested inside a `lib/` helper counts for every suite calling that helper), or be listed under `routes:`, keyed `METHOD /path`, with the suites that build it at run time or the owner of the suite it waits on. The matrix is enforced by `scripts/audit-coverage.sh`, which runs on every PR and fails the build if a new feature or route lands without a row, or a gap without an owner.
 
 **Workflow when adding a feature** (new eBPF program / new CLI subcommand / new domain module):
 
@@ -208,7 +208,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `lsm-bpf-guard` | 88 | none | 6.18 | datapath | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets |
 | `lsm-bpf-load-guard` | 157, 158 | none | 6.18 | datapath | Loaded by the warden, as root and without a token, before it hands the token over: every load made through a BPF token passes only signed against the warden's keyring. 157 has an unsigned token load refused with a permission error and a signed one loaded where the BPF LSM is active and the kernel verifies signatures, the posture reading enforced while it holds, and with the warden given no guard object the same signed loads passing and the posture saying verified but not enforced, naming the missing condition. 158 reads the guard attached and the posture enforced on a kernel booted with lockdown=confidentiality, where the agent's own programs that read kernel memory are refused |
 | `lsm-exec-digest` | 154 | none | 6.18 | datapath | The executable's SHA-256 taken from IMA's hash at bprm_committed_creds and kept against device and inode, dropped at file_open for writing and at path_truncate: 154 reads the process table's digest against sha256sum, a second exec answered from the entry and an append dropping it. Needs the BPF LSM and IMA active at boot; the suite skips where either is not |
-| `lsm-exec-network` | 91 | none | 6.18 | datapath | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's and the floor guest's boot lines set |
+| `lsm-exec-network` | 91 | none | 6.18 | datapath | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-tamper-guard` | ebpfsentinel-enterprise/62 | none | 6.18 | manual | Refuses the signals, ptrace and writes that would end or alter a protected agent. Armed only by the enterprise tamper protection, so the suite lives there: ebpfsentinel-enterprise/tests/integration/suites/62-enterprise-signed-stop.bats asserts a kill is refused while armed and a signed stop ends the agent. Needs the BPF LSM active at boot (lsm=bpf) |
 | `lsm-write-refusal` | 83 | none | 6.18 | datapath | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
 | `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.18 | datapath | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
@@ -265,7 +265,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
 | `mitre` | 16, 51, 87 | 2vm | 6.18 | pr | MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
 | `nat` | 16, 21, 50 | 2vm | 6.18 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
-| `netpol` | 87 | none | 6.18 | datapath | NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The replay against a cluster's pods, and the refusal of a flow a policy denies, need a node reading a cluster: the operator's coexistence suite 04-networkpolicy-enforce.bats asserts both on kind |
+| `netpol` | 87 | none | 6.18 | datapath | NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The refusal of a flow a policy denies is asserted by 159 on a node the chart alone installs; the replay against a cluster's pods needs a node reading a cluster, and the operator's coexistence suite 04-networkpolicy-enforce.bats asserts it on kind |
 | `processes` | 93 | none | 6.18 | datapath | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; show and list are driven in 93 on the shell a detection named |
 | `qos` | 16, 28 | 2vm | 6.18 | pr | QoS / traffic shaping |
 | `ratelimit` | 04, 14, 16, 38 | 2vm | 6.18 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
@@ -318,7 +318,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `learning` | 87 | none | 6.18 | datapath | Watching a node for a window and holding what it reached; 87 opens windows, restarts the agent and reads one back running with the downtime as a gap and one interrupted past its deadline, then its edges, policy, segmentation and stop |
 | `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.18 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
 | `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.18 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
-| `netpol` | ebpfsentinel-operator/coexistence/04 | k8s | 6.18 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. Applied in enforce mode by the operator's coexistence suite 04-networkpolicy-enforce.bats on kind; the compilation needs the node's pod inventory, which no lane here provides |
+| `netpol` | 159, ebpfsentinel-operator/coexistence/04 | k8s | 6.18 | nightly | Kubernetes NetworkPolicy compiled for the pods of one node. 159 installs the OSS chart alone on a minikube node whose bridge CNI enforces no policy, with no operator and no custom resource: in enforce a policy admitting nothing into a pod refuses a connect and ingress_refused rises, lifted the path reopens, and in observe the same policy lets the connect through while ingress_would_refuse rises and ingress_refused stays. The operator's coexistence suite 04-networkpolicy-enforce.bats applies it beside Calico and Cilium on kind |
 | `network_program` | 88 | none | 6.18 | datapath | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, detaches the agent's own link without the guard and reads the alert, and puts another program in its place and reads that it replaced the agent's |
 | `process` | 67, 70, 93 | none | 6.18 | datapath | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93 |
 | `qos` | 16, 28 | 2vm | 6.18 | pr | Traffic shaping policies |
@@ -349,7 +349,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `file_kfuncs` | 77 | none | 6.18 | datapath | Probed and reported in 77 |
 | `immediate_signal` | 82 | none | 6.18 | datapath | A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only |
 | `kprobe_session` | 86 | none | 6.18 | datapath | No shipped program rests on it yet, so the report in 86 is all there is to assert |
-| `network_executables` | 91, 132 | none | 6.18 | datapath | Needs the BPF LSM active at boot, which the agent VM's and the floor guest's boot lines set; 132 has an enforcing list refuse to start where bpf is masked out of the module list, naming the lsm= parameter, an observing one start, and an enforcing one refuse to start with no BPF token rather than serve an API enforcing nothing |
+| `network_executables` | 91, 132 | none | 6.18 | datapath | Needs the BPF LSM active at boot, which the agent VM's boot line sets; 132 has an enforcing list refuse to start where bpf is masked out of the module list, naming the lsm= parameter, an observing one start, and an enforcing one refuse to start with no BPF token rather than serve an API enforcing nothing |
 | `process_signal` | 82 | none | 6.18 | datapath | A run encrypting files stopped by the signal |
 | `process_tracing` | 70 | none | 6.18 | datapath | The process and its lineage behind a flow |
 | `quarantine` | ebpfsentinel-enterprise/26 | none | 6.18 | manual | Nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite lives beside that response: ebpfsentinel-enterprise/tests/integration/suites/26-enterprise-quarantine.bats reads the workload's connections refused for the window, reaching the network again once it closes, and the release audited |
@@ -361,144 +361,161 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `write_refusal` | 83, 84, 100 | none | 6.18 | datapath | At the LSM hook in 83 and through the fanotify permission group in 84; in 100 the ordinary workloads writing under a counted directory at the shipped threshold, and a package upgrade by the expected writer under a held one, refuse nothing |
 | `xdp_pull_data` | 86, 153 | none | 6.18 | datapath | 153 reads it active, attaches the firewall in driver mode on a 9000-byte veth and has a jumbo datagram dropped on a refused port and delivered whole elsewhere; a veth keeps the headers in the first buffer, so the pull itself is not made to fire |
 
-#### API paths (134)
+#### API operations (151)
 
-| Path | Suites |
+| Operation | Suites |
 |---|---|
-| `/api/v1/agent/identity` | 35, 36 |
-| `/api/v1/agent/status` | 02, 08, 105, 130, 141, 30 |
-| `/api/v1/agent/stop` | _MISSING_ |
-| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 150, 155, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
-| `/api/v1/alerts/stream` | 25, 34 |
-| `/api/v1/alerts/triage` | 25 |
-| `/api/v1/alerts/{id}` | 25, 34 |
-| `/api/v1/alerts/{id}/false-positive` | 25 |
-| `/api/v1/alerts/{id}/triage` | 25 |
-| `/api/v1/aliases/status` | 16 |
-| `/api/v1/aliases/{id}/content` | 07, 16 |
-| `/api/v1/audit/logs` | 04, 48, 56 |
-| `/api/v1/audit/rules/{id}/history` | 04 |
-| `/api/v1/captures` | 142, 49 |
-| `/api/v1/captures/manual` | 49, 62 |
-| `/api/v1/captures/{id}` | 49, 62 |
-| `/api/v1/config` | 16, 23, 25 |
-| `/api/v1/config/reload` | 150, 16, 17, 35, 52, 99 |
-| `/api/v1/config/{section}` | 150, 16, 17, 27, 35, 52, 99 |
-| `/api/v1/conntrack/connections` | 107, 18 |
-| `/api/v1/conntrack/events` | 18 |
-| `/api/v1/conntrack/flush` | 18, 62 |
-| `/api/v1/conntrack/status` | 16, 18, 21, 65 |
-| `/api/v1/crypto/posture` | 58, 86 |
-| `/api/v1/ddos/attacks` | 15, 22 |
-| `/api/v1/ddos/attacks/history` | 15, 22 |
-| `/api/v1/ddos/policies` | 15, 22, 30 |
-| `/api/v1/ddos/policies/{id}` | 15, 22 |
-| `/api/v1/ddos/status` | 15, 22, 30 |
-| `/api/v1/dlp/patterns` | 16, 27 |
-| `/api/v1/dlp/scope` | 87 |
-| `/api/v1/dlp/status` | 16, 27 |
-| `/api/v1/dns/blocklist` | 04, 19, 33 |
-| `/api/v1/dns/cache` | 04, 19 |
-| `/api/v1/dns/stats` | 04, 19 |
-| `/api/v1/dns/status` | 33 |
-| `/api/v1/domains/blocklist` | 04, 19 |
-| `/api/v1/domains/blocklist/{domain}` | 04, 19 |
-| `/api/v1/domains/reputation` | 04 |
-| `/api/v1/ebpf/coverage` | 87 |
-| `/api/v1/ebpf/drop-reasons` | 90 |
-| `/api/v1/ebpf/foreign-programs` | 88 |
-| `/api/v1/ebpf/guests` | 73, 74, 75 |
-| `/api/v1/ebpf/hidden-ports` | 79 |
-| `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 62, 77, 82, 83, 84, 86, 88, 95, 99 |
-| `/api/v1/ebpf/raw-sockets` | 88 |
-| `/api/v1/ebpf/status` | 06, 158, 16, 62, 68 |
-| `/api/v1/ebpf/uprobes` | 27, 60 |
-| `/api/v1/exposure/listeners` | 90 |
-| `/api/v1/fingerprints/summary` | 41 |
-| `/api/v1/firewall/l7-rules` | 04, 29, 30, 56 |
-| `/api/v1/firewall/l7-rules/{id}` | 04, 29, 56 |
-| `/api/v1/firewall/rules` | 03, 07, 105, 11, 143, 26, 28, 30, 47, 55, 76 |
-| `/api/v1/firewall/rules/{id}` | 03, 11, 28, 47 |
-| `/api/v1/firewall/shadow` | 76 |
-| `/api/v1/firewall/workload/fqdn` | 92 |
-| `/api/v1/firewall/workload/labels` | 92, 98 |
-| `/api/v1/firewall/workload/reach` | 70 |
-| `/api/v1/firewall/workload/rules` | 138, 70, 72, 92, 95, 98 |
-| `/api/v1/flows/export` | 141, 90 |
-| `/api/v1/geoip/lookup` | 30 |
-| `/api/v1/geoip/status` | 30 |
-| `/api/v1/host-rules` | 135, 78 |
-| `/api/v1/host-rules/intents` | 78 |
-| `/api/v1/host-rules/mass-encryption` | 100, 104, 81, 96 |
-| `/api/v1/host-rules/write-refusal` | 83, 84 |
-| `/api/v1/ids/rules` | 102, 12, 16, 55, 59 |
-| `/api/v1/ids/status` | 12, 16, 33 |
-| `/api/v1/ids/suricata/report` | 102, 155 |
-| `/api/v1/ips/blacklist` | 04, 13, 38, 39, 55, 59 |
-| `/api/v1/ips/blacklist/{ip}` | 55 |
-| `/api/v1/ips/domain-blocks` | 13, 16 |
-| `/api/v1/ips/rules` | 04, 13, 136, 59 |
-| `/api/v1/ips/rules/{id}` | 13 |
-| `/api/v1/lb/services` | 139, 16, 20, 44 |
-| `/api/v1/lb/services/{id}` | 16, 20, 44 |
-| `/api/v1/lb/status` | 16, 20 |
-| `/api/v1/lb/vips` | 37 |
-| `/api/v1/lb/vips/bgp` | 37 |
-| `/api/v1/lb/vips/grant` | 37 |
-| `/api/v1/learning/sessions` | 138, 87 |
-| `/api/v1/learning/sessions/{id}` | 138, 87 |
-| `/api/v1/learning/sessions/{id}/edges` | 87 |
-| `/api/v1/learning/sessions/{id}/policy` | 87 |
-| `/api/v1/learning/sessions/{id}/segmentation` | 138, 87 |
-| `/api/v1/learning/sessions/{id}/stop` | 138, 87 |
-| `/api/v1/mitre/coverage` | 16, 87 |
-| `/api/v1/nat/nptv6` | 21, 50 |
-| `/api/v1/nat/nptv6/{id}` | 21, 50 |
-| `/api/v1/nat/rules` | 16, 21 |
-| `/api/v1/nat/status` | 16, 21 |
-| `/api/v1/netpol/replay` | 87 |
-| `/api/v1/processes` | 151, 67 |
-| `/api/v1/processes/{pid}` | 154, 72 |
-| `/api/v1/qos/classifiers` | 28 |
-| `/api/v1/qos/classifiers/{id}` | 28 |
-| `/api/v1/qos/pipes` | 28 |
-| `/api/v1/qos/pipes/{id}` | 28 |
-| `/api/v1/qos/queues` | 28 |
-| `/api/v1/qos/queues/{id}` | 28 |
-| `/api/v1/qos/shaping` | 103 |
-| `/api/v1/qos/status` | 28 |
-| `/api/v1/ratelimit/rules` | 04, 14, 55 |
-| `/api/v1/ratelimit/rules/{id}` | 04, 14 |
-| `/api/v1/responses` | 48 |
-| `/api/v1/responses/manual` | 48 |
-| `/api/v1/responses/{id}` | 48 |
-| `/api/v1/routing/gateways` | 16, 32, 53 |
-| `/api/v1/routing/gateways/{id}` | 32, 53 |
-| `/api/v1/routing/routes` | 32 |
-| `/api/v1/routing/status` | 16, 32, 53 |
-| `/api/v1/services/graph` | 90 |
-| `/api/v1/surface` | 80 |
-| `/api/v1/surface/listening` | 80 |
-| `/api/v1/surface/loaded` | 80 |
-| `/api/v1/surface/packages` | 80 |
-| `/api/v1/threatintel/feeds` | 04, 17, 33 |
-| `/api/v1/threatintel/feeds/refresh` | 33 |
-| `/api/v1/threatintel/iocs` | 04, 17, 33 |
-| `/api/v1/threatintel/status` | 04, 17, 33 |
-| `/api/v1/threatintel/urls` | 33 |
-| `/api/v1/tls/handshakes` | 89 |
-| `/api/v1/tls/posture` | 89 |
-| `/api/v1/tls/status` | 58 |
-| `/api/v1/trace` | 87 |
-| `/api/v1/zones` | 31 |
-| `/api/v1/zones/policies` | 31 |
-| `/api/v1/zones/policies/{id}` | 31 |
-| `/api/v1/zones/status` | 31 |
-| `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 141, 151, 152, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
-| `/metrics` | 02, 06, 07, 10, 100, 104, 105, 11, 12, 137, 138, 14, 141, 147, 151, 152, 153, 154, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90, 92, 94 |
-| `/readyz` | 01, 02, 06, 07, 106, 132, 140, 141, 151, 152, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
+| `DELETE /api/v1/captures/{id}` | 49 |
+| `DELETE /api/v1/ddos/policies/{id}` | 15, 22 |
+| `DELETE /api/v1/dns/cache` | 04, 19 |
+| `DELETE /api/v1/domains/blocklist/{domain}` | 04, 19 |
+| `DELETE /api/v1/firewall/l7-rules/{id}` | 04, 29, 56 |
+| `DELETE /api/v1/firewall/rules/{id}` | 03, 11, 28, 47 |
+| `DELETE /api/v1/ips/blacklist/{ip}` | 55 |
+| `DELETE /api/v1/lb/services/{id}` | 16, 20, 44 |
+| `DELETE /api/v1/nat/nptv6/{id}` | 21, 50 |
+| `DELETE /api/v1/qos/classifiers/{id}` | 28 |
+| `DELETE /api/v1/qos/pipes/{id}` | 28 |
+| `DELETE /api/v1/qos/queues/{id}` | 28 |
+| `DELETE /api/v1/ratelimit/rules/{id}` | 04, 14 |
+| `DELETE /api/v1/responses/{id}` | 48 |
+| `DELETE /api/v1/routing/gateways/{id}` | 32, 53 |
+| `DELETE /api/v1/zones/policies/{id}` | 31 |
+| `DELETE /api/v1/zones/{id}` | 31 |
+| `GET /api/v1/agent/identity` | 35, 36 |
+| `GET /api/v1/agent/status` | 02, 08, 105, 130, 141, 30 |
+| `GET /api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 14, 142, 150, 155, 17, 19, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
+| `GET /api/v1/alerts/stream` | 34 |
+| `GET /api/v1/alerts/{id}` | 34 |
+| `GET /api/v1/aliases/status` | 16 |
+| `GET /api/v1/audit/logs` | 04, 48, 56 |
+| `GET /api/v1/audit/rules/{id}/history` | 04 |
+| `GET /api/v1/captures` | 142, 49 |
+| `GET /api/v1/config` | 16, 23, 25 |
+| `GET /api/v1/conntrack/connections` | 107, 18 |
+| `GET /api/v1/conntrack/events` | 18 |
+| `GET /api/v1/conntrack/status` | 16, 18, 21, 65 |
+| `GET /api/v1/crypto/posture` | 58, 86 |
+| `GET /api/v1/ddos/attacks` | 15, 22 |
+| `GET /api/v1/ddos/attacks/history` | 15, 22 |
+| `GET /api/v1/ddos/policies` | 15, 22, 30 |
+| `GET /api/v1/ddos/status` | 15, 22, 30 |
+| `GET /api/v1/dlp/patterns` | 16, 27 |
+| `GET /api/v1/dlp/scope` | 87 |
+| `GET /api/v1/dlp/status` | 16, 27 |
+| `GET /api/v1/dns/blocklist` | 04, 19, 33 |
+| `GET /api/v1/dns/cache` | 04, 19 |
+| `GET /api/v1/dns/stats` | 04, 19 |
+| `GET /api/v1/dns/status` | 33 |
+| `GET /api/v1/domains/reputation` | 04 |
+| `GET /api/v1/ebpf/coverage` | 87 |
+| `GET /api/v1/ebpf/drop-reasons` | 90 |
+| `GET /api/v1/ebpf/foreign-programs` | 88 |
+| `GET /api/v1/ebpf/guests` | 73, 74, 75 |
+| `GET /api/v1/ebpf/hidden-ports` | 79 |
+| `GET /api/v1/ebpf/hidden-processes` | 79 |
+| `GET /api/v1/ebpf/kernel-features` | 100, 149, 150, 152, 153, 154, 27, 62, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `GET /api/v1/ebpf/raw-sockets` | 88 |
+| `GET /api/v1/ebpf/status` | 06, 16, 62, 68 |
+| `GET /api/v1/ebpf/uprobes` | 27, 60 |
+| `GET /api/v1/exposure/listeners` | 90 |
+| `GET /api/v1/fingerprints/summary` | 41 |
+| `GET /api/v1/firewall/l7-rules` | 04, 29, 30, 56 |
+| `GET /api/v1/firewall/rules` | 03, 07, 105, 11, 143, 26, 30, 55, 76 |
+| `GET /api/v1/firewall/shadow` | 76 |
+| `GET /api/v1/firewall/workload/fqdn` | 92 |
+| `GET /api/v1/firewall/workload/labels` | 92, 98 |
+| `GET /api/v1/firewall/workload/reach` | 70 |
+| `GET /api/v1/firewall/workload/rules` | 138, 70, 72, 92, 95, 98 |
+| `GET /api/v1/flows/export` | 141, 90 |
+| `GET /api/v1/geoip/lookup` | 30 |
+| `GET /api/v1/geoip/status` | 30 |
+| `GET /api/v1/host-rules` | 135, 78 |
+| `GET /api/v1/host-rules/intents` | 78 |
+| `GET /api/v1/host-rules/mass-encryption` | 100, 104, 81, 96 |
+| `GET /api/v1/host-rules/write-refusal` | 83, 84 |
+| `GET /api/v1/ids/rules` | 102, 12, 16, 55, 59 |
+| `GET /api/v1/ids/status` | 12, 16, 33 |
+| `GET /api/v1/ids/suricata/report` | 102, 155 |
+| `GET /api/v1/ips/blacklist` | 04, 13, 39, 55, 59 |
+| `GET /api/v1/ips/domain-blocks` | 13, 16 |
+| `GET /api/v1/ips/rules` | 04, 13, 136, 59 |
+| `GET /api/v1/lb/services` | 16, 20 |
+| `GET /api/v1/lb/services/{id}` | 16, 20 |
+| `GET /api/v1/lb/status` | 16, 20 |
+| `GET /api/v1/lb/vips` | 37 |
+| `GET /api/v1/lb/vips/bgp` | 37 |
+| `GET /api/v1/learning/sessions` | 87 |
+| `GET /api/v1/learning/sessions/{id}` | 138, 87 |
+| `GET /api/v1/learning/sessions/{id}/edges` | 87 |
+| `GET /api/v1/learning/sessions/{id}/policy` | 87 |
+| `GET /api/v1/learning/sessions/{id}/segmentation` | 138, 87 |
+| `GET /api/v1/mitre/coverage` | 16, 87 |
+| `GET /api/v1/nat/nptv6` | 21, 50 |
+| `GET /api/v1/nat/rules` | 16, 21 |
+| `GET /api/v1/nat/status` | 16, 21 |
+| `GET /api/v1/processes` | 151, 67 |
+| `GET /api/v1/processes/{pid}` | 154, 72 |
+| `GET /api/v1/qos/classifiers` | 28 |
+| `GET /api/v1/qos/pipes` | 28 |
+| `GET /api/v1/qos/queues` | 28 |
+| `GET /api/v1/qos/shaping` | 103 |
+| `GET /api/v1/qos/status` | 28 |
+| `GET /api/v1/ratelimit/rules` | 04, 14, 55 |
+| `GET /api/v1/responses` | 48 |
+| `GET /api/v1/routing/gateways` | 16, 32, 53 |
+| `GET /api/v1/routing/routes` | 32 |
+| `GET /api/v1/routing/status` | 16, 32, 53 |
+| `GET /api/v1/services/graph` | 90 |
+| `GET /api/v1/surface` | 80 |
+| `GET /api/v1/surface/listening` | 80 |
+| `GET /api/v1/surface/loaded` | 80 |
+| `GET /api/v1/surface/packages` | 80 |
+| `GET /api/v1/threatintel/feeds` | 04, 17, 33 |
+| `GET /api/v1/threatintel/iocs` | 04, 17, 33 |
+| `GET /api/v1/threatintel/status` | 04, 17, 33 |
+| `GET /api/v1/threatintel/urls` | 33 |
+| `GET /api/v1/tls/handshakes` | 89 |
+| `GET /api/v1/tls/posture` | 89 |
+| `GET /api/v1/tls/status` | 58 |
+| `GET /api/v1/zones` | 31 |
+| `GET /api/v1/zones/policies` | 31 |
+| `GET /api/v1/zones/status` | 31 |
+| `GET /healthz` | 01, 02, 07, 08, 09, 105, 11, 132, 137, 23, 26, 43, 52, 55, 56, 58, 68, 91, 99 |
+| `GET /metrics` | 02, 07, 10, 105, 19, 21, 22, 38, 40, 52, 64, 66, 67 |
+| `GET /readyz` | 01, 02, 06, 07, 106, 130, 132, 140, 141, 151, 152, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
+| `PATCH /api/v1/alerts/{id}/triage` | 25 |
+| `PATCH /api/v1/ips/rules/{id}` | 13 |
+| `POST /api/v1/agent/stop` | _MISSING_ |
+| `POST /api/v1/alerts/triage` | 25 |
+| `POST /api/v1/alerts/{id}/false-positive` | 25 |
+| `POST /api/v1/captures/manual` | 49, 62 |
+| `POST /api/v1/config/reload` | 150, 16, 17, 35, 52, 99 |
+| `POST /api/v1/conntrack/flush` | 18, 62 |
+| `POST /api/v1/ddos/policies` | 15, 22 |
+| `POST /api/v1/domains/blocklist` | 04, 19 |
+| `POST /api/v1/firewall/l7-rules` | 04, 29, 56 |
+| `POST /api/v1/firewall/rules` | 03, 07, 105, 11, 28, 47, 76 |
+| `POST /api/v1/ips/blacklist` | 55 |
+| `POST /api/v1/lb/services` | 139, 16, 20, 44 |
+| `POST /api/v1/lb/vips` | 37 |
+| `POST /api/v1/lb/vips/grant` | 37 |
+| `POST /api/v1/learning/sessions` | 138, 87 |
+| `POST /api/v1/learning/sessions/{id}/stop` | 138, 87 |
+| `POST /api/v1/nat/nptv6` | 21, 50 |
+| `POST /api/v1/netpol/replay` | 87 |
+| `POST /api/v1/qos/classifiers` | 28 |
+| `POST /api/v1/qos/pipes` | 28 |
+| `POST /api/v1/qos/queues` | 28 |
+| `POST /api/v1/ratelimit/rules` | 04, 14, 55 |
+| `POST /api/v1/responses/manual` | 48 |
+| `POST /api/v1/routing/gateways` | 32, 53 |
+| `POST /api/v1/threatintel/feeds/refresh` | 33 |
+| `POST /api/v1/trace` | 87 |
+| `POST /api/v1/zones` | 31 |
+| `POST /api/v1/zones/policies` | 31 |
+| `PUT /api/v1/aliases/{id}/content` | 07, 16 |
+| `PUT /api/v1/config/{section}` | 16, 27 |
 
 <!-- coverage:end -->
 

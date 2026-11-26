@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Coverage audit gate - enumerates the agent's observable surface
 # (eBPF programs, CLI subcommands, domain modules, the capabilities of
-# capabilities.json and the paths of openapi.json) and verifies that
+# capabilities.json and the operations of openapi.json, method and path) and verifies that
 # every entry has a row in tests/integration/coverage-matrix.yaml, or for
-# a path, a suite requesting it and reading the answer. The last line printed
+# an operation, a suite requesting it with its method and reading the answer. The last line printed
 # is the routes summary the meta runner scripts/audit-surfaces.sh collects.
 #
 # Modes:
@@ -127,9 +127,20 @@ if capabilities_path.exists():
     disk_capabilities = [c["id"] for c in catalogue.get("capabilities", [])]
 
 openapi_path = repo_root / "openapi.json"
+# A route is an operation: the method and the path together, so a suite that
+# requests a path with another method covers nothing.
+HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 disk_routes: list[str] = []
 if openapi_path.exists():
-    disk_routes = sorted(json.loads(openapi_path.read_text()).get("paths", {}).keys())
+    disk_routes = sorted(
+        f"{method.upper()} {path}"
+        for path, item in json.loads(openapi_path.read_text()).get("paths", {}).items()
+        for method in item
+        if method in HTTP_METHODS
+    )
+# Fewer operations than this means the scan no longer reads openapi.json the
+# way it is written: lower it only with the change that removes an operation.
+ROUTES_FLOOR = 151
 
 # ── Index matrix rows by kind ───────────────────────────────────────
 by_kind: dict[str, dict[str, dict]] = {}
@@ -239,7 +250,22 @@ for row in rows:
 # test that reads nothing back, is not covered. Tests whose only check is a
 # status code are listed after the audit, for a reader to judge.
 def uncommented(text: str) -> str:
-    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    """The text without full-line comments, each command continued with a
+    trailing backslash joined into one line, so the method a request is sent
+    with sits on the line that names its path."""
+    out: list[str] = []
+    pending = ""
+    for l in text.splitlines():
+        if l.lstrip().startswith("#") and not pending:
+            continue
+        if l.rstrip().endswith("\\"):
+            pending += l.rstrip()[:-1] + " "
+            continue
+        out.append(pending + l)
+        pending = ""
+    if pending:
+        out.append(pending)
+    return "\n".join(out)
 
 func_def_re = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{?\s*$")
 lib_funcs: dict[str, str] = {}
@@ -261,10 +287,47 @@ if lib_dir.exists():
 def word_re(name: str) -> re.Pattern:
     return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
 
-def route_pattern(path: str) -> re.Pattern:
-    rx = re.escape(path)
-    rx = re.sub(r"\\\{[^}]*\\\}", r"[^/\\s\"']+", rx)
-    return re.compile(rx + r"(?![A-Za-z0-9_/-])")
+# The method a line requests with: the helper it calls (`api_get`,
+# `api_status`, `api_post`, ...), else a `curl` with `-X`/`--request`, or with
+# a body and so a POST, or neither and so a GET. A line naming a path with no
+# request on it requests nothing.
+HELPER_METHOD = re.compile(r"(?<![A-Za-z0-9_])api_(get|status|post|put|patch|delete)(?![A-Za-z0-9_])")
+EXPLICIT_METHOD = re.compile(r"(?:-X\s*|--request[\s=]+)[\"']?([A-Z]+)\b")
+CURL = re.compile(r"(?<![A-Za-z0-9_-])curl(?![A-Za-z0-9_-])")
+CURL_BODY = re.compile(r"\s(?:-d|--data(?:-[a-z]+)?|--json|-F|--form)[\s=]")
+
+def method_of(line: str) -> str | None:
+    explicit = EXPLICIT_METHOD.search(line)
+    if explicit and (HELPER_METHOD.search(line) or CURL.search(line)):
+        return explicit.group(1)
+    helper = HELPER_METHOD.search(line)
+    if helper:
+        return "GET" if helper.group(1) == "status" else helper.group(1).upper()
+    if CURL.search(line):
+        return "POST" if CURL_BODY.search(line) else "GET"
+    return None
+
+class RoutePattern:
+    """An operation as a line pattern: the path, with `{param}` read as one
+    segment, on a line that requests it with the operation's method."""
+
+    def __init__(self, route: str):
+        self.method, path = route.split(" ", 1)
+        rx = re.escape(path)
+        rx = re.sub(r"\\\{[^}]*\\\}", r"[^/\\s\"']+", rx)
+        self.path = re.compile(rx + r"(?![A-Za-z0-9_/-])")
+
+    def search(self, line: str):
+        found = self.path.search(line)
+        if found and method_of(line) == self.method:
+            return found
+        return None
+
+    def names(self, text: str) -> bool:
+        return bool(self.path.search(text))
+
+def route_pattern(route: str) -> RoutePattern:
+    return RoutePattern(route)
 
 TEST_START = re.compile(r"^@test\s+[\"'](.*)[\"']\s*\{\s*$")
 ASSERTION = re.compile(
@@ -369,14 +432,14 @@ def read_back(path: str) -> tuple[list[str], list[str]]:
     the tests that request it and read nothing back."""
     rx = route_pattern(path)
     asserted, silent = [], []
-    in_lib = bool(rx.search(lib_text))
+    in_lib = rx.names(lib_text)
     lib_requesting: dict[str, bool] = {}
     lib_reading: set[str] = set()
     if in_lib:
         settle(lib_lines, rx, lib_checking, lib_requesting, lib_reading)
     for suite, (blocks, local) in parsed_suites.items():
         # Nothing names the path: no line of this suite can request it.
-        if not in_lib and not rx.search(suite_raw[suite]):
+        if not in_lib and not rx.names(suite_raw[suite]):
             continue
         # The library alone answers part of the question; a suite that
         # shadows none of its functions starts from that answer.
@@ -446,7 +509,7 @@ for path in disk_routes:
         else:
             routes_by_suite += 1
 for path in sorted(set(route_entries) - set(disk_routes)):
-    stale_route_entries.append(f"  - {path} is not a path of openapi.json")
+    stale_route_entries.append(f"  - {path} is not an operation of openapi.json")
 
 # ── Validate suite_profiles map ─────────────────────────────────────
 suite_profiles_raw = matrix.get("suite_profiles") or {}
@@ -503,7 +566,7 @@ print(f"  eBPF programs on disk : {len(disk_ebpf)}")
 print(f"  CLI subcommands       : {len(disk_cli)}")
 print(f"  Domain modules        : {len(disk_domains)} (skipped: {sorted(skip_domains)})")
 print(f"  Capabilities          : {len(disk_capabilities)}")
-print(f"  API paths             : {len(disk_routes)}")
+print(f"  API operations        : {len(disk_routes)}")
 print(f"  Matrix rows total     : {len(rows)}")
 print(f"  Known suites on disk  : {len(known_suites)}")
 
@@ -536,6 +599,9 @@ if uncovered_routes:
 if stale_route_entries:
     banner("STALE `routes` lines")
     print("\n".join(stale_route_entries))
+    failed = True
+if len(disk_routes) < ROUTES_FLOOR:
+    banner(f"{len(disk_routes)} operations read from openapi.json, below the floor of {ROUTES_FLOOR}")
     failed = True
 if not isinstance(routes_gap_ceiling, int):
     banner("`routes_gap_ceiling` is missing from coverage-matrix.yaml")
@@ -604,8 +670,8 @@ def render_table(kind: str, header: str, disk: list[str]) -> str:
     return "\n".join(out)
 
 def render_routes() -> str:
-    out = [f"#### API paths ({len(disk_routes)})", ""]
-    out.append("| Path | Suites |")
+    out = [f"#### API operations ({len(disk_routes)})", ""]
+    out.append("| Operation | Suites |")
     out.append("|---|---|")
     for path in disk_routes:
         entry = route_entries.get(path) or {}
