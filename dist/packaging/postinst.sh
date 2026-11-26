@@ -64,7 +64,7 @@ fi
 # unit if it is still running to see it.
 stop_agent() {
   systemctl is-active --quiet ebpfsentinel.service || return 0
-  if ! /usr/local/bin/ebpfsentinel-agent stop --reason "$1" >/dev/null 2>&1; then
+  if ! /usr/bin/ebpfsentinel-agent stop --reason "$1" >/dev/null 2>&1; then
     mkdir -p /run/systemd/system/ebpfsentinel.service.d /run/systemd/system/ebpfsentinel-warden.service.d
     printf '[Unit]\nRefuseManualStop=no\n' > /run/systemd/system/ebpfsentinel.service.d/zz-allow-stop.conf
     printf '[Unit]\nRefuseManualStop=no\n' > /run/systemd/system/ebpfsentinel-warden.service.d/zz-allow-stop.conf

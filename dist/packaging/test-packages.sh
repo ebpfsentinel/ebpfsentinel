@@ -125,6 +125,64 @@ kept_operator_config() {
   grep -q '^# operator rule kept across upgrades' /etc/ebpfsentinel/config.yaml
 }
 
+# An upgrade stops a running agent through the agent's own command, so the stop
+# is recorded under its reason rather than forced through a runtime drop-in. No
+# agent runs in a container: a stand-in answers the stop route on the agent's
+# port and keeps the request it was sent, and systemctl reports the agent
+# active until that request arrives. The binary the scriptlet calls is the
+# packaged one, so a dynamically linked development build cannot take part.
+stand_in_agent_up() {
+  [ "$(cat /pkgs/linkage)" = static ] || return 1
+  cat >/tmp/stand-in.py <<'PY'
+import http.server, json
+class Agent(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open("/tmp/stop-request", "w") as f:
+            f.write(self.path + " " + body.decode() + "\n")
+        out = json.dumps({"status": "stopping", "exit_code": 79}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", 8080), Agent).serve_forever()
+PY
+  rm -f /tmp/stop-request
+  python3 /tmp/stand-in.py &
+  STAND_IN=$!
+  local _
+  for _ in $(seq 1 50); do
+    (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && break
+    sleep 0.1
+  done
+  mv /usr/bin/systemctl /usr/bin/systemctl.real
+  cat >/usr/bin/systemctl <<'SHIM'
+#!/bin/sh
+if [ "${1:-}" = is-active ] && [ "${2:-}" = --quiet ] && [ "${3:-}" = ebpfsentinel.service ]; then
+  [ ! -e /tmp/stop-request ]
+  exit
+fi
+exec /usr/bin/systemctl.real "$@"
+SHIM
+  chmod 0755 /usr/bin/systemctl
+}
+
+stand_in_agent_down() {
+  kill "${STAND_IN}" 2>/dev/null || true
+  wait "${STAND_IN}" 2>/dev/null || true
+  mv /usr/bin/systemctl.real /usr/bin/systemctl
+}
+
+upgrade_stop_was_recorded() {
+  check "the upgrade stopped the agent through its own command" [ -f /tmp/stop-request ]
+  check "the stop is recorded under the reason \"package upgrade\"" \
+    grep -q '^/api/v1/agent/stop .*"reason":"package upgrade"' /tmp/stop-request
+  check "no runtime drop-in forced the stop" [ ! -e /run/systemd/system/ebpfsentinel.service.d ]
+}
+
 refused_below_the_floor() {
   local install_cmd="$1"
   local message="${2:-6.18 or newer is required, this host runs 6.17}"
@@ -181,9 +239,16 @@ inside_deb() {
   check "it leaves the packaged configuration where dpkg put it" [ -f /etc/ebpfsentinel/config.yaml ]
   check "it leaves the state for the purge to remove" [ -d /var/lib/ebpfsentinel/auth ]
 
-  echo "# deb: upgrade over an operator's configuration"
+  echo "# deb: upgrade over an operator's configuration, the agent running"
   operator_configures
-  "${apt[@]}" install --no-install-recommends "/pkgs/v2/ebpfsentinel_${V2}_amd64.deb" >/tmp/upgrade.log 2>&1 || { cat /tmp/upgrade.log; fail "apt-get upgrade"; return; }
+  "${apt[@]}" install --no-install-recommends python3 >/dev/null
+  local stand_in=no
+  if stand_in_agent_up; then stand_in=yes; else echo "skip: the binaries are dynamically linked, the upgrade's stop is not exercised"; fi
+  local upgraded=yes
+  "${apt[@]}" install --no-install-recommends "/pkgs/v2/ebpfsentinel_${V2}_amd64.deb" >/tmp/upgrade.log 2>&1 || { cat /tmp/upgrade.log; fail "apt-get upgrade"; upgraded=no; }
+  if [ "${stand_in}" = yes ]; then stand_in_agent_down; fi
+  if [ "${upgraded}" = no ]; then return; fi
+  if [ "${stand_in}" = yes ]; then upgrade_stop_was_recorded; fi
   check "dpkg reports ${V2}" [ "$(dpkg-query -W -f='${Version}' ebpfsentinel)" = "${V2}" ]
   check "the operator's configuration is kept" kept_operator_config
   check "the new reference is set beside it as .dpkg-dist" grep -q '^# reference changed in this release' /etc/ebpfsentinel/config.yaml.dpkg-dist
@@ -231,9 +296,16 @@ inside_rpm() {
   check "it says what removes the state after the erase" \
     sh -c 'printf "%s" "$1" | grep -q "rm -rf /etc/ebpfsentinel /var/lib/ebpfsentinel"' _ "${out}"
 
-  echo "# rpm: upgrade over an operator's configuration"
+  echo "# rpm: upgrade over an operator's configuration, the agent running"
   operator_configures
-  "${dnf[@]}" install "/pkgs/v2/ebpfsentinel-${V2}-1.x86_64.rpm" >/tmp/upgrade.log 2>&1 || { cat /tmp/upgrade.log; fail "dnf upgrade"; return; }
+  "${dnf[@]}" install python3 >/dev/null
+  local stand_in=no
+  if stand_in_agent_up; then stand_in=yes; else echo "skip: the binaries are dynamically linked, the upgrade's stop is not exercised"; fi
+  local upgraded=yes
+  "${dnf[@]}" install "/pkgs/v2/ebpfsentinel-${V2}-1.x86_64.rpm" >/tmp/upgrade.log 2>&1 || { cat /tmp/upgrade.log; fail "dnf upgrade"; upgraded=no; }
+  if [ "${stand_in}" = yes ]; then stand_in_agent_down; fi
+  if [ "${upgraded}" = no ]; then return; fi
+  if [ "${stand_in}" = yes ]; then upgrade_stop_was_recorded; fi
   check "rpm reports ${V2}" [ "$(rpm -q --qf '%{VERSION}' ebpfsentinel)" = "${V2}" ]
   check "the operator's configuration is kept" kept_operator_config
   check "the new reference is set beside it as .rpmnew" grep -q '^# reference changed in this release' /etc/ebpfsentinel/config.yaml.rpmnew

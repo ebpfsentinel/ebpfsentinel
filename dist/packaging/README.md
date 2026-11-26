@@ -47,7 +47,9 @@ directory. A second copy of each unit would be a second thing to keep in
 step; a rewrite that silently stopped matching would be worse than either, so
 the script fails when a unit still names `/usr/local` afterwards and
 `crates/xtask/tests/tree_hygiene.rs` fails when a unit names a path the
-rewrite table does not carry.
+rewrite table does not carry. The maintainer scripts are the opposite case:
+written for the packages only, they name `/usr/bin` and go in as they are,
+and the build fails when one names a binary under `/usr/local/bin`.
 
 ## What the maintainer scripts do
 

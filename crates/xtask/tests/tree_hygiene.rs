@@ -364,6 +364,27 @@ fn the_rewrite_table_names_no_path_the_units_dropped() {
     );
 }
 
+#[test]
+fn the_maintainer_scripts_call_the_binaries_where_the_packages_install_them() {
+    let root = workspace_root();
+    let mut wrong = Vec::new();
+    for script in ["preinst.sh", "postinst.sh", "prerm.sh", "postrm.sh"] {
+        let text = read_text(&root.join("dist/packaging").join(script))
+            .expect("the maintainer script is readable");
+        for path in usr_local_paths(&text) {
+            if path.starts_with("/usr/local/bin/") {
+                wrong.push(format!("{script}: {path}"));
+            }
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the maintainer scripts go into the packages unrewritten, and the packages install \
+         the binaries under /usr/bin: {wrong:#?}"
+    );
+}
+
 /// Crates that would put an implementation of something the agent only reads
 /// or probes into this tree: a binding to the crypto libraries the uprobes
 /// attach to, an SQLite engine where the rpm database is walked as a file

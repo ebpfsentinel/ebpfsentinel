@@ -106,6 +106,16 @@ for unit in ebpfsentinel.service ebpfsentinel-warden.service; do
   fi
 done
 
+# The maintainer scripts are written for the package and go in unrewritten:
+# a binary they call at /usr/local/bin is not there, and the call fails on
+# every host into whatever fallback the script carries.
+for script in preinst.sh postinst.sh prerm.sh postrm.sh; do
+  if grep -n '/usr/local/bin/' "${PACKAGING_DIR}/${script}" >&2; then
+    echo "${script} calls a binary at /usr/local/bin; the packages install it under /usr/bin" >&2
+    exit 1
+  fi
+done
+
 # nfpm expands the environment in a handful of fields (version, arch) and
 # not in `contents` or `scripts`, where a literal ${STAGE} becomes a glob that
 # matches nothing. The four names are substituted here instead, into a copy,
