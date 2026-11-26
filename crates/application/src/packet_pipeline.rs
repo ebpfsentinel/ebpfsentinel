@@ -115,6 +115,10 @@ pub struct EventDispatcher {
     l7_observers: Vec<Arc<dyn ports::secondary::l7_observer_port::L7Observer>>,
     /// Extensions handed every DNS query with the workload that sent it.
     dns_query_observers: Vec<Arc<dyn ports::secondary::dns_query_observer_port::DnsQueryObserver>>,
+    /// Extensions handed every encrypted DNS connection once its handshake
+    /// has been recognised.
+    encrypted_dns_observers:
+        Vec<Arc<dyn ports::secondary::encrypted_dns_observer_port::EncryptedDnsObserver>>,
     /// Extensions handed every TLS plaintext buffer the library probes read.
     tls_plaintext_observers:
         Vec<Arc<dyn ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver>>,
@@ -184,6 +188,7 @@ impl EventDispatcher {
             workloads: crate::workload_resolver::WorkloadResolver::new(),
             l7_observers: Vec::new(),
             dns_query_observers: Vec::new(),
+            encrypted_dns_observers: Vec::new(),
             tls_plaintext_observers: Vec::new(),
             packet_observers: Vec::new(),
             l7_flow_refusals: None,
@@ -284,6 +289,23 @@ impl EventDispatcher {
     ) -> Self {
         tracing::info!(observer = observer.name(), "DNS query observer registered");
         self.dns_query_observers.push(observer);
+        self
+    }
+
+    /// Hand every encrypted DNS connection the detector recognises to
+    /// `observer`, with its five-tuple, the server name its `ClientHello`
+    /// carried and the workload that opened it. The pipeline's own detection
+    /// alert is raised either way; what the observer decides is its own.
+    #[must_use]
+    pub fn with_encrypted_dns_observer(
+        mut self,
+        observer: Arc<dyn ports::secondary::encrypted_dns_observer_port::EncryptedDnsObserver>,
+    ) -> Self {
+        tracing::info!(
+            observer = observer.name(),
+            "Encrypted DNS observer registered"
+        );
+        self.encrypted_dns_observers.push(observer);
         self
     }
 
@@ -1890,6 +1912,7 @@ impl EventDispatcher {
             header.src_addr,
             header.dst_addr,
         ) {
+            let protocol = detection.protocol;
             let proto_label = match detection.protocol {
                 domain::dns::encrypted_dns::EncryptedDnsProtocol::Doh => "doh",
                 domain::dns::encrypted_dns::EncryptedDnsProtocol::Dot => "dot",
@@ -1917,6 +1940,48 @@ impl EventDispatcher {
                 container: self.resolve_container_by_id(header.cgroup_id),
             };
             self.send_alert(AlertEvent::Dns(dns_alert));
+            self.notify_encrypted_dns_observers(header, protocol, tls_hello.sni.as_deref());
+        }
+    }
+
+    /// Hand one recognised encrypted DNS connection to every observer,
+    /// naming the workload that opened it once rather than once per observer.
+    fn notify_encrypted_dns_observers(
+        &self,
+        header: &PacketEvent,
+        protocol: domain::dns::encrypted_dns::EncryptedDnsProtocol,
+        server_name: Option<&str>,
+    ) {
+        use ports::secondary::encrypted_dns_observer_port::EncryptedDnsConnection;
+
+        if self.encrypted_dns_observers.is_empty() {
+            return;
+        }
+        let ipv6 = header.is_ipv6();
+        let client = crate::addr_to_ip(header.src_addr, ipv6);
+        let server = crate::addr_to_ip(header.dst_addr, ipv6);
+        let workload = self.workloads.by_originated_flow(
+            &ports::secondary::socket_identity_port::FlowEndpoints {
+                local_addr: client,
+                remote_addr: server,
+                local_port: header.src_port,
+                remote_port: header.dst_port,
+                protocol: header.protocol,
+            },
+        );
+        let connection = EncryptedDnsConnection {
+            timestamp_ns: header.timestamp_ns,
+            client,
+            server,
+            client_port: header.src_port,
+            server_port: header.dst_port,
+            ip_protocol: header.protocol,
+            protocol,
+            server_name,
+            workload: workload.as_ref(),
+        };
+        for observer in &self.encrypted_dns_observers {
+            observer.observe(&connection);
         }
     }
 
@@ -2671,6 +2736,93 @@ mod tests {
             *metrics.last_encrypted_dns.lock().unwrap(),
             ("dot".to_string(), "dot.example".to_string())
         );
+    }
+
+    /// Protocol, server name, server port and resolved workload of one
+    /// encrypted DNS connection.
+    type SeenResolver = (
+        domain::dns::encrypted_dns::EncryptedDnsProtocol,
+        Option<String>,
+        u16,
+        Option<u32>,
+    );
+
+    /// Keeps every encrypted DNS connection it is handed.
+    #[derive(Default)]
+    struct ResolverWatch {
+        seen: Mutex<Vec<SeenResolver>>,
+    }
+
+    impl ports::secondary::encrypted_dns_observer_port::EncryptedDnsObserver for ResolverWatch {
+        fn observe(
+            &self,
+            connection: &ports::secondary::encrypted_dns_observer_port::EncryptedDnsConnection<'_>,
+        ) {
+            self.seen.lock().unwrap().push((
+                connection.protocol,
+                connection.server_name.map(str::to_string),
+                connection.server_port,
+                connection.workload.map(|w| w.pid),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recognised_resolver_handshake_reaches_the_encrypted_dns_observers() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(ResolverWatch::default());
+        let workloads = crate::workload_resolver::WorkloadResolver::new()
+            .with_sockets(Box::new(OwnedBy(4_242)));
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_workload_resolver(workloads)
+            .with_doh_resolvers(&["corp-doh.test".to_string()])
+            .with_encrypted_dns_observer(Arc::clone(&observer) as _);
+
+        let mut dot = make_event(EVENT_TYPE_L7, 0);
+        dot.dst_port = 853;
+        dispatcher.process_l7_event(dot, None, &build_tls_client_hello("dot.example"));
+        let mut doh = make_event(EVENT_TYPE_L7, 0);
+        doh.dst_port = 443;
+        dispatcher.process_l7_event(doh, None, &build_tls_client_hello("corp-doh.test"));
+
+        let seen = observer.seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &[
+                (
+                    domain::dns::encrypted_dns::EncryptedDnsProtocol::Dot,
+                    Some("dot.example".to_string()),
+                    853,
+                    Some(4_242)
+                ),
+                (
+                    domain::dns::encrypted_dns::EncryptedDnsProtocol::Doh,
+                    Some("corp-doh.test".to_string()),
+                    443,
+                    Some(4_242)
+                ),
+            ]
+        );
+        // The detection alert is raised whatever the observers decide.
+        assert!(matches!(alert_rx.try_recv(), Ok(AlertEvent::Dns(_))));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_handshake_reaches_no_encrypted_dns_observer() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(ResolverWatch::default());
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_encrypted_dns_observer(Arc::clone(&observer) as _);
+
+        let mut header = make_event(EVENT_TYPE_L7, 0);
+        header.dst_port = 443;
+        dispatcher.process_l7_event(header, None, &build_tls_client_hello("www.example.org"));
+
+        assert!(observer.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

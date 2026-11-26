@@ -24,6 +24,7 @@ pub mod domain_reputation_port;
 pub mod drop_counter_port;
 pub mod ebpf_map_port;
 pub mod ebpf_map_write_port;
+pub mod encrypted_dns_observer_port;
 pub mod executable_digest_port;
 pub mod feed_source;
 pub mod file_watch_port;
