@@ -2238,6 +2238,11 @@ pub async fn run(
     let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
     let mut qos_ok = false;
     let mut vip_announcer_ok = false;
+    // The two tail-call targets: loaded beside their parent and reached only
+    // through its program array, so neither has an attach of its own to
+    // answer for it, and a parent in force says nothing about whether its
+    // REJECT or SYN cookie path is.
+    let (mut reject_ok, mut syncookie_ok) = (false, false);
     let mut attribution_ok = false;
     // One resolver, shared by everything that names a workload: the alert
     // pipeline, the conntrack listing and the reload manager all hold a
@@ -2474,6 +2479,7 @@ pub async fn run(
                                 sc_loader,
                                 readers.child_token(),
                             ));
+                            syncookie_ok = true;
                             info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
                         }
                         Err(e) => {
@@ -2580,6 +2586,7 @@ pub async fn run(
             match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
                 Ok(reject_loader) => {
                     managed.push(("xdp_firewall_reject", reject_loader, readers.child_token()));
+                    reject_ok = true;
                     info!("XDP tail-call: firewall → reject wired (slot 1)");
                 }
                 Err(e) => {
@@ -3659,6 +3666,24 @@ pub async fn run(
         let mut status = ebpf_program_status.write().await;
         status.insert("xdp-firewall".to_string(), fw_ok);
         status.insert("xdp-ratelimit".to_string(), rl_ok);
+        // A tail-call target is answered for only where its parent was asked
+        // for: a firewall nobody turned on has no REJECT path to be missing,
+        // so the gauge drops the series while the map, which answers for
+        // every program the build has, says false.
+        for (program, parent, loaded) in [
+            ("xdp_firewall_reject", fw_ok, reject_ok),
+            ("xdp_ratelimit_syncookie", rl_ok, syncookie_ok),
+        ] {
+            if parent {
+                metrics.set_ebpf_program_status(program, loaded);
+            } else {
+                metrics.clear_ebpf_program_status(program);
+            }
+            status.insert(
+                adapters::ebpf::published_program_name(program),
+                parent && loaded,
+            );
+        }
         status.insert("tc-ids".to_string(), ids_ok);
         status.insert("tc-threatintel".to_string(), ti_ok);
         status.insert("tc-dns".to_string(), dns_ok);
@@ -3703,6 +3728,18 @@ pub async fn run(
         status.insert(
             "lsm-tamper-guard".to_string(),
             adapters::ebpf::tamper_guard::status().protected,
+        );
+        // The guard on program loads is the warden's program, not this
+        // process's: its state is what the warden said when it handed over the
+        // token, and an agent running without a warden has no guard to report.
+        let load_guard = load_guard_attached();
+        match load_guard {
+            None => metrics.clear_ebpf_program_status("lsm_bpf_load_guard"),
+            Some(attached) => metrics.set_ebpf_program_status("lsm_bpf_load_guard", attached),
+        }
+        status.insert(
+            "lsm-bpf-load-guard".to_string(),
+            load_guard.unwrap_or(false),
         );
         status.insert(
             "cgroup-workload-firewall".to_string(),
@@ -9175,6 +9212,17 @@ pub fn install_signed_loaders(program_dir: &Path) {
         }
     }
     log_load_guard(&ebpfsentinel_warden::load_guard::report_from_env());
+}
+
+/// Whether the warden's guard on program loads is attached, as the warden
+/// said when it handed the token over; `None` where no warden reported one,
+/// which is an agent with no guard to answer for rather than a guard missing.
+#[must_use]
+pub fn load_guard_attached() -> Option<bool> {
+    match ebpfsentinel_warden::load_guard::report_from_env() {
+        domain::prog_signing::LoadGuardReport::NotReported => None,
+        report => Some(report == domain::prog_signing::LoadGuardReport::Attached),
+    }
 }
 
 /// Say whether the warden's guard on program loads holds this agent's loads

@@ -1204,18 +1204,23 @@ impl EbpfProgramManager {
                 self.tenant_subnet.add_v6_map(loader.ebpf_mut());
 
                 // Load reject helper as tail-call target (best-effort)
-                if let Ok(reject_loader) =
-                    startup::try_load_xdp_firewall_reject(&self.ebpf_dir, &mut loader)
-                {
-                    self.programs.insert(
-                        "xdp_firewall_reject".to_string(),
-                        ProgramHandle {
-                            name: "xdp_firewall_reject".to_string(),
-                            loader: reject_loader,
-                            reader_cancel: CancellationToken::new(),
-                            reader_handles: Vec::new(),
-                        },
-                    );
+                match startup::try_load_xdp_firewall_reject(&self.ebpf_dir, &mut loader) {
+                    Ok(reject_loader) => {
+                        self.programs.insert(
+                            "xdp_firewall_reject".to_string(),
+                            ProgramHandle {
+                                name: "xdp_firewall_reject".to_string(),
+                                loader: reject_loader,
+                                reader_cancel: CancellationToken::new(),
+                                reader_handles: Vec::new(),
+                            },
+                        );
+                        self.set_status("xdp_firewall_reject", true).await;
+                    }
+                    Err(e) => {
+                        warn!("xdp-firewall-reject load failed (REJECT falls back to DROP): {e}");
+                        self.set_status("xdp_firewall_reject", false).await;
+                    }
                 }
 
                 self.wire_firewall_consumers(&mut loader).await;
@@ -1285,18 +1290,25 @@ impl EbpfProgramManager {
                 self.tenant_subnet.add_v6_map(loader.ebpf_mut());
 
                 // Load syncookie tail-call target (best-effort)
-                if let Ok(sc_loader) =
-                    startup::try_load_xdp_ratelimit_syncookie(&self.ebpf_dir, &mut loader)
-                {
-                    self.programs.insert(
-                        "xdp_ratelimit_syncookie".to_string(),
-                        ProgramHandle {
-                            name: "xdp_ratelimit_syncookie".to_string(),
-                            loader: sc_loader,
-                            reader_cancel: CancellationToken::new(),
-                            reader_handles: Vec::new(),
-                        },
-                    );
+                match startup::try_load_xdp_ratelimit_syncookie(&self.ebpf_dir, &mut loader) {
+                    Ok(sc_loader) => {
+                        self.programs.insert(
+                            "xdp_ratelimit_syncookie".to_string(),
+                            ProgramHandle {
+                                name: "xdp_ratelimit_syncookie".to_string(),
+                                loader: sc_loader,
+                                reader_cancel: CancellationToken::new(),
+                                reader_handles: Vec::new(),
+                            },
+                        );
+                        self.set_status("xdp_ratelimit_syncookie", true).await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}"
+                        );
+                        self.set_status("xdp_ratelimit_syncookie", false).await;
+                    }
                 }
 
                 self.set_status("xdp_ratelimit", true).await;
@@ -1371,6 +1383,7 @@ impl EbpfProgramManager {
         match name {
             "xdp_firewall" => {
                 self.programs.remove("xdp_firewall_reject");
+                self.clear_status("xdp_firewall_reject").await;
                 if let Some(handle) = self.programs.remove("xdp_firewall") {
                     handle.reader_cancel.cancel();
                     for jh in &handle.reader_handles {
@@ -1386,6 +1399,7 @@ impl EbpfProgramManager {
             }
             "xdp_ratelimit" => {
                 self.programs.remove("xdp_ratelimit_syncookie");
+                self.clear_status("xdp_ratelimit_syncookie").await;
                 if let Some(handle) = self.programs.remove("xdp_ratelimit") {
                     handle.reader_cancel.cancel();
                     for jh in &handle.reader_handles {

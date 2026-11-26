@@ -1131,6 +1131,23 @@ async fn wire_firewall_consumers(services: &ServiceHandles, loader: &mut EbpfLoa
         .set_alias_bindings(bindings);
 }
 
+/// A program with no attach of its own here (a tail-call target, or the
+/// warden's guard): answered for where something asked for it (`Some`, loaded
+/// or not) and cleared where nothing did (`None`), so a feature nobody turned
+/// on is not reported missing.
+fn publish_without_attach(
+    services: &ServiceHandles,
+    program_status: &mut std::collections::HashMap<String, bool>,
+    program: &str,
+    loaded: Option<bool>,
+) {
+    match loaded {
+        Some(loaded) => services.metrics.set_ebpf_program_status(program, loaded),
+        None => services.metrics.clear_ebpf_program_status(program),
+    }
+    program_status.insert(program.to_string(), loaded.unwrap_or(false));
+}
+
 /// Load and attach all eBPF programs, wiring map managers to services.
 ///
 /// Returns an [`EbpfLoadResult`] whose `state` field must be kept alive
@@ -1327,16 +1344,51 @@ pub async fn load_ebpf_programs(
                 tenant_ifindex_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(rl_loader.ebpf_mut());
+                // The SYN cookie path sits in the rate limiter's slot 0, and an
+                // empty slot sends every cookie-worthy SYN to DROP instead.
+                let syncookie_ok = match startup::try_load_xdp_ratelimit_syncookie(
+                    &ebpf_dir,
+                    &mut rl_loader,
+                ) {
+                    Ok(sc_loader) => {
+                        ebpf_state.add_loader(sc_loader);
+                        true
+                    }
+                    Err(e) => {
+                        warn!(
+                            "xdp-ratelimit-syncookie load failed (syncookie falls back to DROP): {e}"
+                        );
+                        false
+                    }
+                };
+                publish_without_attach(
+                    services,
+                    &mut program_status,
+                    "xdp_ratelimit_syncookie",
+                    Some(syncookie_ok),
+                );
                 ebpf_state.add_loader(rl_loader);
                 rl_reached
             }
             Err(e) => {
                 warn!("xdp-ratelimit load failed (degraded mode): {e}");
+                publish_without_attach(
+                    services,
+                    &mut program_status,
+                    "xdp_ratelimit_syncookie",
+                    Some(false),
+                );
                 false
             }
         }
     } else {
         services.metrics.clear_ebpf_program_status("xdp_ratelimit");
+        publish_without_attach(
+            services,
+            &mut program_status,
+            "xdp_ratelimit_syncookie",
+            None,
+        );
         false
     };
     program_status.insert("xdp_ratelimit".to_string(), rl_ok);
@@ -1355,6 +1407,32 @@ pub async fn load_ebpf_programs(
         .map(|loader| ebpf_state.add_loader(loader))
         .is_some();
     program_status.insert("xdp_vip_announcer".to_string(), vip_ok);
+    // REJECT answers from the firewall's slot 1; without it a reject rule
+    // drops silently, so the firewall being in force does not answer for it.
+    let reject_ok =
+        fw_loader.as_mut().map(
+            |fw| match startup::try_load_xdp_firewall_reject(&ebpf_dir, fw) {
+                Ok(reject_loader) => {
+                    ebpf_state.add_loader(reject_loader);
+                    true
+                }
+                Err(e) => {
+                    warn!("xdp-firewall-reject load failed (REJECT falls back to DROP): {e}");
+                    false
+                }
+            },
+        );
+    let reject_ok = if config.firewall.enabled {
+        Some(reject_ok.unwrap_or(false))
+    } else {
+        None
+    };
+    publish_without_attach(
+        services,
+        &mut program_status,
+        "xdp_firewall_reject",
+        reject_ok,
+    );
     if let Some(loader) = fw_loader {
         ebpf_state.add_loader(loader);
     }
@@ -1874,6 +1952,15 @@ pub async fn load_ebpf_programs(
     if program_status.values().any(|loaded| *loaded) {
         services.ebpf_loaded.store(true, Ordering::Relaxed);
     }
+
+    // The guard on program loads is the warden's, attached before this
+    // process loaded anything: what is published is the warden's answer.
+    publish_without_attach(
+        services,
+        &mut program_status,
+        "lsm_bpf_load_guard",
+        startup::load_guard_attached(),
+    );
 
     // ── Guard ──────────────────────────────────────────────────
     // Loaded last, so that its first reading of the agent's descriptors
