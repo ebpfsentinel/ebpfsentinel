@@ -1131,11 +1131,12 @@ async fn wire_firewall_consumers(services: &ServiceHandles, loader: &mut EbpfLoa
         .set_alias_bindings(bindings);
 }
 
-/// A program with no attach of its own here (a tail-call target, or the
-/// warden's guard): answered for where something asked for it (`Some`, loaded
-/// or not) and cleared where nothing did (`None`), so a feature nobody turned
-/// on is not reported missing.
-fn publish_without_attach(
+/// A program's load state, on the gauge the enterprise inventory and the
+/// heartbeat read and in the status map: answered where something asked for it
+/// (`Some`, loaded or not) and cleared where nothing did (`None`), so a feature
+/// nobody turned on is not reported missing. The map answers for every program
+/// either way, at false when it is off.
+fn publish_load_state(
     services: &ServiceHandles,
     program_status: &mut std::collections::HashMap<String, bool>,
     program: &str,
@@ -1361,7 +1362,7 @@ pub async fn load_ebpf_programs(
                         false
                     }
                 };
-                publish_without_attach(
+                publish_load_state(
                     services,
                     &mut program_status,
                     "xdp_ratelimit_syncookie",
@@ -1372,7 +1373,7 @@ pub async fn load_ebpf_programs(
             }
             Err(e) => {
                 warn!("xdp-ratelimit load failed (degraded mode): {e}");
-                publish_without_attach(
+                publish_load_state(
                     services,
                     &mut program_status,
                     "xdp_ratelimit_syncookie",
@@ -1382,8 +1383,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("xdp_ratelimit");
-        publish_without_attach(
+        publish_load_state(
             services,
             &mut program_status,
             "xdp_ratelimit_syncookie",
@@ -1391,7 +1391,12 @@ pub async fn load_ebpf_programs(
         );
         false
     };
-    program_status.insert("xdp_ratelimit".to_string(), rl_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "xdp_ratelimit",
+        config.ratelimit.enabled.then_some(rl_ok),
+    );
 
     // Take INTERFACE_GROUPS and tenant maps from xdp-firewall before moving loader
     if let Some(ref mut loader) = fw_loader {
@@ -1427,7 +1432,7 @@ pub async fn load_ebpf_programs(
     } else {
         None
     };
-    publish_without_attach(
+    publish_load_state(
         services,
         &mut program_status,
         "xdp_firewall_reject",
@@ -1484,10 +1489,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_ids");
         false
     };
-    program_status.insert("tc_ids".to_string(), ids_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_ids",
+        (config.ids.enabled || config.l7.enabled).then_some(ids_ok),
+    );
 
     // ── TC Threat Intel ─────────────────────────────────────────
     let ti_ok = if config.threatintel.enabled {
@@ -1526,10 +1535,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_threatintel");
         false
     };
-    program_status.insert("tc_threatintel".to_string(), ti_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_threatintel",
+        config.threatintel.enabled.then_some(ti_ok),
+    );
 
     // ── TC DNS ──────────────────────────────────────────────────
     let dns_ok = if config.dns.enabled {
@@ -1558,10 +1571,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_dns");
         false
     };
-    program_status.insert("tc_dns".to_string(), dns_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_dns",
+        config.dns.enabled.then_some(dns_ok),
+    );
 
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
@@ -1614,10 +1631,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("uprobe_dlp");
         false
     };
-    program_status.insert("uprobe_dlp".to_string(), dlp_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "uprobe_dlp",
+        config.dlp.enabled.then_some(dlp_ok),
+    );
 
     // ── Socket attribution ──────────────────────────────────────
     // Loaded here as well as at start-up, so a binary that drives the
@@ -1710,10 +1731,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_conntrack");
         false
     };
-    program_status.insert("tc_conntrack".to_string(), ct_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_conntrack",
+        config.conntrack.enabled.then_some(ct_ok),
+    );
 
     // ── TC NAT ──────────────────────────────────────────────────
     let mut nat_reverse = None;
@@ -1753,12 +1778,20 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_nat_ingress");
-        services.metrics.clear_ebpf_program_status("tc_nat_egress");
         false
     };
-    program_status.insert("tc_nat_ingress".to_string(), nat_ok);
-    program_status.insert("tc_nat_egress".to_string(), nat_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_nat_ingress",
+        config.nat.enabled.then_some(nat_ok),
+    );
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_nat_egress",
+        config.nat.enabled.then_some(nat_ok),
+    );
 
     // ── TC Scrub ────────────────────────────────────────────────
     let scrub_ok = if config.firewall.scrub.enabled {
@@ -1779,10 +1812,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_scrub");
         false
     };
-    program_status.insert("tc_scrub".to_string(), scrub_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_scrub",
+        config.firewall.scrub.enabled.then_some(scrub_ok),
+    );
 
     // ── TC QoS ──────────────────────────────────────────────────
     let qos_ok = if config.qos.enabled {
@@ -1813,11 +1850,15 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services.metrics.clear_ebpf_program_status("tc_qos");
         services.cgroup_shaping.clear_maps();
         false
     };
-    program_status.insert("tc_qos".to_string(), qos_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "tc_qos",
+        config.qos.enabled.then_some(qos_ok),
+    );
     if qos_ok && services.cgroup_shaping.supported() {
         // The achieved rate is the bytes counted between two reads over the
         // time between them, on the agent's own monotonic clock.
@@ -1866,12 +1907,14 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
-        services
-            .metrics
-            .clear_ebpf_program_status("xdp_loadbalancer");
         false
     };
-    program_status.insert("xdp_loadbalancer".to_string(), lb_ok);
+    publish_load_state(
+        services,
+        &mut program_status,
+        "xdp_loadbalancer",
+        config.loadbalancer.enabled.then_some(lb_ok),
+    );
 
     // ── Populate interface groups across all programs ────────────
     {
@@ -1955,7 +1998,7 @@ pub async fn load_ebpf_programs(
 
     // The guard on program loads is the warden's, attached before this
     // process loaded anything: what is published is the warden's answer.
-    publish_without_attach(
+    publish_load_state(
         services,
         &mut program_status,
         "lsm_bpf_load_guard",
