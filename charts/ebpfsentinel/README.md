@@ -31,15 +31,11 @@ This chart deploys the **open-source edition**. Every security domain is include
 
 ### OSS Limitations
 
-- **Auto-response**: max 3 policies (unlimited in Enterprise)
-- **PCAP capture**: manual only, 60s max, 1 concurrent (Enterprise adds event-triggered, ring buffer, multi-capture)
-- **No HA clustering**: single agent per node, no state replication (Enterprise adds active-passive HA)
-- **No multi-agent per node**: one DaemonSet only (Enterprise supports multi-tenant node sharing)
-- **No SIEM connectors**: use OTLP export or webhook sinks (Enterprise adds Splunk, Elastic, QRadar, S3, etc.)
-- **No ML anomaly detection**: rule-based detection only (Enterprise adds ONNX-based streaming ML)
-- **No compliance reporting**: use Prometheus + Grafana (Enterprise generates PCI-DSS, NIS2, DORA reports)
-
-See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/docs/features/enterprise/overview.md) for the full comparison.
+Every engine is in the OSS agent under AGPL-3.0, on as many nodes as you like.
+The few that stop at a ceiling, and what the commercial layer adds, are listed
+once, in the main README:
+[Why eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel#why-ebpfsentinel)
+and [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel#oss-vs-enterprise).
 
 ## Kubernetes Deployment Constraints
 
@@ -106,14 +102,31 @@ skipped sweep from reporting.
 
 ### CNI Compatibility
 
-eBPFsentinel attaches to the **host physical interface** (e.g., `eth0`), not to the CNI bridge or veth pairs. This means:
+By default the agent attaches to the **host interfaces** named in
+`agent.interfaces` (e.g., `eth0`), not to the CNI bridge or the pods' veth
+pairs:
 
-- It does **not** interfere with pod-to-pod (east-west) traffic managed by the CNI
-- It **only** sees north-south traffic entering/leaving the node
-- Compatible with: Calico, Flannel, Cilium, Weave, any CNI
-- Firewall rules apply to the host interface - they affect all pods on the node equally
+- It sees north-south traffic entering and leaving the node; firewall rules
+  there apply to every pod on the node equally
+- It does not touch pod-to-pod (east-west) traffic the CNI carries
+- It runs beside Calico, Flannel, Cilium, Weave or any other CNI
 
-For per-pod network policy, use your CNI's native policy engine (e.g., Cilium NetworkPolicy). eBPFsentinel complements CNI by adding network security capabilities (IDS, DLP, threat intel, DDoS) at the node boundary.
+Per-pod enforcement is opt-in, through cgroup hooks on each pod's containers
+rather than the interfaces:
+
+- `container.kubernetes.networkPolicy.mode: observe|enforce` (with
+  `container.kubernetes.enabled`) has the agent watch the standard
+  `NetworkPolicy`, `Pod`, `Namespace`, `Service` and `EndpointSlice` objects
+  and carry the policies out on this node's pods. No CRD and no operator.
+- `container.kubernetes.clusterIp` resolves Service cluster addresses at
+  `connect()` for the pods it names.
+
+This chart does not check whether the CNI already enforces `NetworkPolicy`.
+Set `enforce` only on a CNI that enforces nothing (Flannel, kubenet): beside
+Cilium, Calico, Antrea and the like it puts two enforcers on one policy, and
+when they read it differently nobody can tell which one refused a connection.
+Start with `observe`. See
+[network policy](https://docs.ebpfsentinel.io/features/network-policy).
 
 ## Quick Start
 

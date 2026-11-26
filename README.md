@@ -22,12 +22,14 @@
 </p>
 
 eBPFsentinel is a network and host security agent for Linux, written in Rust. It
-loads 31 eBPF programs at XDP, TC, cgroup, LSM, tracepoint and uprobe hooks and
+ships 31 eBPF programs for XDP, TC, cgroup, LSM, tracepoint and uprobe hooks and
 takes its verdicts there: an unwanted packet is dropped in the network driver
 before the kernel has allocated anything for it, a TLS payload is read in the
 application's own library without a proxy or a key, and a process is named,
-followed and stopped from the kernel. About **1 µs of kernel time per packet**
-on the full receive path ([benchmark results](tests/perf/BENCHMARK-RESULTS.md)).
+followed and stopped from the kernel. About **1.2 to 1.9 µs of kernel time per
+packet** on the full receive path, every feature on: 1848, 1360 and 1238 ns per
+packet at 25 kpps, 50 kpps and the highest rate in the 2026-11-08 run
+([benchmark results](tests/perf/BENCHMARK-RESULTS.md#what-verifying-the-rule-scans-once-costs-a-packet)).
 
 ## Why eBPFsentinel
 
@@ -49,7 +51,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **Stateful Firewall** | L3/L4 filtering with conntrack, GeoIP, zones, scheduling, shadow rules, VLAN/QinQ, IPv4/IPv6 |
 | **Workload Firewall** | Rules naming an executable, a systemd unit, a cgroup or a container, decided at `connect()`, `sendmsg()` and `bind()`, with destinations by name or by remote workload |
 | **Executables Allowed on the Network** | Only listed executables open internet sockets, decided in the kernel from the calling task. Needs the BPF LSM active at boot (`lsm=` including `bpf`), which not every distribution or host provider sets: `ebpfsentinel-agent ebpf host-check` answers for your own host in one line, as any user with no agent running, and names the `lsm=` value to set; a running agent reports the same in `/api/v1/ebpf/kernel-features`. Without it an observing list is skipped and an enforcing one refuses to start the agent |
-| **Kubernetes NetworkPolicy** | Enforces `NetworkPolicy` objects where the CNI leaves them unenforced (Flannel, kubenet) |
+| **Kubernetes NetworkPolicy** | The agent watches the standard `networking.k8s.io/v1` `NetworkPolicy`, `Pod`, `Namespace`, `Service` and `EndpointSlice` objects itself and enforces them on its node's pods through cgroup hooks, where the CNI leaves them unenforced (Flannel, kubenet). No CRD and no operator. Off by default: `container.kubernetes.enabled` plus `network_policy.mode: observe` counts what would be refused, `enforce` refuses it (chart value `container.kubernetes.networkPolicy.mode`). The chart does not check whether the CNI already enforces; the operator adds that check and translates `CiliumNetworkPolicy`. See [network policy](https://docs.ebpfsentinel.io/features/network-policy) |
 | **Cluster IP at connect()** | An opted-in pod's connection to a Service address sent straight to a ready backend, without kube-proxy's NAT |
 | **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB |
 | **L4 Load Balancer** | TCP/UDP/TLS passthrough with five algorithms: round-robin, weighted, ip-hash, least-conn, maglev |
@@ -156,6 +158,7 @@ flowchart TB
             lsm["lsm-exec-network\n(listed executables only)"]
             digest["lsm-exec-digest\n(executable SHA-256 from IMA at exec)"]
             guard["lsm-bpf-guard\n(the agent's maps and links are its own)"]
+            loadguard["lsm-bpf-load-guard\n(warden-loaded: a token load passes only signed)"]
             tamper["lsm-tamper-guard\n(no unsigned stop, trace or unpin; licensed)"]
             wref["lsm-write-refusal\n(a writer past a count under watched directories)"]
             redir["cgroup-connect-redirect\n(selected workloads to the TLS proxy)"]
@@ -304,24 +307,34 @@ upgrade behaviour and the NixOS module are in the
 The agent loads eBPF **exclusively** through a BPF token - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
 
 ```bash
-REL=<release>
+REL=<release>      # the release tag, without its v
+VER=<version>      # the agent's own version, named in that release's notes
+ARCH=amd64         # or arm64
 BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
 mkdir ebpfsentinel && cd ebpfsentinel
-for f in compose.yaml ebpfsentinel-agent.json ebpfsentinel-SHA256SUMS{,.sig,.crt}; do
+for f in compose.yaml ebpfsentinel-agent.json "ebpfsentinel-${VER}-linux-${ARCH}.tar.gz" \
+         ebpfsentinel-SHA256SUMS{,.sig,.crt}; do
   curl -fsSLO "$BASE/$f"
 done
 # Verify ebpfsentinel-SHA256SUMS with cosign as in the tarball section below, then:
 sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
 
-# Your configuration sits beside them. The agent runs as uid 65534 and rejects
-# a world-readable config:
-#   sudo chown 65534:65534 ebpfsentinel.yaml && sudo chmod 640 ebpfsentinel.yaml
+# The compose file mounts ./ebpfsentinel.yaml: take the reference configuration
+# (or one of the profiles beside it) out of the release tarball, name your
+# interfaces in it, and give it to the agent's uid, which rejects a
+# world-readable file:
+tar xzf "ebpfsentinel-${VER}-linux-${ARCH}.tar.gz" --strip-components=1 \
+  "ebpfsentinel-${VER}-linux-${ARCH}/ebpfsentinel.yaml"
+$EDITOR ebpfsentinel.yaml                    # agent.interfaces
+sudo chown 65534:65534 ebpfsentinel.yaml && sudo chmod 640 ebpfsentinel.yaml
+
 docker compose up -d        # starts the warden broker + the agent
 docker compose logs -f
 ```
 
 The compose file of a release names that release's images, so upgrading is
-fetching the next release's two files; no checkout is involved.
+fetching the next release's `compose.yaml` and seccomp profile; the
+configuration stays yours, and no checkout is involved.
 
 The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://docs.ebpfsentinel.io/operations/deployment/bpf-token) for the systemd and Kubernetes paths and the full capability matrix.
 
@@ -410,7 +423,7 @@ cargo xtask ebpf-build        # eBPF programs (the pinned nightly)
 sudo chown 65534 config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
 sudo mkdir -p /run/ebpfsentinel
 sudo ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml warden-policy \
-  --output /run/ebpfsentinel/warden-policy.json
+  --output-file /run/ebpfsentinel/warden-policy.json
 sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock \
   --policy /run/ebpfsentinel/warden-policy.json &
 sudo unshare --mount --propagation private sh -c \
@@ -436,12 +449,36 @@ agent:
 
 ```bash
 curl http://127.0.0.1:8080/healthz     # liveness probe, answers without a key
-# Every other route authenticates. With no method configured, the agent drew a
-# key at first start, printed it once and kept it:
+```
+
+Every other route authenticates. With no method configured, the agent drew a
+key at first start, logged it once and kept it in its state directory, which is
+somewhere else on each install path:
+
+```bash
+# Package, tarball or source build: the state directory is on the host
 export EBPFSENTINEL_TOKEN=$(sudo cat /var/lib/ebpfsentinel/auth/api-key)
+
+# Docker Compose: the state directory is the ebpfsentinel-state volume
+export EBPFSENTINEL_TOKEN=$(sudo cat "$(docker volume inspect -f '{{.Mountpoint}}' ebpfsentinel_ebpfsentinel-state)/auth/api-key")
+
+# Helm, with no auth.existingSecret: each node keeps its own key, at
+# /var/lib/ebpfsentinel/k8s/<namespace>/<release>/auth/api-key on the node, and
+# the agent logged it at first start
+kubectl -n ebpfsentinel logs ds/ebpfsentinel -c agent | grep "API key was generated"
+# Helm, with auth.existingSecret: the key is that Secret's
+export EBPFSENTINEL_TOKEN=$(kubectl -n ebpfsentinel get secret <secret> -o jsonpath='{.data.api-key}' | base64 -d)
+```
+
+```bash
 ebpfsentinel-agent status              # agent + per-engine status, reads the variable
 curl -H "X-API-Key: $EBPFSENTINEL_TOKEN" http://127.0.0.1:8080/api/v1/firewall/rules
 ```
+
+Run beside the agent, the command line finds the key by itself:
+`docker compose exec agent ebpfsentinel-agent status` and
+`kubectl -n ebpfsentinel exec ds/ebpfsentinel -c agent -- ebpfsentinel-agent status`
+need no variable.
 
 The control plane is shut by default: it authenticates, and it stays on
 loopback unless TLS is configured. Both are one setting away from being opened
