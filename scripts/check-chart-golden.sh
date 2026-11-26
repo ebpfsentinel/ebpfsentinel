@@ -70,4 +70,31 @@ else
   echo "ok   baseline refusal leaves the agent's profile out"
 fi
 
+# NetworkPolicy and cluster address resolution run on the pods the agent
+# watches. Either set without the pod watcher would vanish from the rendered
+# configuration, so the render refuses it and names the value to turn on.
+refused() {
+  local name="$1"
+  shift
+  if out="$(render "$@" 2>&1)"; then
+    echo "FAIL $name was expected to be refused" >&2
+    status=1
+  elif ! grep -q "needs container.kubernetes.enabled=true" <<<"$out"; then
+    echo "FAIL $name refused for another reason:" >&2
+    echo "$out" >&2
+    status=1
+  else
+    echo "ok   $name refused without the pod watcher"
+  fi
+}
+refused "networkPolicy.mode=enforce" --set container.kubernetes.networkPolicy.mode=enforce
+refused "networkPolicy.mode=observe" --set container.kubernetes.networkPolicy.mode=observe
+refused "clusterIp.enabled" --set container.kubernetes.clusterIp.enabled=true
+if render --set container.kubernetes.enabled=true,container.kubernetes.networkPolicy.mode=enforce >/dev/null; then
+  echo "ok   networkPolicy.mode=enforce renders with the pod watcher"
+else
+  echo "FAIL networkPolicy.mode=enforce with the pod watcher was refused" >&2
+  status=1
+fi
+
 exit "$status"

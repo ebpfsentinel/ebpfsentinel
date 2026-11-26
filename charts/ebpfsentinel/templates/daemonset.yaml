@@ -1,3 +1,13 @@
+{{- $k8s := .Values.container.kubernetes }}
+{{- if not (has $k8s.networkPolicy.mode (list "off" "observe" "enforce")) }}
+{{- fail (printf "container.kubernetes.networkPolicy.mode: %q is not one of off, observe, enforce" $k8s.networkPolicy.mode) }}
+{{- end }}
+{{- if and (ne $k8s.networkPolicy.mode "off") (not $k8s.enabled) }}
+{{- fail (printf "container.kubernetes.networkPolicy.mode=%s needs container.kubernetes.enabled=true: the agent compiles NetworkPolicy from the pods it watches, and without the pod watcher the mode would be dropped from its configuration" $k8s.networkPolicy.mode) }}
+{{- end }}
+{{- if and $k8s.clusterIp.enabled (not $k8s.enabled) }}
+{{- fail "container.kubernetes.clusterIp.enabled=true needs container.kubernetes.enabled=true: the agent resolves Service addresses for the pods it watches" }}
+{{- end }}
 {{- with (include "ebpfsentinel.psaViolations" . | trim) }}
 {{- fail (printf "daemonset.podSecurityAdmission=%s, but these values ask for what that level forbids:\n%s\nEither relax daemonset.podSecurityAdmission or turn the listed values off." $.Values.daemonset.podSecurityAdmission .) }}
 {{- end }}

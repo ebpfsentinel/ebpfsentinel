@@ -99,8 +99,9 @@ Security context:
   {{ .Values.daemonset.bpfToken.bpffsPath }}. The agent (uid {{ .Values.daemonset.securityContext.runAsUser }}, all caps dropped)
   self-unshares a user namespace, has the warden delegate the bpffs, then loads
   its own eBPF through the token - holding no host capabilities.
-  Verify: kubectl -n {{ .Release.Namespace }} exec ds/{{ include "ebpfsentinel.fullname" . }} -c agent -- \
-    sh -c 'curl -s localhost:{{ .Values.agent.metricsPort }}/metrics | grep bpf_token_used'
+  Verify (the image carries no shell, so read the metrics from outside):
+    kubectl -n {{ .Release.Namespace }} port-forward ds/{{ include "ebpfsentinel.fullname" . }} {{ .Values.agent.metricsPort }} &
+    curl -s localhost:{{ .Values.agent.metricsPort }}/metrics | grep bpf_token_used
 
 Secrets management (TLS certs, JWT keys, API keys):
 
